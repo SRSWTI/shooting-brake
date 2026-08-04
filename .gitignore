@@ -120,6 +120,21 @@ experiments/transport_test_v2
 **/c/qwen36_serve
 **/c/backend_cuda_test
 
+# Shooting Brake phase-local generated executables
+/phase1/b70_provider
+/phase1/b70_provider_test
+/phase1/b70_provider_tests
+/phase2/b70_ring_provider
+/phase2/b70_ring_integration_test
+/phase2/shared_ring_tests
+/phase2/memfd_transport_host
+/phase2/memfd_transport_provider
+
+# Local third-party research checkouts
+/phase0/guidellm/
+/Model-Optimizer/
+/QuixiAI-Model-Optimizer/
+
 # Editor, OS, and session state
 .vscode/
 .idea/

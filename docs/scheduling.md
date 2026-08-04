@@ -2,225 +2,169 @@
 
 ## Purpose and status
 
-This document defines the scheduling policy for decode, continuous batching, prefill, and background work in Shooting Brake. It elaborates the ownership and per-layer execution model in [`architecture.md`](architecture.md). Transport timing and B70 eligibility are measured under [`benchmarking.md`](benchmarking.md); expert ownership is supplied by [`placement.md`](placement.md).
+This document defines decode, continuous-batch, prefill, provider, and recovery scheduling for the one-RTX-5090 plus one-B70 production design. It follows [`../plan.md`](../plan.md), uses ownership from [`placement.md`](placement.md), and supplies the measurement classes in [`benchmarking.md`](benchmarking.md).
 
-This is a **normative design policy**, not a claim that the scheduler or its performance has been implemented or validated. The policy preserves the architecture's correctness rule: the state owner computes canonical routes, required local/remote/CPU partials execute concurrently where possible, and the state owner performs the required ordered join.
+This is a normative target, not a claim that the Qwen-scoped `HybridMoERunner`/`HybridRoutedExperts` integration or batched llm-scaler provider is complete. The proven Colibri worker is a single-token reference, not the production scheduler.
 
 ## Core invariants
 
-1. The RTX 5090 remains the state owner. It owns attention and KV state, router execution, dense/shared paths, local experts, ordered partial reduction, and sampling.
-2. Scheduling changes where and when an already selected route executes; it does not change canonical expert IDs, route weights, precision, or reduction semantics.
-3. Publish eligible B70 work immediately after routing. Do not serialize remote dispatch behind independent local work.
-4. Execute RTX 5090-local experts, B70-resident experts, and required CPU cold work concurrently.
-5. Join only the required participants for the current sparse layer, and join each required partial exactly once in the defined order.
-6. Prediction and promotion are optional. Foreground execution never waits for predicted routes, background prepack, NVMe staging, or expert promotion.
-7. No ordinary foreground token waits for an NVMe expert read. Missing or unusable remote work follows the exact CPU fallback policy.
-8. Batching is bounded by both a maximum batching window and request deadlines. Throughput aggregation must not create an unbounded wait.
-9. Foreground requests nearing deadline dispatch without additional microbatch delay.
-10. Foreground requests preempt background queues at dispatch boundaries. Work already inside a non-preemptible device stage is not assumed to be interruptible.
-11. B70 assignment is determined by measured complete remote-path tail latency for the relevant batch class, not by device-local GEMM speed.
+1. Upstream vLLM retains serving, request admission, continuous batching, attention/KV/recurrent scheduling, and canonical CUDA router/top-k.
+2. The immutable placement map partitions selected routes into CUDA-owned and B70-owned sets without changing IDs, routing weights, or reduction semantics.
+3. There is at most one aggregated B70 operation per active MoE layer and upstream-vLLM scheduler step, never one submission per request.
+4. Only rows with at least one B70-owned route are staged. A zero-remote-route layer performs no B70 submission.
+5. Publish the B70 request as soon as routing and asynchronous D2H staging permit; run local CUDA routed experts and the CUDA shared expert concurrently.
+6. The B70 returns one already-weighted, route-reduced `[M_remote, hidden]` wire partial for the staged token rows. CUDA scatters it into the full `[M, hidden]` batch and performs the join before final tensor/expert-parallel reduction.
+7. CPU matrix work is absent from the normal schedule. CPU or available CUDA executes only exact failed-route recovery.
+8. The hot path uses fixed pinned-ring and grow-only provider buffers. It performs no per-forward allocation, weight movement, quantization, `.item()`, Python polling loop on the CUDA worker, or device-wide synchronization.
+9. Request cancellation, ring backpressure, provider timeout/restart, and stale generations preserve exactly-once route accounting.
+10. Kernel selection is a provider capability/policy decision qualified by shape measurements; model code does not encode undocumented model-name thresholds.
 
-## Work classes
+## Scheduler-step transaction
 
-| Class | Latency policy | Aggregation policy | B70 policy |
-|---|---|---|---|
-| Latency-critical batch-one decode | Tightest deadline; publish required work immediately; do not delay solely to form a microbatch | No optional batching delay when the foreground request is ready or nearing deadline | Eligible only when measured batch-one remote p99 is lower than measured batch-one CPU-fallback p99 |
-| Foreground interactive continuous decode | Strict per-request deadline | Small, deadline-bounded aggregation; dispatch early as the oldest request nears its deadline | Use only for measured winning token-batch classes |
-| Normal service continuous decode | Service deadline | Small aggregation window, still bounded by the oldest request and maximum window | Use only for measured winning token-batch classes |
-| Prefill | Prompt-processing deadline; less latency-sensitive than decode but still bounded | Aggressively group prompt token-route pairs and use larger transfers/windows | Eligible in measured winning prefill/batch classes; may use multiple B70s concurrently |
-| Background agent or analysis | Lower priority than foreground | Larger bounded window | Eligible in measured winning batch classes |
-| Maintenance/background calibration | Lowest foreground priority; runs only without delaying required foreground dispatch | Batch route calibration, prepack validation, or duplicate correctness sampling | Eligible in measured winning batch classes; preempted by foreground at dispatch boundaries |
-
-The table does not establish one fixed deadline value. Each request carries its service-class deadline, and the configured maximum batching window is part of the benchmark manifest. A class name never authorizes waiting past either bound.
-
-## Route aggregation key
-
-When multiple sequences or prompt rows are available, aggregate token-route pairs by:
+For `M` token rows scheduled at an active routed-MoE layer:
 
 ```text
-(layer, device, expert, quantization format)
+upstream vLLM CUDA router/top-k
+    -> HybridRoutedExperts partitions canonical routes
+    -> stage only remote-bearing rows in a fixed ring slot
+    -> publish one B70 layer request
+       || run stock-compatible local CUDA routed experts
+       || run the CUDA shared expert where its dependency permits
+    -> provider executes all B70-owned token/route pairs
+    -> provider returns one weighted [M_remote, hidden] wire partial plus token_row_map
+    -> asynchronous H2D to a preallocated CUDA buffer
+    -> CUDA local + B70 remote routed addition
+    -> stock shared/residual continuation
 ```
 
-This grouping converts repeated GEMV-like work into grouped GEMM while preserving the original token identity, route weight, placement epoch, and deterministic inverse-gather mapping. Rows from different layers, owners, expert identities, or quantization formats are not combined into one expert job.
+The request retains original token/request mapping, layer, sequence, placement generation, weight/provider generation, canonical expert IDs and weights, route mask, and cancellation state. Aggregation changes only execution shape; it never merges request lifetimes or router semantics.
 
-## Bounded dispatch rule
+The local branch represents B70-owned route positions as invalid/skipped routes when the selected CUDA backend supports that contract. Otherwise `HybridRoutedExperts` compacts local routes and unpermutes/reduces the result. Either implementation is qualified against the same all-CUDA output.
 
-For each ready device/expert queue, dispatch when any one of these conditions becomes true:
+## Workload and kernel classes
 
-```text
-enough expert rows accumulated
-OR oldest request nears its deadline
-OR maximum batching window expires
-```
+The initial logical provider policy is:
 
-The conditions are disjunctive. The scheduler must not wait for all three.
+| Scheduled work | Aggregation | Initial B70 kernel family |
+|---|---|---|
+| `M=1` decode | dispatch the scheduler step without an added provider microbatch wait | llm-scaler tiny INT4 preselected-route path |
+| `1<M<=32` continuous-batch decode | combine all remote-bearing rows from the scheduler step | qualified tiny or small-batch INT4 path |
+| larger decode batch | one layer/step operation | grouped-route path |
+| prefill | group the scheduler step's remote token-route pairs while preserving token mapping | `gather-v2` → grouped `up-v2` → activation → grouped `down-v2` → weighted accumulation |
+| zero B70-owned rows | no ring publication | no provider kernel |
 
-- **Enough rows:** the configured row threshold for the measured batch class has been reached.
-- **Nears deadline:** waiting for more rows would consume the remaining dispatch budget of the oldest request. This condition overrides throughput aggregation.
-- **Window expires:** time since the oldest queued eligible row reached the queue has reached the class's maximum batching window.
+Thresholds are benchmark-selected for each qualified shape and provider bundle. The provider must accept precomputed IDs/weights and must not call a fused entry point that recomputes router/top-k or shared-expert work.
 
-An optional prediction, promotion, prepack, or preload event is never a fourth required condition. Its absence cannot extend the window or block dispatch.
+### No cross-step batching queue
+
+Upstream vLLM already forms the continuous batch. Shooting Brake must not hold a ready scheduler step to accumulate unrelated future requests. One step's rows are the aggregation boundary; ring backpressure may bound admission but does not authorize a hidden microbatch delay. This keeps per-request deadlines, cancellation, and vLLM fairness under the upstream scheduler.
+
+For 32 concurrent one-token requests, the required shape is one `M=32` B70 layer operation, not 32 `M=1` submissions.
 
 ## Decode
 
-Decode produces one new token per active sequence and has the tightest critical path.
+Decode has the tightest sequential dependency. For each active MoE layer:
 
-For every sparse layer:
+1. CUDA computes canonical IDs and weights.
+2. The adapter resolves the immutable placement generation and builds local and remote masks.
+3. If remote rows exist, it reserves one bounded ring slot, begins nonblocking D2H staging, and publishes after copy completion.
+4. CUDA local routed work and the shared expert proceed without waiting for B70 where dependencies allow.
+5. The provider copies into preallocated XPU tensors, remaps only B70-owned routes, and selects the qualified tiny/small/grouped decode kernel.
+6. It writes one weighted partial row per transported token and publishes completion after the XPU-to-host result is visible.
+7. CUDA rejects stale or invalid completion metadata, asynchronously copies the partial, scatters rows if needed, and adds it exactly once.
+8. On exact route failure, recovery replaces only those failed contributions or fails the request explicitly.
 
-1. The state owner computes router logits and canonical top-k routes.
-2. The scheduler resolves the current placement epoch and partitions the selected routes into RTX 5090-local, eligible B70-resident, and required CPU work.
-3. It immediately publishes B70 work that is eligible for the current measured batch class.
-4. It launches RTX 5090-local expert work concurrently.
-5. It launches required CPU cold work concurrently rather than waiting for the local or B70 path to finish.
-6. Each destination computes one weighted partial per original token for its assigned route subset.
-7. The state owner waits at the explicit join for the slowest **required** participant, rejects stale-epoch or otherwise invalid completions, and combines valid partials exactly once in the defined order.
-8. On a B70 timeout or failure, the exact CPU fallback supplies the required computation under the failure policy; stale late output is ignored.
-9. The state owner continues the sequential model path only after the required join is complete.
-
-A B70 may be memory-bandwidth limited at batch one. That is acceptable only if the measured complete resident remote path still beats CPU cold execution at batch-one p99. The scheduler does not infer eligibility from bandwidth arithmetic or isolated kernel measurements.
-
-### Batch-one rule
-
-For latency-critical batch-one decode:
-
-```text
-eligible(B70, batch-one) iff
-    T_remote,p99(batch-one) < T_cpu_fallback,p99(batch-one)
-```
-
-`T_remote` includes CUDA D2H, queueing, B70 H2D, remap, both GEMMs, activation, gather, B70 D2H, CUDA H2D, and join. A device-local B70 win without a complete-path p99 win is insufficient.
-
-If the inequality is not satisfied, selected experts use the qualifying local or CPU path for that class. The scheduler must not hold the request in hope that more tokens, a promotion, or a prediction will make the B70 path attractive.
+The current Colibri observation of roughly 56–100 µs one-token issue/take per active MoE layer is useful for transport and latency decomposition. It does not determine production decode eligibility or performance: upstream-vLLM scheduling, process-ring overhead, llm-scaler dispatch, local overlap, and graph boundaries are different.
 
 ## Continuous batching
 
-With multiple active sequences, the scheduler collects the one decode row from each ready sequence and aggregates token-route pairs by the route aggregation key. It retains per-request deadlines while building device jobs.
+The upstream scheduler supplies one decode row per ready sequence. At every active layer, Shooting Brake aggregates all rows with B70-owned routes into the single request for that step. It preserves:
 
-Dispatch follows the bounded rule:
+- original request and token row;
+- canonical route order, IDs, and weights;
+- local/remote route mask;
+- placement and provider generations; and
+- per-token cancellation/recovery status.
 
-- foreground interactive queues use a strict deadline and the smallest allowed waiting budget;
-- normal service queues use a small aggregation window;
-- background agent or analysis queues may use a larger window;
-- any queue dispatches immediately when its oldest request nears deadline, even below the preferred row threshold.
+One provider job may contain many experts and requests, but every request becomes join-ready only when its required local and remote contributions, or exact replacements, are complete. Cancellation after publication marks the affected rows and prevents a stale result from entering a reused request; it does not allow early slot reuse while either runtime still accesses the buffers.
 
-The scheduler may form independent jobs for different B70s and run them concurrently with RTX 5090-local and required CPU work. It does not wait for a slow or empty destination queue to fill before dispatching a ready destination whose own condition has fired.
+Batch-class telemetry is grouped as `M=1`, `2..32`, and larger decode, with exact `M`, active remote rows, remote routes, and selected kernel reported. Aggregate throughput never substitutes for per-request TTFT/ITL percentiles.
 
-Per-request joins remain explicit. Aggregating rows into one device job does not merge request lifetimes: each request becomes join-ready only when all of its required partials are complete or its defined exact fallback has completed.
+## Prefill and mixed steps
 
-## Prefill
+Prefill retains attention, KV/recurrent state, router/top-k, shared expert, and residual work on CUDA. For the routed branch, preserve the full prompt batch already selected by vLLM:
 
-Prefill uses all batch structure already present in the prompt:
+1. collect remote-bearing rows and their canonical route pairs;
+2. gather/group by the provider's compact B70 expert slots;
+3. execute llm-scaler's prefill gather, grouped up, activation, grouped down, and weighted-accumulation phases in stable buffers;
+4. return one weighted partial per original token row; and
+5. scatter/add on CUDA before the residual continuation.
 
-- group prompt tokens by routed expert using the route aggregation key;
-- dispatch large grouped jobs to eligible B70s;
-- permit concurrent work across multiple B70 cards;
-- retain attention and sequential state ownership on the RTX 5090;
-- use larger staging transfers;
-- allow a longer, still bounded, B70 batching window;
-- allow background preload of experts predicted from earlier prompt chunks.
+Prefill is not implemented as repeated `M=1` decode calls. The provider's negotiated token/route capacities constrain upstream scheduler admission, so every admitted layer step fits one ring slot and produces at most one request/completion transaction. A larger prompt is chunked into multiple upstream scheduler steps before layer execution; the adapter never splits one layer step across multiple ring transactions. A mixed prefill/decode step retains row/request mapping and deadlines. If the provider internally partitions one admitted request among kernel families, that remains one operation and one completion and is reported as such.
 
-Prediction-based preload is an optimization only. If predicted weights or packed experts are not ready when required prompt work reaches its dispatch condition, the scheduler proceeds through the currently eligible resident/local/CPU paths. Prefill never waits beyond its deadline or maximum batching window for a prediction or promotion.
+Decode latency takes priority through upstream vLLM scheduling and bounded provider/ring capacity. Background profiling, artifact preload, provider warmup, and duplicate correctness sampling are never participants in a foreground join.
 
-A larger B70 gain in prefill or high-concurrency decode than in batch-one decode is consistent with the intended XMX execution shape. It does not confer batch-one eligibility.
+## Ring capacity, backpressure, and fairness
 
-## Background work
+Ring slot and token/route capacities are negotiated at startup. When no slot is free:
 
-The B70 pool may absorb the following only when doing so does not delay required foreground dispatch:
+- the CUDA adapter applies bounded backpressure at the provider boundary;
+- it does not allocate an overflow buffer or submit through an unversioned side channel;
+- cancellation and request deadlines remain visible to upstream vLLM; and
+- timeout leads to exact recovery or explicit request failure, never dropped routes.
 
-- speculative or background branches;
-- route-profile calibration;
-- batch agent sessions;
-- low-priority prompt ingestion;
-- placement-prepack validation;
-- duplicate computations used for correctness sampling.
+Queue time, slot occupancy, remote rows, backpressure duration, and exposed join wait are mandatory telemetry. A full-core busy poll is not assumed; completion signaling/polling policy must have measured CPU cost.
 
-Background queues use larger bounded windows and lower dispatch priority. Foreground requests preempt them at dispatch boundaries. The scheduler does not assume it can interrupt an already submitted kernel or transfer; therefore it must bound background submissions so a non-preemptible stage cannot monopolize the next foreground dispatch opportunity.
+## CUDA graph policy
 
-Background results used for speculation, calibration, prediction, or correctness sampling are not required participants in a foreground layer join. Foreground never waits for them.
+Begin hybrid integration in eager mode. A host-mediated provider operation cannot live inside a full CUDA graph replay. The optimization sequence is:
 
-## Priorities, deadlines, and fairness
+1. eager correctness;
+2. upstream vLLM PIECEWISE CUDA graphs with a break around the provider operation; and
+3. dedicated copy streams, events, stable buffers, and segmented capture that removes exposed waits without hiding the external dependency.
 
-Priority controls dispatch order among queues that are ready at the same boundary; deadlines cap aggregation independently of priority.
+Graph optimization must preserve output agreement and exactly-once recovery. The steady-state path must contain no device-wide synchronization. ExLlama-style stream-memory mechanics are an optimization reference only after the fixed process ring is correct.
 
-1. A foreground queue whose oldest request nears deadline dispatches before optional/background work.
-2. Other foreground interactive and normal-service queues dispatch according to their service deadlines and bounded windows.
-3. Prefill uses aggressive aggregation but remains subject to its request deadline and must not block deadline-critical decode dispatch.
-4. Background agent/analysis and maintenance work use spare dispatch opportunities and are preempted by foreground at dispatch boundaries.
+## Failure, cancellation, and restart
 
-Within a batch, retain the original request/token mapping so one hot expert, a skewed route distribution, or a large background batch cannot erase an older foreground request's deadline. Queue depth, queue time, batching-window expiration, and deadline-triggered dispatches are benchmark telemetry; see [`benchmarking.md`](benchmarking.md).
+A provider timeout, device loss, kernel error, invalid generation, or malformed completion produces per-token/per-route failure status. The adapter then recomputes the exact failed routes on an available CUDA/CPU correctness path or fails explicitly. It never joins both recovered and late remote contributions.
 
-This policy does not authorize changing canonical routing, dropping required rows, or substituting approximate computation to meet a deadline. If a required B70 result is late or unavailable, use the defined exact fallback path.
+Provider restart:
 
-## Concurrent execution and join semantics
+1. stops new publication;
+2. invalidates the provider generation and all outstanding completions;
+3. drains/cancels bounded in-flight slots without early reuse;
+4. reloads and verifies the immutable B70 expert bank;
+5. renegotiates capabilities, buffers, and generations; and
+6. resumes only after ownership is complete.
 
-The scheduler constructs one layer execution graph with independent branches:
-
-```text
-canonical routes
-  ├─ RTX 5090 local expert subsets ─┐
-  ├─ eligible B70 expert subsets ──┼─ ordered required join -> next model stage
-  └─ required CPU expert subsets ──┘
-```
-
-The branches launch as soon as their inputs and reusable transport resources are ready. Independent branches do not wait for one another before launch.
-
-A join waits for exactly the participants required by the canonical route partition after applying the failure policy:
-
-- local, remote, and CPU partials assigned to the current token/layer/placement epoch;
-- an exact CPU fallback that replaces a failed or timed-out required remote partial;
-- no prediction, promotion, preload, speculative branch, calibration job, or duplicate correctness sample.
-
-A remote completion that is stale, late after fallback, from the wrong placement epoch, or otherwise invalid is ignored and recorded; it is not joined a second time. Queueing multiple requests or experts never changes exactly-once route accounting.
-
-## B70 eligibility by batch class
-
-Eligibility is an empirical scheduling input derived from the transport-plus-compute matrix in [`benchmarking.md`](benchmarking.md). For every operational class, compare like-for-like p99 values:
-
-```text
-B70 eligible(class) iff
-    T_remote,p99(class) < T_cpu_fallback,p99(class)
-```
-
-The comparison uses the same token rows, route distribution, quantization, output semantics, topology, contention, and cold/warm classification. `T_remote` is the complete path, not only B70 compute.
-
-| Measured outcome | Scheduling consequence |
-|---|---|
-| B70 wins at batch one | B70 may serve latency-critical batch-one decode, subject to current health, residency, deadline, and placement |
-| B70 loses at batch one | Do not use it for latency-critical batch-one decode |
-| B70 wins only at batch `>= 4` | Use it only in winning classes such as batched decode, prefill, concurrent sessions, or background requests |
-| B70 loses for a particular larger batch/topology/contention class | Do not generalize a win from another class; use the qualifying local/CPU path for the losing class |
-| Measurement is absent, stale, or not comparable | Treat B70 as ineligible for that class until the required complete-path measurement exists |
-
-The eligibility table is not a placement decision by itself. The selected expert must also be resident on a healthy B70 in the current placement epoch, and dispatch must still meet the request's bounded conditions. Conversely, optional promotion or prediction never blocks a ready qualifying path.
+CPU recovery is failure handling, not a scheduled concurrent branch. Healthy production traces have zero CPU expert matrix operations.
 
 ## Required scheduler telemetry
 
-Each request/token record must make scheduling behavior auditable:
+Record per layer/step and correlate to the run manifest:
 
-- service and batch class;
-- request deadline and maximum batching window;
-- token index, layer, selected expert IDs, route weights, and owners;
-- placement epoch and B70 eligibility class used;
-- row threshold, rows accumulated, oldest-row age, and which dispatch condition fired;
-- queue depth and queue time per destination;
-- local, remote, and CPU launch/completion times;
-- required join participants and join wait;
-- fallback, timeout, stale/discarded completion, and failure reason;
-- whether prediction, promotion, or preload was available, used, late, or ignored;
-- output token/logit checksum.
+- upstream service class, request IDs, token rows, prefill/decode kind, and exact `M`;
+- canonical expert IDs/weights, owners, remote-bearing rows, and route counts;
+- placement, weight/provider, request, and ring-slot generations;
+- ring queue/occupancy/backpressure, copies, provider kernel family, and completion status;
+- exactly zero or one B70 request per active layer/step;
+- CUDA local routed/shared times, B70 queue/copy/kernel time, branch overlap, exposed join wait, and CUDA add time;
+- cancellation, timeout, recovery, provider restart, stale/discarded completion, and explicit failure;
+- CPU recovery count/time and NVMe reads, both zero on the healthy warmed path;
+- TTFT, ITL, request/output throughput, and prefill throughput; and
+- per-layer/final-logit/generated-token correctness artifact identity.
 
-Report batch-one and continuous batching separately, prefill and decode separately, first-run and warmed operation separately, and p50/p95/p99 rather than only averages. Scheduling acceptance depends on end-to-end evidence and output agreement, not queue throughput alone.
+## Scheduling acceptance
 
-## Scheduling acceptance rules
+The policy is qualified only when:
 
-The scheduling policy is acceptable only when measurement demonstrates all of the following for the exercised classes:
-
-- no foreground request waits for optional prediction, promotion, prepack, preload, or background work;
-- dispatch occurs when any bounded condition fires, and never waits beyond the applicable maximum window or deadline budget;
-- foreground work preempts background queues at dispatch boundaries;
-- RTX 5090-local, eligible B70, and required CPU branches overlap where dependencies allow;
-- each required route is accounted for exactly once at the ordered join;
-- timeout/failure invokes exact fallback and ignores stale late output;
-- batch-one B70 use is backed by a measured complete remote-path p99 win over CPU fallback for batch one;
-- wins at batch 4 or greater are confined to the measured winning batched-decode, prefill, concurrent-session, or background classes;
-- p99, output agreement, topology, contention, and cold/warm behavior remain visible in the evidence.
+- all scheduler-step remote rows are aggregated into one B70 layer request;
+- changing continuous-batch sizes, mixed prefill/decode, completion, cancellation, and zero-remote-route layers preserve output agreement;
+- the dispatch table uses measured provider shape thresholds and no full-fused B70 router/shared path;
+- local CUDA and B70 branches overlap where dependencies permit;
+- fixed buffers show no hot-path allocation, weight movement, or device-wide synchronization;
+- bounded backpressure and restart never accept stale output or lose/double a route;
+- injected failure recomputes exact routes or fails explicitly;
+- normal-path CPU expert matrix work and warmed foreground NVMe reads are zero; and
+- throughput, TTFT, ITL, and capacity are reported against the identical stock all-CUDA upstream-vLLM workload, with Colibri results labeled reference evidence only.

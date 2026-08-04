@@ -2,154 +2,157 @@
 
 ## Purpose and status
 
-This document defines the memory planes, owners, persistence boundaries, invalidation rules, and budget constraints for the Shooting Brake design in [`architecture.md`](architecture.md). It is a design contract; it does not claim that the complete model is resident, that device memories form a unified pool, or that the target capacities have been validated. Hardware and transfer assumptions are governed by [`hardware.md`](hardware.md).
-
-“Long-term memory” is not one cache. Model weights, inference context, placement learning, and application semantics have different authorities and lifecycles and must remain separate.
+This document defines memory ownership, persistence, fixed-buffer boundaries, invalidation, and capacity accounting for the production design in [`architecture.md`](architecture.md) and [`../plan.md`](../plan.md). It is a design contract, not a claim that the upstream-vLLM plus B70 provider path has been implemented or that a target model has been admitted.
 
 ## Global rules
 
-1. Every allocation belongs to exactly one plane and one current memory domain. Capacity on the RTX 5090, each B70, host DDR5, and NVMe must be accounted independently; their nominal capacities must not be summed as unified VRAM.
-2. The RTX 5090 is the state owner. It remains authoritative for active context, attention/KV state, router decisions, dense and shared layers, sampling, and the sequential residual stream.
-3. B70s are resident expert workers, not context owners. Initial serving does not distribute KV, prefix, sequence, or sampler state to them.
-4. Device placement changes performance, not the requested model computation. A missing or unhealthy resident copy must resolve to an exact available execution path, not an approximation silently substituted for it.
-5. NVMe is outside the normal warmed token path. Ordinary foreground decode must not synchronously read expert weights from storage.
-6. Each plane has an explicit budget and admission policy. Allocation failure must not be hidden by borrowing unbounded space from another plane or by introducing a foreground NVMe dependency.
-7. Persistence does not imply foreground ownership. Host or NVMe copies may be recovery or inactive-state backing while the active authoritative state remains elsewhere.
+1. Every allocation has one owner and one address domain. RTX 5090 VRAM, B70 VRAM, pinned host memory, pageable host memory, and NVMe are never described as unified VRAM.
+2. The upstream vLLM CUDA worker is the state owner. Active attention, KV/recurrent state, router/top-k, dense/shared paths, residual stream, local experts, sampling, and serving state stay on the RTX 5090.
+3. The isolated B70 provider owns only B70-resident routed-expert weights, stable XPU buffers, streams, and kernel execution.
+4. Hot routed experts have immutable CUDA ownership; cold/overflow routed experts have immutable B70 ownership for the loaded placement generation. There is no foreground weight migration.
+5. CPU memory and compute are orchestration and exact emergency recovery only. CPU matrix compute is absent from the normal path.
+6. NVMe supplies validated artifacts at startup or recovery. Ordinary warmed inference never synchronously loads an expert from storage.
+7. The normal path transports activation rows, canonical route metadata, and one weighted compact `[M_remote, hidden]` B70 wire partial plus its row map; CUDA scatters it into the full `[M, hidden]` batch. It never transports expert weights.
+8. Capacity claims use actual allocated and reserved bytes, and capacity gain is reported together with throughput and latency cost against stock all-CUDA upstream vLLM.
 
-## Plane 1: model-weight memory
+## Plane 1: immutable model weights
 
-### Tier ownership
-
-| Tier | Intended contents | Owner and lifetime | Foreground rule |
+| Domain | Resident contents | Owner and lifetime | Normal-path rule |
 |---|---|---|---|
-| RTX 5090 hot tier | Dense core, shared experts, and hottest routed experts | State-owner runtime; resident for the loaded model/placement epoch | Local execution; preserve capacity reserved for context and runtime scratch |
-| B70 warm tiers | Separately resident routed-expert banks | Each B70 worker owns its own arena and queues; residency is permanent or placement-epoch-stable | Execute only experts present in that worker's admitted bank; no token-path weight migration |
-| DDR5 cold tier | Complete exact cold routed bank **only for models that fit the configured host-memory budget** | CPU fallback provider | Exact CPU execution and timeout recovery without changing requested expert IDs, weights, or precision |
-| NVMe frozen tier | Full model repository, packed source or frozen alternate formats, cold-start material, and checkpoints | Storage/recovery layer | Startup, checkpoint recovery, and optional background preload only; never an ordinary per-token expert tier |
+| RTX 5090 VRAM | embeddings, attention, KV/recurrent machinery, dense layers, router, shared expert, LM head, and hot routed experts | upstream vLLM CUDA worker; immutable for the loaded model/placement generation | stock-compatible CUDA execution; reserve space for KV, runtime scratch, copy/join buffers, and safety headroom |
+| B70 VRAM | compact cold/overflow routed-expert bank in the provider-qualified signed-S4/INT4 layout | isolated B70 provider; loaded once and immutable for the weight/placement generation | execute only B70-owned selected routes; no router, shared expert, attention, or sampling |
+| Host memory | manifest/configuration, control state, pinned ring, telemetry, and any explicitly admitted exact recovery representation | CPU orchestration/recovery owner | no normal-path matrix multiplication and no normal expert tier |
+| NVMe | source checkpoint, CUDA artifact, B70 artifact, provider bundle, and recovery material | durable artifact store | startup/provider restart/recovery only |
 
-“Hot,” “warm,” “cold,” and “frozen” describe placement and access policy, not a coherent address space. A weight resident on one B70 is not local to another B70 or to the RTX 5090. The transport path moves activations and weighted partials, not expert weights, during ordinary decode.
+CUDA and B70 physical quantization may differ, but both artifacts must be derived from the identical higher-precision source checkpoint. The model/provider manifest records artifact fingerprints, tensor dimensions, top-k, dtype, group size, layout, kernel capability, protocol version, placement fingerprint, and weight generation. Startup fails closed on disagreement.
 
-### Persistence and invalidation
+A model or weight-generation change invalidates both device banks, placement maps, recovery representations, and in-flight work. A placement-generation change invalidates routing to the old compact slots. No late completion may cross either boundary.
 
-The NVMe repository is the durable source for model startup and recovery. RTX 5090 and B70 resident arenas are derived runtime state and can be reconstructed from validated packed artifacts. DDR5 fallback contents remain admissible only while they exactly match the active model, expert precision/format, and placement metadata.
+### Capacity admission
 
-A model hash or model-version change invalidates resident-device banks, DDR5 fallback banks, packed-artifact associations, and any placement profile tied to the previous model. A placement-epoch change invalidates in-flight routing to the old placement but does not by itself permit a stale weight or response to be reused. Worker completions must match request ID, generation, placement epoch, layer, token count, and buffer version before reduction.
+Budget actual allocatable memory separately:
 
-### Budget and admission
+```text
+RTX 5090:
+  state-owner tensors
++ CUDA-owned hot experts
++ KV/prefix/recurrent state reservation
++ local MoE/shared-expert scratch
++ preallocated remote-partial and join buffers
++ graph/runtime/safety headroom
 
-Budget the RTX 5090 separately for model-owner tensors, local routed experts, active KV/prefix state, pinned-transport participation, scratch, and safety headroom. Budget each B70 for its own packed expert bank, activation/result buffers, command resources, and safety headroom. Budget host DDR5 for the CPU fallback bank, pinned rings, inactive context backing, runtime memory, and operating-system headroom.
+B70:
+  compact cold/overflow expert bank
++ grow-only activation/route/output tensors
++ kernel scratch and streams
++ provider/runtime/safety headroom
 
-Admission must use actual allocatable capacity rather than nominal board or DIMM capacity. If the exact DDR5 fallback bank does not fit after host reservations, the runtime must not describe it as complete.
+Host:
+  fixed pinned request/completion ring
++ exact emergency-recovery resources, if configured
++ provider/CUDA control state and telemetry
++ operating-system headroom
+```
 
-### The 64 GiB / GLM limitation
+An admitted placement satisfies measured packed-byte budgets in both device domains. Nominal board capacity or parameter arithmetic is insufficient. If every selected routed expert does not have exactly one CUDA or B70 normal-path owner, the placement is incomplete and serving must fail closed rather than introduce a CPU or NVMe normal tier.
 
-With 64 GiB of DDR5, a fully RAM-resident 372 GB GLM model is impossible. Even after placing some experts across the RTX 5090 and B70s, the first full-GLM run still requires a storage tier for experts not resident on those GPUs or in RAM. That run must be reported as storage-backed; it is not a “no-NVMe” result.
+Measured capacity gain is the additional model-weight and/or 5090 KV budget made usable by moving qualified cold/overflow expert bytes to B70, after all B70 provider buffers and safety reservations. Report the actual resident bytes in each domain and the corresponding context/concurrency envelope. Do not claim the sum of board capacities as a gain.
 
-For this configuration, GLM-5.2 is an experimental, locality-dependent workload. A smaller model should be used for production unless the exact fallback set fits the admitted DDR5 budget. The NVMe-backed full-GLM path must not be described as robust interactive serving, because ordinary foreground NVMe expert reads are prohibited. A locality miss that can be served only by a synchronous storage read is an admission/configuration failure for the warmed interactive path, not a new execution tier.
+## Plane 2: fixed transport and provider buffers
 
-## Plane 2: context memory
+The CUDA adapter and B70 provider communicate through a versioned fixed pinned-memory ring with multiple bounded slots. Associated buffers are allocated and negotiated at startup:
 
-### Authority and contents
+```text
+activation       [capacity_tokens, hidden]
+expert_ids       [capacity_tokens, topk]
+routing_weights  [capacity_tokens, topk]
+route_mask       [capacity_tokens]
+token/route map  [capacity_routes]
+output           [capacity_tokens, hidden]
+status           [capacity_routes]
+```
 
-The RTX 5090 state-owner runtime owns active:
+Each request carries at least request sequence, ring slot, layer, full scheduler-row count `M`, staged-row count `M_remote`, route count, placement generation, weight/provider generation, activation/output dtype, and status. Only token rows containing at least one B70-owned route are copied; `token_row_map[M_remote]` preserves each original row. The provider returns one already-weighted, B70-route-reduced `[M_remote, hidden]` wire partial. CUDA scatters it into a preallocated zero-initialized `[M, hidden]` buffer, so unstaged tokens have zero B70 contribution.
 
-- KV cache;
-- prefix cache;
-- sequence and request state;
-- sampler state;
-- any future multimodal or tool state that participates in model execution.
+The provider mirrors these capacities with grow-only, stable-address XPU tensors for activation, routes, maps, scratch, and output. No per-forward tensor, scratch, event, descriptor, or weight allocation is allowed. A layer/step with zero remote routes consumes no B70 slot and performs no B70 submission.
 
-This authority is not delegated to B70 workers. B70 requests carry the activations and local route metadata needed for routed-expert computation; they do not confer ownership of attention or conversation state.
+A slot is reusable only after both runtimes have completed their access. Sequence, layer, slot, placement generation, weight/provider generation, token count, and buffer version must match before CUDA accepts the output. Publication uses release/acquire ordering; completion publishes only after the B70 output copy is visible to the CUDA process.
 
-### Initial non-distribution of KV
+## Plane 3: active inference state
 
-KV participates in every attention layer. Distributing it to the B70s would add a mandatory remote dependency to a path that is otherwise wholly owned by the RTX 5090. The initial architecture therefore **must not distribute KV to B70s**. No aggregate device-memory figure may be used to imply that B70 VRAM expands the 5090 KV pool.
+The RTX 5090 exclusively owns active:
 
-The desired context behavior is exact multi-turn KV reuse, prefix deduplication across requests, and bounded active GPU allocation. Existing persistent KV/prefix facilities are the intended basis; repeatedly recomputing the full conversation is not the target behavior.
+- KV and prefix cache;
+- DeltaNet/GDN or other recurrent state;
+- sequence, request, cancellation, and scheduler state;
+- residual activations and CUDA graph state; and
+- sampler state.
 
-### Persistence and invalidation
+B70 requests contain only the activation rows and route metadata required for a single active MoE layer. They confer no sequence, context, or serving ownership. B70 VRAM does not expand the CUDA KV pool. Active KV exhaustion is handled by vLLM admission/eviction policy, not by spilling active state to B70.
 
-Active context stays with the 5090 authority. Host or NVMe may persist **inactive** contexts; such persistence is not permission to put a storage access on every attention layer or token. Restore must re-establish state-owner authority before the context becomes active.
+Host or NVMe persistence for inactive application context is outside the per-layer expert path. Restoring inactive state must re-establish CUDA authority before the request becomes active.
 
-Context entries are invalidated when their content identity or model version no longer matches. Sequence lifecycle and sampler state must remain consistent with the restored KV/prefix state; a partially matching context must not be reused as if complete.
+## Plane 4: placement, capability, and lifecycle state
 
-### Budget
+The control plane persists:
 
-Active GPU KV and prefix allocation is bounded. Its configured reservation must be made alongside model weights, local experts, scratch, pinned transport, and safety capacity before serving. Admission or eviction handles exhaustion; allocation must not spill active KV to B70 memory under the initial design. Host/NVMe persistence is limited to inactive contexts and has its own retention and capacity policy.
+- immutable `(layer, global expert) -> CUDA local slot | B70 compact slot` ownership;
+- placement and weight generations plus artifact fingerprints;
+- provider protocol and kernel-bundle versions;
+- supported dimensions, dtypes, top-k values, group sizes, layouts, maximum tokens/routes, slots, and streams;
+- route frequency and measured service/queue distributions used to choose the hot CUDA set;
+- ring capacity and address-stability guarantees; and
+- provider health, failure, restart, and recovery counters.
 
-## Plane 3: placement-learning memory
+This metadata can choose an owner before serving starts; it cannot alter canonical top-k or silently select a different expert. The initial production placement is immutable for the loaded run. A replacement map is admitted only after all new weights are loaded and validated, then published as a new generation with no in-flight request referring to mutated slots.
 
-### Ownership and contents
+## Plane 5: exact emergency recovery
 
-The placement scheduler owns the learned execution profile. Persist at least:
+CPU and available CUDA capacity form a correctness path, not a throughput tier. On B70 timeout, device loss, invalid generation, or kernel failure, the system identifies the exact failed token-route entries and either:
 
-- global per-layer expert frequency;
-- session frequency;
-- recent-window frequency;
-- expert coactivation counts;
-- per-device service-time distributions;
-- transport p50, p95, and p99;
-- queue delay;
-- migration outcomes;
-- prediction precision and recall;
-- failure rates;
-- profile version and model hash.
+- recomputes only those routes using an admitted exact CUDA/CPU representation; or
+- fails the request explicitly.
 
-This plane learns where an exact expert computation should execute; it does not change canonical router results, selected experts, route weights, expert precision, or reduction semantics.
+Recovery cannot change selected expert IDs, routing weights, source model, or reduction semantics. A late B70 completion after recovery is discarded. Normal operation reports zero CPU expert matrix work; any nonzero recovery count is explicit failure telemetry and is not included as ordinary hybrid service.
 
-### Persistence, invalidation, and budget
+NVMe may restore a provider after failure, but a foreground request must not wait on a synchronous expert load disguised as recovery. If exact immediate recovery resources are unavailable, fail explicitly.
 
-Persist the profile across runs so a restart need not relearn every placement from zero. The model hash and profile version are part of its identity. A model-hash mismatch invalidates model-specific statistics for placement decisions. Incompatible profile versions must be rejected or explicitly rebuilt, never interpreted under a different schema. Session and recent-window data expire according to their defined windows; a placement-epoch transition prevents stale in-flight completions from being accepted.
+## Colibri reference scope
 
-The scheduler must bound session histories, recent windows, coactivation data, and retained performance distributions. Placement telemetry is control-plane data: its storage and processing budget must not consume unbounded token-path memory or turn profile persistence into a synchronous foreground dependency.
+The proven Colibri GS64 native path demonstrates persistent B70 weights, compact expert slots, FP16 staging, a routing-weighted hidden-size partial, asynchronous issue/take, exact failure recomputation, and zero normal-path CPU expert fallback. Those facts justify the ownership and lifecycle shape above.
 
-## Plane 4: application semantic memory
-
-### Ownership and boundary
-
-Agent memory, embeddings, retrieval indexes, user facts, and vector search remain outside the model execution fabric. An application or retrieval service owns them. They affect request construction by supplying retrieved context through the API; they do not own model weights, KV, canonical routing, expert placement, or worker state.
-
-### Persistence, invalidation, and budget
-
-The external retrieval store owns durability, retention, tenancy, deletion, content refresh, embedding/index versioning, and its capacity budget. Its invalidation policy must not be conflated with model-weight or KV invalidation. Once retrieved material is included in a request, the resulting active model context is governed by the context plane and the 5090 state owner.
-
-The execution runtime must not reserve GPU expert or KV capacity for an implicit application-memory database. Conversely, application retrieval must not reach into placement-learning records or device-resident expert arenas as a semantic store.
+They do not prove the production batched buffers, fixed multi-slot process ring, llm-scaler tiny/grouped/prefill kernels, upstream-vLLM memory behavior, production graph stability, or capacity gain. Those are measured under [`benchmarking.md`](benchmarking.md).
 
 ## Cross-plane lifecycle
 
 ### Startup
 
-1. Audit actual device, host-memory, pinned-memory, scratch, safety, and storage capacity as required by [`hardware.md`](hardware.md).
-2. Validate the model manifest and packed artifacts against the active model identity.
-3. Admit 5090 owner tensors and local experts within the 5090 budget.
-4. Admit a separate resident bank on each B70 within that card's budget.
-5. Establish an exact DDR5 fallback bank only if it fits after all host reservations.
-6. Restore only placement profiles whose model hash and profile version match.
-7. Reserve bounded active context capacity on the 5090.
-8. Keep NVMe activity in startup, recovery, or background staging.
+1. Record exact upstream-vLLM and provider dependency versions.
+2. Validate the model, CUDA artifact, B70 artifact, placement map, and provider capability manifest against the same source checkpoint.
+3. Reserve the RTX 5090 state, KV, scratch, join, graph, and safety budgets.
+4. Load only CUDA-owned hot experts on the 5090.
+5. Start the isolated provider, select the B70 explicitly, reserve stable XPU buffers, and load only B70-owned cold/overflow experts.
+6. Allocate and initialize the fixed versioned pinned ring.
+7. Negotiate capacity, generations, dimensions, dtypes, top-k, group size, layout, slots, and streams; fail closed on mismatch.
+8. Admit exact emergency recovery only if its source and resource limits are explicit.
+9. Enter serving with NVMe outside the warmed foreground path.
 
-### Placement change
+### Shutdown or provider restart
 
-A new placement epoch may replace resident expert assignments only through controlled background loading and admission. Requests retain their request-scoped placement epoch. A completion from an earlier epoch is rejected rather than reduced into a newer token. Context ownership does not move when expert placement changes.
-
-### Recovery and eviction
-
-- Evict or replace derived resident weight copies without changing the durable model identity.
-- Evict active context only through the context lifecycle; persist only inactive contexts to host/NVMe.
-- Age or rebuild placement-learning records under their bounded retention rules.
-- Leave application-memory retention to the external store.
-- Never convert an expert-residency miss into an ordinary foreground NVMe read.
+Stop publication, bound or cancel in-flight work, invalidate the provider generation, and reject every completion from the old generation. Reconstruct device weights only from validated artifacts, renegotiate capabilities and ring generations, and resume only after the immutable ownership map is complete.
 
 ## Required reporting
 
-Capacity and performance reports must state, separately:
+Every capacity/performance result separately reports:
 
-- actual allocated and reserved bytes on the RTX 5090;
-- actual allocated and reserved bytes on each B70;
-- DDR5 used for exact fallback, pinned transport, inactive context, and runtime/headroom;
-- which portion of the exact cold bank is present in DDR5;
-- NVMe bytes and activity attributable to startup, recovery, background preload, or any experimental foreground miss;
-- whether KV remained wholly under 5090 authority;
-- active model hash, placement epoch, and placement-profile version.
+- actual allocated and reserved RTX 5090 bytes by state-owner, hot-expert, KV/recurrent, scratch/join, graph/runtime, and headroom categories;
+- actual allocated and reserved B70 bytes by cold/overflow weights, stable tensors/scratch, runtime, and headroom;
+- pinned-ring bytes, slot count, negotiated token/route capacities, and host NUMA placement;
+- other host bytes used for control, telemetry, and exact emergency recovery;
+- NVMe reads and bytes by startup, restart, or recovery, with zero ordinary warmed-decode reads;
+- CUDA/B70 ownership counts and placement/weight/provider generations;
+- CPU recovery count and bytes/computation, expected to be zero on the normal path;
+- 5090 KV/context/concurrency budget; and
+- measured capacity gain plus throughput/TTFT/ITL cost relative to the same stock all-CUDA upstream-vLLM workload.
 
-A report is misleading if it labels aggregate GPU capacity “unified VRAM,” calls a partially resident 372 GB GLM deployment “RAM-resident,” claims NVIDIA–Intel P2P without the evidence required by [`hardware.md`](hardware.md), or hides foreground storage reads inside an alleged warmed decode result.
+A report is misleading if it calls aggregate device memory unified VRAM, treats B70 memory as CUDA KV capacity, treats CPU/DDR5 or NVMe as a normal expert tier, hides provider buffers/headroom, or reports capacity without the paired service cost.

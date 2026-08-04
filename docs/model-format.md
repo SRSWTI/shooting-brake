@@ -1,273 +1,285 @@
-# Model Format and Expert Conversion Contract
+# Model Format and Expert Artifact Contract
 
-## Purpose and status
+## Purpose, authority, and status
 
-This document defines the format boundary between Colibri model weights and provider-specific resident expert banks. It elaborates the [quantization compatibility gate in `architecture.md`](architecture.md#quantization-compatibility-gate); it does not replace the repository overview.
+This document defines the source-checkpoint, provider-artifact, compact-ownership, and capability-manifest contract for the architecture in [`../plan.md`](../plan.md).
 
-**Status:** design contract and validation plan. The Colibri-to-XPU conversion, provider compatibility, kernel selection, and resident-bank cache described here are **not established as passing**. A format name, matching matrix dimensions, or matching group size is not evidence of compatibility.
+The production deployment derives separate CUDA and B70 artifacts from one identical higher-precision BF16/FP16 source checkpoint. Provider formats are not interchangeable. This is a normative design and qualification contract, not a claim that the planned llm-scaler production provider or its model artifacts have passed.
+
+The existing Colibri signed-S4 GS64 native worker is proven reference evidence and remains a comparator. It does not make that native artifact the only production choice and does not prove a batched llm-scaler provider.
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
-## Evidence boundaries
-
-The design keeps four kinds of statement separate:
-
-- **Source fact:** a property captured directly from the selected Colibri model tensors and quantization metadata.
-- **Provider claim:** a property documented or exposed by a kernel provider, but not thereby proven against Colibri.
-- **Design target:** behavior Shooting Brake requires before that provider can be used.
-- **Unverified assumption:** any proposed equivalence that has not passed the protocol in this document.
-
-In particular:
-
-- Colibri integer W4 is the source-format contract to be captured exactly.
-- The patched llm-scaler XPU INT4 path and the current standalone vLLM-XPU INT4 path are distinct provider contracts.
-- Triton MXFP4 is an E2M1, block-size-32 representation and is not Colibri integer W4.
-- Xe-Fuse BF16 is a BF16 execution path, not a W4 packed representation.
-- Whether any provider reproduces the canonical Colibri expert remains unverified until the one-expert gate passes.
-
-## Source format and provider prepack are different layers
-
-### Source-format boundary
-
-The source side consists of the original expert tensors plus their exact Colibri quantization metadata. It is the authority for:
-
-- integer nibble interpretation;
-- zero-point or no-zero-point convention;
-- group scale values, dtype, shape, and orientation;
-- logical gate, up, and down identities;
-- tensor dimensions and any source padding;
-- source packing order;
-- Colibri-specific quantization corrections;
-- model, layer, and expert identity.
-
-Source bytes and metadata MUST be retained unchanged as the rebuild authority. A loader MUST NOT infer omitted quantization properties from a filename, a generic label such as `W4` or `INT4`, provider defaults, matching dimensions, or matching group size.
-
-### Provider-prepack boundary
-
-A provider prepack is a derived, disposable cache record optimized for one kernel ABI. It may reorder rows, interleave tensors, transpose packing axes, add padding, change scale placement, or dequantize to BF16, but only through an explicit, versioned conversion from the validated source artifact.
-
-A provider prepack:
-
-- MUST identify its kernel ABI and prepack version in the resident-bank manifest;
-- MUST be reproducible from the unchanged source artifact;
-- MUST NOT become the authority for source quantization metadata;
-- MUST NOT be passed to another provider merely because both providers use the name `INT4`, `W4`, or `MXFP4`;
-- MUST NOT be silently reinterpreted after a kernel, prepack, scale, or quantization-policy change;
-- MUST be rejected when its manifest or checksum does not validate.
-
-Conversion is therefore explicit:
+## One source, two provider artifacts
 
 ```text
-validated Colibri integer-W4 source artifact
-    -> provider-specific converter
-    -> versioned provider prepack
-    -> provider kernel ABI
+identical BF16/FP16 higher-precision source checkpoint
+    ├── CUDA artifact
+    │     CUDA-owned routed experts in a qualified vLLM format
+    │     all dense/router/shared-expert/attention/GDN/LM-head weights
+    └── B70 artifact
+          B70-owned routed experts in a qualified signed-S4 ESIMD layout
 ```
 
-Triton MXFP4 and Xe-Fuse BF16 require explicit numerical conversion from the same canonical source. Renaming Colibri bytes or changing only metadata is prohibited.
+The source checkpoint is the rebuild and semantic authority. Its model identity and exact tensor content MUST be fixed by provenance and cryptographic fingerprints. Both provider artifacts MUST name that same source identity. One artifact MUST NOT be derived by reinterpreting or requantizing the other provider's already-quantized bytes.
 
-## Exact W4 compatibility questions
+At runtime:
 
-Every integer-W4 converter and kernel ABI review MUST answer all of the following from bytes, metadata, and numerical probes. An unanswered item is incompatibility, not permission to use a default.
+- the RTX 5090 loads only CUDA-owned routed experts for the hybrid placement;
+- the B70 loads only B70-owned routed experts into compact slots;
+- dense, router, shared-expert, attention, recurrent-state, LM-head, and sampling weights remain CUDA-owned;
+- each routed expert has exactly one normal-path owner in the active placement;
+- no expert weight moves or is quantized during decode or prefill; and
+- CPU holds no normal-path expert execution role.
 
-1. **Nibble signedness:** are 4-bit codes signed two's-complement, biased, unsigned, or interpreted by another mapping?
-2. **Zero-point convention:** is there an explicit zero point; if so, what is its dtype, granularity, orientation, and position in dequantization?
-3. **Nibble placement:** which logical values occupy the low and high nibbles, and in what traversal order?
-4. **Gate/up row ordering:** which logical rows are gate and which are up?
-5. **Gate/up storage:** are gate and up split, concatenated, tiled, or interleaved?
-6. **Scale dtype:** what stored scalar type and bit pattern represent each scale?
-7. **Scale granularity and orientation:** which weight elements share a scale, and along which logical axis are scale groups traversed?
-8. **Packing major order:** is the packed representation N-major, K-major, transposed, or tile-major?
-9. **Group boundaries:** how do group size and partial groups map to the logical K dimension?
-10. **Padding and alignment:** which rows, columns, groups, and byte ranges are padded, and may a kernel legally read that padding?
-11. **Logical-to-physical shape:** how are the gate, up, and down matrices represented in provider storage?
-12. **Colibri corrections:** are there source-specific quantization corrections, and at which point are they applied?
+An explicitly validated all-CUDA placement may use a complete CUDA expert artifact. The hybrid placement MUST NOT assume that a B70-owned expert is also resident on CUDA; exact recovery availability is a separate declared capability.
 
-Compatibility requires identical declared semantics and passing comparisons. It MUST NOT be inferred from the shared names `W4` or `INT4`.
+## Source checkpoint contract
 
-## Kernel ABI compatibility matrix
+The source record MUST bind:
 
-The matrix below records boundaries and required evidence; it does not select a winner.
+- source repository/model provenance and immutable revision;
+- model architecture and configuration;
+- tokenizer/config identities needed to bind execution semantics;
+- exact source tensor names, shapes, dtypes, and checksums;
+- layer, global expert, gate, up, and down tensor identities;
+- any source sharding and reconstruction rules;
+- source BF16/FP16 values or immutable byte ranges; and
+- one model-source fingerprint used by the CUDA artifact, B70 artifact, placement, and runtime manifests.
 
-| Path | Numeric/storage contract | Permitted role | Required compatibility work | Current conclusion |
-|---|---|---|---|---|
-| Colibri integer W4 | Integer 4-bit source codes with captured Colibri group-scale semantics and packing | Canonical source and reference dequantization contract | Capture every W4 question above; preserve original bytes and metadata | Source contract to freeze; provider compatibility unverified |
-| llm-scaler patched XPU INT4 | Provider-specific INT4 prepack and the pinned llm-scaler kernel ABI | Controlled B70 reference and candidate provider | Reconcile explicit format arguments, grouped-GEMM API, activation behavior, scale layout, and output semantics; retain the patch's scale-prefetch safety behavior | Distinct provider ABI; no equivalence to Colibri or current XPU implied |
-| Current standalone vLLM-XPU INT4 | Current provider-specific INT4 prepack and simplified dispatch | Candidate long-term B70 provider | Compare with the patched path on identical canonical inputs; establish scale-prefetch safety, layout conversion, `gelu_tanh` behavior, supported shapes, and sequential-shape safety | Must not replace the patched path merely because it is newer |
-| Triton MXFP4 | MXFP4 E2M1 with block size 32 | Alternative converted provider for later comparison | Perform an explicit numerical conversion and validate its own block scales, packing, ABI, and error against the canonical references | Not a format-compatible Colibri W4 drop-in |
-| Xe-Fuse BF16 | BF16 weights/operations rather than packed W4 | Dequantized BF16 comparison or upper-bound path | Dequantize explicitly from the canonical source, define BF16 layout and epilogue semantics, then compare at declared floating-point tolerances | Not an INT4/MXFP4 prepack and not byte-compatible with any W4 path |
+A loader or converter MUST NOT infer missing model or quantization facts from a filename, marketing format name, matching dimensions, or provider default. Unknown source metadata fails the build.
 
-For each provider revision, the compatibility record MUST freeze and test:
+## Manifest-driven logical shapes
 
-| ABI surface | What must be recorded and compared |
-|---|---|
-| Revision and patches | Exact repository revision; the llm-scaler pinned kernel revision and patch are retained as distinct provenance |
-| Format selection | Explicit INT4/MXFP4 arguments in the older path versus current simplified dispatch; no default may stand in for a declared format |
-| Weight arguments | Accepted packed layout, alignment, offsets, lengths, and lifetime |
-| Scale arguments | Scale dtype, orientation, surface dimensions, alignment, and ownership |
-| Expert grouping | Expert offsets, remapping, active/zero-row behavior, and grouped-GEMM API shape |
-| Activation/epilogue | First-GEMM output convention, gate/up split, SwiGLU composition, `gelu_tanh` behavior where exposed, weighting, and final output dtype |
-| Shapes | All supported logical shapes, physical padding, and exact output shapes |
-| State lifetime | Sequential execution of different shapes in one process, with no stale persistent-buffer reuse or memory growth |
-| Safety | No scale overread; the scale-prefetch guard must cover small or insufficiently aligned scale surfaces, including the documented `K=1408`, `group_num=11` hazard class |
-| Numerical result | Declared comparison point, oracle, tolerance, NaN/Inf rule, and result for every supported shape |
+Logical expert shapes come from the qualified model manifest, not from Colibri's older GLM dimensions and not from a kernel filename.
 
-An upstream kernel MUST NOT be selected until scale-prefetch safety is present, API differences are reconciled, compatible results are demonstrated from controlled inputs, and sequential shapes are safe.
-
-## Canonical one-expert artifact
-
-Before modifying or selecting kernels, the project MUST define exactly one canonical expert input/output artifact. The artifact is a reviewable test fixture, not evidence that conversion has passed.
-
-It MUST bind:
-
-- the source model hash;
-- exact source repository/model provenance used to read the expert;
-- layer and expert identity;
-- original gate, up, and down packed bytes;
-- the complete Colibri quantization policy and metadata needed to answer every W4 compatibility question;
-- independent checksums for the retained source content;
-- logical tensor identities and semantic shapes;
-- the fixed edge-case inputs, route/expert identities, and token-row cases used by the gate;
-- comparison points for dequantized rows, GEMM1, SwiGLU, down projection, and complete expert output;
-- outputs from each oracle, labeled by oracle, revision, dtype, and declared tolerance rather than merged into a purported universal answer.
-
-Provider-prepacked bytes MUST live outside the canonical source portion and MUST be labeled with their provider, kernel ABI version, and prepack version. Regenerating a provider prepack MUST NOT modify the source portion or overwrite another provider's result.
-
-## Logical expert shapes and packed-layout checks
-
-The semantic operation has these exact GLM dimensions:
+For model hidden size `H` and routed intermediate size `I`, each routed expert computes:
 
 ```text
-gate:    6144 -> 2048
-up:      6144 -> 2048
-gate/up: 6144 -> 4096  (the two 2048 projections before SwiGLU)
-SwiGLU:  4096 -> 2048
-down:    2048 -> 6144
+input           [M, H]
+gate projection H -> I
+up projection   H -> I
+SiLU(gate) * up [M, I]
+down projection I -> H
+expert output   [M, H]
 ```
 
-These are logical dimensions, not permission to assume a physical matrix orientation. For both gate/up and down, conversion MUST check:
+For the inspected Qwen production target:
 
-1. source byte length against the captured packing and padding rules;
-2. expected logical input and output dimensions;
-3. the mapping from logical row and column coordinates to packed byte and nibble positions;
-4. low/high-nibble order using known codes, including negative, zero, positive, and saturating values where the source convention admits them;
-5. scale count, dtype, exact stored values, group boundaries, and logical orientation;
-6. zero-point data and application, if the source policy defines it;
-7. gate versus up identity for the first and last rows and at packing/tile boundaries;
-8. split, concatenated, or interleaved gate/up ordering across the entire tensor, not only its first tile;
-9. down-projection orientation independently of gate/up orientation;
-10. row/column padding contents, alignment, provider read bounds, and the exclusion of padding from logical results;
-11. provider-prepack length and offsets before upload;
-12. dequantized sentinel rows against the Colibri CPU dequantization reference before any GEMM is accepted.
+```text
+H = 2048
+I = 512
+num_experts = 256
+top_k = 8
+```
 
-A shape match without these checks fails the format gate.
+Those values are a model-manifest example, not permission to accept another Qwen-family model by name. Every architecture/configuration MUST declare and qualify its actual `H`, `I`, expert count, top-k, router normalization, activation, tensor orientation, padding, and shared-expert semantics.
 
-## One-expert conversion protocol
+Logical dimensions do not specify physical row/column order, packing, tiling, interleaving, or padding. Every converter validates those independently.
 
-### 1. Freeze provenance
+## Provider artifacts are private derived records
 
-Record the relevant repository revisions, preserve the llm-scaler pinned revision and patch as a distinct reference, capture exact Colibri quantization metadata, and bind the canonical artifact to one model hash, layer, and expert.
+A provider artifact is a reproducible, versioned conversion from the common source into one kernel ABI. It MAY reorder, transpose, interleave gate/up data, tile, pad, change scale placement, or quantize, but only through its named converter and declared precision policy.
 
-### 2. Decode without reinterpretation
+Every artifact MUST:
 
-Decode the selected expert only according to captured Colibri metadata. Inspect nibble values, scales, zero-point convention, group boundaries, gate/up ordering, packing major order, and padding. Provider defaults MUST NOT fill missing metadata.
+- identify source model fingerprint and converter revision;
+- identify provider (`cuda-vllm` or `b70-xpu`) and kernel ABI/bundle;
+- identify architecture, semantic shapes, logical tensor identities, and ownership subset;
+- declare weight code mapping, group size, scale dtype/orientation, zero-point policy, physical layout, padding/alignment, and checksums;
+- declare activation, route-weight, accumulator, and output dtypes;
+- identify the exact compact-slot map or CUDA-local map;
+- be reproducible without using another provider's quantized artifact as source;
+- remain immutable while its weight generation is active; and
+- fail validation if any required field is absent, unknown, mismatched, out of bounds, misaligned, or unsupported.
 
-### 3. Convert exactly one expert
+Provider-private bytes MUST NOT become the source authority and MUST NOT be passed to another provider merely because format names resemble one another.
 
-Convert exactly one gate/up pair and one down projection. Generate a separate prepack for each provider under evaluation. Colibri integer W4, patched XPU INT4, current XPU INT4, Triton MXFP4, and Xe-Fuse BF16 remain separately named formats throughout conversion and reporting.
+## CUDA artifact
 
-### 4. Validate representation and intermediates in order
+The CUDA artifact contains the active CUDA placement's routed experts in a format explicitly supported by the pinned upstream-vLLM CUDA backend, such as a qualified NVFP4, FP8, or Marlin representation. Its manifest MUST record the exact backend, quantization recipe, physical layout, scales, expected kernel behavior, and CUDA-local slot mapping.
 
-The following validation steps are mandatory and MUST be reported separately:
+The artifact also binds the CUDA-owned router and shared-expert semantics, even though the B70 never consumes those tensors. `HybridMoERunner` MUST receive the canonical vLLM top-k IDs and weights produced by this model execution; provider artifacts cannot override them.
 
-1. nibble values;
-2. scales;
-3. dequantized rows;
-4. gate/up ordering;
-5. first GEMM output;
-6. SwiGLU output;
-7. down output;
-8. complete expert output.
+A CUDA artifact is not compatible with the B70 because its weights have the same semantic shapes. CUDA-addressable pointer tables and CUDA quantization layouts MUST NOT cross the provider boundary.
 
-A later match MUST NOT waive an earlier mismatch. In particular, a complete-output match does not excuse wrong nibbles, scales, or row ordering.
+## B70 artifact and format choices
 
-### 5. Compare against every exact oracle
+The B70 artifact contains only B70-owned routed experts in compact `(layer, global expert) -> B70 slot` order. It MUST select exactly one qualified physical weight contract for a loaded bank.
 
-Use the same canonical source expert and the same labeled input case to compare against:
+### Proven Colibri GS64 reference
 
-- Colibri CPU dequantization/reference execution;
-- 5090 execution;
-- llm-scaler patched B70 execution;
-- standalone vLLM-XPU B70 execution.
+The current native Colibri comparator has proven this contract for its supported shapes:
 
-Representation comparisons—identities, shapes, integer codes, source metadata, and checksums—are exact. Floating-point comparisons at dequantized rows and execution intermediates use a tolerance declared before the run for that dtype and comparison point. Results MUST include both absolute and relative differences (including the handling of zero reference values), NaN/Inf detection, output shape, and oracle provenance. Tolerances MUST NOT be widened after observing a failure.
+```text
+weight codes:   signed S4
+group size:     64
+scale storage:  FP16
+layout:         K-major / marlin-derived native-worker layout
+execution:      ESIMD fused gate/up/SiLU/down
+input staging:  FP16
+result:         routing-weighted hidden-size partial
+```
 
-MXFP4 and BF16 are compared as explicit conversions at their declared floating-point tolerances. Their numerical proximity MUST NOT be reported as integer-W4 byte or layout compatibility.
+The existing conversion is exact for Colibri's captured signed-S4 GS64 semantics and agrees numerically with its CPU reference. These are reference-path facts, not claims about llm-scaler batching, every Qwen shape, a GS128 kernel, or the production provider process.
 
-### 6. Run the required edge-case corpus
+### Production B70 alternatives
 
-The single expert MUST pass all of these cases before promotion:
+The production provider may use either:
 
-- all-zero input;
-- small values;
-- saturating quantized values;
-- random input with its seed and generation rule recorded;
-- repeated identical input;
-- changing token-row counts;
-- changing expert IDs;
-- zero-row experts.
+1. a qualified batched kernel preserving the proven signed-S4 GS64 contract; or
+2. a separately quantized signed-S4 GS128 artifact for a qualified llm-scaler N-major batched path.
 
-Different supported shapes MUST also execute sequentially in one process to expose stale persistent buffers. Each case records the representation checks, intermediate comparisons, final comparison, exact output shape, NaN/Inf status, stale-buffer status, memory-growth status, and scale-read safety. A zero-row case MUST perform no invalid weight or scale access.
+GS64 and GS128 are different numerical/storage contracts: their scale counts and group boundaries differ. GS64 bytes or scales MUST NOT be reinterpreted as GS128. A GS128 artifact MUST be quantized offline or at initialization from the same BF16/FP16 higher-precision source used for the CUDA artifact, not from the GS64 artifact. Conversion or requantization MUST NOT occur on the token path.
 
-### 7. Hard promotion gate
+Kernel family, group size, scale dtype, layout, supported shapes, and precision tolerance are capability facts. The provider MUST NOT choose them by an undocumented model-name conditional.
 
-**Bulk conversion is prohibited until this one gate/up/down expert passes every validation step, every oracle comparison applicable to the provider, and every edge case.** A partial pass, a performance result, or a match from only one backend does not authorize bulk conversion. No provider is currently recorded by this document as having passed.
+## Quantized-format questions
 
-## Versioned resident-bank manifest
+For every CUDA or B70 quantized artifact, the converter and kernel ABI record and validate:
 
-Every cached prepack uploaded into a fixed B70 arena MUST have one manifest entry containing every field below:
+1. code type and signedness, including the exact 4-bit mapping where applicable;
+2. zero-point or no-zero-point convention;
+3. low/high nibble placement and traversal order;
+4. gate/up identities and split, concatenated, tiled, or interleaved order;
+5. scale dtype, stored bit pattern, granularity, orientation, count, and group boundaries;
+6. physical major order, transpose, tiling, and offsets;
+7. logical-to-physical gate, up, and down shapes;
+8. row, column, group, and byte padding plus legal kernel read bounds;
+9. alignment and arena offset/length requirements;
+10. source-specific corrections and the stage at which they apply;
+11. activation, accumulation, route-weight multiplication, and output dtype/rounding; and
+12. supported sequential shapes and persistent-scratch lifetime.
 
-| Required field | Meaning and validation |
-|---|---|
-| `model hash` | Exact source model identity; MUST match the canonical source used for rebuild |
-| `quantization policy` | Complete policy identity for the source-to-provider conversion; MUST match captured Colibri semantics and converter selection |
-| `kernel ABI version` | Exact consumer ABI; MUST match the loaded kernel before the entry is used |
-| `prepack version` | Exact physical-layout/converter version; MUST match the decoder/uploader for the cached bytes |
-| `layer` | Source layer identity; MUST match placement and request identity |
-| `expert` | Source expert identity; MUST match placement and request identity |
-| `device` | Intended resident device identity; MUST match the arena being populated |
-| `offset` | Byte offset in the fixed resident arena/cache record; MUST satisfy the provider ABI's bounds and alignment |
-| `length` | Exact byte length; MUST match the prepack version and remain within the arena |
-| `scale format` | Provider scale encoding, dtype, grouping, and orientation identity; MUST match the kernel ABI |
-| `checksum` | Integrity checksum for the exact versioned cache payload; its algorithm and byte scope are fixed by the prepack version and MUST validate before upload/use |
+An unanswered item is incompatibility, not permission to use a default. Names such as `INT4`, `W4`, `S4`, `NVFP4`, or matching dimensions do not establish compatibility.
 
-The manifest is invalid if any required field is absent, unknown, mismatched, out of bounds, misaligned, duplicated inconsistently, or unsupported by the active provider. String similarity and numeric coercion are not matches.
+## Canonical dual-artifact qualification fixture
 
-### Load, checksum, rebuild, and fallback behavior
+Before bulk conversion, the project MUST freeze one reviewable source fixture containing:
 
-For each entry, the loader MUST perform these steps in order:
+- source model fingerprint and full provenance;
+- one layer/global-expert identity;
+- higher-precision gate, up, and down source tensors;
+- semantic shapes and declared activation;
+- deterministic edge inputs and token-row cases;
+- comparison points after source projection, gate/up, activation, down projection, routing-weight multiplication, and complete expert output; and
+- separately labeled oracle outputs with revision, dtype, and tolerance.
 
-1. match `model hash`, `quantization policy`, `layer`, and `expert` to the validated source request;
-2. match `kernel ABI version`, `prepack version`, and `scale format` to the selected provider;
-3. match `device` to the target resident bank;
-4. bounds-check and ABI-alignment-check `offset` and `length` before reading or uploading bytes;
-5. validate `checksum` over the exact byte scope defined by the prepack version;
-6. accept the entry only after every check succeeds.
+The fixture produces independent CUDA and B70 provider artifacts. Their prepacked bytes, metadata, and outputs remain separately labeled. Regenerating one MUST NOT modify the source fixture or overwrite the other provider's record.
 
-On any mismatch or checksum failure, the loader MUST NOT upload or execute the entry. It SHOULD rebuild that one prepack from the validated source artifact using the exact selected converter, write a fresh versioned entry, and validate the full entry again. It MUST NOT repair a failure by relabeling bytes, borrowing another provider's prepack, ignoring the checksum, or changing quantization metadata.
+Validation proceeds in order:
 
-If a validated rebuild cannot be completed, execution MUST use the safe Colibri CPU reference/fallback path rather than reinterpret incompatible bytes. If that fallback is unavailable, the operation MUST fail closed; it MUST NOT continue with an unvalidated resident expert. Cache failure and provider incompatibility do not alter the canonical source artifact.
+1. source identity, tensor names, shapes, and checksums;
+2. provider quantization codes, scales, orientation, and padding;
+3. representative dequantized rows;
+4. gate/up projection outputs;
+5. SiLU/multiply output;
+6. down-projection output;
+7. complete unweighted expert output;
+8. route-weighted expert output; and
+9. CUDA-local plus B70-remote summed routed output.
+
+A later match does not waive an earlier mismatch. Representation fields and identities compare exactly. Floating-point points use predeclared absolute/relative tolerance and NaN/Inf rules. Both provider artifacts MUST pass independently against the common source before the heterogeneous sum is accepted.
+
+Required cases include zero, small, saturating, seeded random, repeated, and changing inputs; `M=1`, `M=2..32`, and representative prefill `M`; changing/non-sorted/duplicate IDs under canonical semantics; multiple rows choosing one expert; unequal and near-zero weights; boundary compact slots; zero-row experts; and different supported shapes sequentially in one process.
+
+Bulk conversion is prohibited until the one-expert fixture passes for the chosen provider contract. No production llm-scaler artifact is recorded here as having passed.
+
+## Model, placement, and provider manifests
+
+Minimum model semantics:
+
+```yaml
+source_model_fingerprint: <immutable BF16/FP16 source>
+model_architecture: Qwen3_5MoeForCausalLM
+hidden_size: 2048
+routed_intermediate_size: 512
+num_layers: 40
+num_experts: 256
+top_k: 8
+shared_intermediate_size: 512
+router_normalization: canonical-vllm
+```
+
+Minimum per-artifact facts:
+
+```yaml
+artifact_provider: cuda-vllm | b70-xpu
+artifact_fingerprint: <payload-and-manifest fingerprint>
+source_model_fingerprint: <same source for both artifacts>
+converter_revision: <pinned>
+kernel_bundle: <pinned and qualified>
+weight_format: <explicit>
+group_size: <explicit>
+scale_dtype: <explicit>
+scale_orientation: <explicit>
+layout: <explicit>
+activation_dtypes: [...]
+route_weight_dtypes: [...]
+accumulator_dtype: <explicit>
+output_dtypes: [...]
+ownership_fingerprint: <placement subset and slot mapping>
+weight_generation: <immutable loaded generation>
+```
+
+Minimum B70 provider/protocol facts additionally include:
+
+```yaml
+provider_protocol: 1
+provider_backend: torch-xpu-llm-scaler
+device_identity: <qualified B70>
+supported_hidden_sizes: [...]
+supported_intermediate_sizes: [...]
+supported_top_k: [...]
+supported_group_sizes: [64] | [128] | [64, 128]
+decode_kernels: [...]
+prefill_kernels: [...]
+max_tokens: <qualified>
+max_routes_per_token: <qualified>
+max_inflight_slots: <qualified>
+provider_generation: <current>
+placement_fingerprint: <current>
+```
+
+The placement manifest maps every qualified routed expert exactly once:
+
+```text
+(layer, global expert) -> CUDA local slot
+(layer, global expert) -> B70 compact slot
+```
+
+It MUST bind the model source, both artifact fingerprints, active weight generation, and provider capabilities. B70 is not represented as a fake EP rank.
+
+## Load, validation, and fail-closed behavior
+
+Before hybrid startup, validation occurs in this order:
+
+1. match model architecture/configuration and source fingerprint;
+2. match CUDA and B70 artifacts to that same source;
+3. validate artifact checksums, converter/kernel ABI, quantization, group size, scales, layout, offsets, lengths, and alignment;
+4. validate that placement ownership is complete, disjoint, and matches each artifact's slots;
+5. compare adapter requirements with provider protocol/capabilities and fixed capacities;
+6. load each compact B70 expert once into a fixed arena;
+7. validate loaded weight generation and placement fingerprint; and
+8. admit hybrid requests only after all checks succeed.
+
+Any absent, unknown, unsupported, mismatched, corrupted, out-of-bounds, or misaligned fact fails closed. A cache record MAY be rebuilt from the immutable higher-precision source with the exact selected converter, then fully revalidated. It MUST NOT be repaired by relabeling bytes, borrowing another provider's prepack, ignoring a checksum, changing group size metadata, or quantizing during inference.
+
+An unsupported model continues on stock upstream vLLM CUDA when a valid all-CUDA artifact is available. It MUST NOT be silently forced through a generic B70 path. A requested hybrid placement with a missing required artifact or owner MUST fail startup; CPU execution is not a normal format fallback.
 
 ## Prohibited shortcuts
 
-The following are format-contract violations:
+The following violate this contract:
 
-- treating `W4`, `INT4`, or matching group sizes as format equivalence;
-- passing Colibri integer-W4 bytes directly to patched or current XPU INT4 without a proven converter;
-- passing integer-W4 bytes to Triton MXFP4 or Xe-Fuse BF16;
+- deriving CUDA and B70 artifacts from different base checkpoints;
+- deriving GS128 from an already-quantized GS64 artifact;
+- treating GS64 and GS128 scale surfaces as interchangeable;
+- passing CUDA tensors or CUDA provider bytes directly to XPU operators;
 - using one provider's prepack under another provider's ABI;
-- silently choosing signedness, zero point, scale orientation, gate/up order, packing major order, padding, or correction rules;
-- accepting only final-output similarity while representation or intermediate checks fail;
-- choosing current upstream code solely because it is newer;
-- bulk-converting experts before the canonical one-expert gate passes;
-- describing an unrun or failed comparison as compatible.
+- loading router or shared-expert work onto B70;
+- assuming older GLM dimensions for the Qwen production target;
+- selecting a kernel from model name rather than manifest capability;
+- accepting final-output similarity while source, representation, ownership, or intermediate checks fail;
+- moving, packing, allocating, or quantizing expert weights on the token path;
+- bulk conversion before the one-expert dual-artifact gate; or
+- describing the planned production artifact/provider as proven because the Colibri native GS64 comparator passed.

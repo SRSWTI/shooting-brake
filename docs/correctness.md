@@ -1,172 +1,203 @@
 # Shooting Brake Correctness Contract
 
-## Purpose and status
+## Purpose, authority, and status
 
-This document defines the correctness contract for the heterogeneous expert fabric described in [`architecture.md`](architecture.md). It is a **normative design target and validation plan**, not evidence that an implementation, hardware configuration, kernel, or benchmark has passed. The conditions that can stop or narrow the design are tracked in [`risk-register.md`](risk-register.md).
+This document defines the normative correctness contract for the architecture in [`../plan.md`](../plan.md). It is a design and qualification target, not a claim that the upstream-vLLM plus B70 production path has been implemented or passed.
 
-The terms used below distinguish four kinds of statement:
+The production direction is one upstream vLLM 0.26+ CUDA state owner on the RTX 5090 and one isolated, persistent PyTorch-XPU/llm-scaler provider on the B70. The existing Colibri implementation is proven reference evidence for transport, placement, failure handling, and the signed-S4 GS64 native worker; it is not the production model host or proof of the planned batched provider.
 
-- **Invariant** — behavior every conforming execution must preserve.
-- **Acceptance gate** — evidence required before a path may be treated as correct.
-- **Design target** — intended behavior that still requires measurement or validation.
-- **Upstream assessment** — a feasibility claim inherited from the design source, not an observed result in this repository.
+The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
+
+## Canonical computation and ownership
+
+For each qualified sparse layer and scheduler step, upstream vLLM on CUDA owns:
+
+- hidden state, attention, KV cache, and recurrent state;
+- router logits and the canonical top-k selection;
+- canonical global expert IDs and unmodified routing weights;
+- CUDA-resident routed experts and the shared expert;
+- the routed-result join, any final tensor/expert-parallel reduction, residual continuation, LM head, and sampling.
+
+`HybridMoERunner`/`HybridRoutedExperts` may partition only the already-selected routed-expert work. The B70 MUST NOT recompute router logits, softmax, top-k, route normalization, or shared-expert work.
+
+For `M` scheduled token rows:
+
+```text
+hidden             [M, hidden]  FP16 or BF16
+topk_ids           [M, topk]    int32, canonical CUDA result
+topk_weights       [M, topk]    FP32 or FP16, canonical CUDA result
+remote route mask and token/route map
+```
+
+Only rows with at least one B70-owned route need cross the pinned-memory boundary. Their original token-row and canonical route-position identities MUST be retained so that the returned rows can be scattered deterministically into the full batch.
+
+One immutable placement generation maps each routed expert to exactly one normal-path owner:
+
+```text
+(layer, global expert) -> CUDA local slot
+(layer, global expert) -> B70 compact slot
+```
+
+The B70 is not an expert-parallel rank. A B70 compact slot is provider-private and MUST be resolved only through the validated placement and weight generation. CPU is orchestration and exact emergency recovery only; it MUST NOT execute normal-path expert matrix work.
 
 ## Exactly-once route invariant
 
-Placement must be invisible to model semantics. For every sparse layer, every route selected by the model's current router must be accounted for **exactly once**:
+For every canonical selected token-route position, exactly one weighted expert contribution MUST enter the routed result:
 
-1. the selected expert identity, route weight, token mapping, and canonical route order are preserved;
-2. the route is assigned to one active execution path: a resident owner or an exact request-scoped CPU fallback;
-3. its weighted expert result is committed to the layer join once; and
-4. no selected route is lost, substituted, zero-filled, rerouted to a different logical expert, or committed twice.
+1. preserve original token row, route position, global expert ID, and routing weight;
+2. assign the route to its sole current CUDA or B70 owner;
+3. commit that owner's result once, or close that lane and recompute the same route on an exact CUDA/CPU recovery path;
+4. reject every later or duplicate completion for the closed lane; and
+5. fail the request explicitly if exact recovery is unavailable.
 
-A physical owner may change across placement epochs. The logical expert computation may not. A placement change therefore affects where work runs, not which work the router selected or how many times it contributes.
+Placement MUST be invisible to logical model semantics. No selected route may be dropped, substituted, zero-filled, renormalized, reassigned to a different logical expert, or counted twice.
 
-A zero route weight does not waive accounting: the selected route must still receive defined handling and must not be mistaken for missing work. Masked or padded entries are handled according to the canonical router semantics and must not be promoted into selected routes. An empty B70 subset is valid; it contributes the additive identity and does not excuse missing routes assigned elsewhere.
+Masked/padded entries remain governed by canonical vLLM router semantics and MUST NOT be promoted to selected routes. A selected route with zero weight still has a defined route identity and completion state. A batch or token with no remote route contributes the additive identity on the remote lane; it does not waive accounting for CUDA-owned routes.
 
-### Forbidden approximations
+The following are forbidden:
 
-The default configuration must not use any of the following:
+- approximate or placement-biased top-k;
+- rerouting around an unavailable owner;
+- expert dropping or capacity overflow that changes canonical selections;
+- treating a failed remote route as zero;
+- renormalizing surviving routes;
+- accepting stale placement, weight, provider, sequence, or buffer generations;
+- silently changing activation, weight, scale, accumulation, or output precision; and
+- normal-path CPU matrix compute.
 
-- expert dropping;
-- approximate top-k;
-- placement-biased routing;
-- route caching that skips the current router;
-- lossy fallback;
-- treating a missing expert as zero;
-- forced capacity overflow;
-- silent precision reduction; or
-- stale placement IDs.
+## B70 transaction result
 
-Prediction, caching, placement, batching, and transport optimizations are permitted only when they leave the exactly-once route invariant unchanged. Faster execution without a correctness oracle is not a valid result.
+The B70 provider accepts only its compacted subset of canonical routes. For original token row `m`, it computes:
 
-## The only permitted outcomes
+$$
+Y_{\mathrm{B70}}[m,:]
+=
+\sum_{j\in R_{\mathrm{B70}}(m)}
+w_{m,j}\,\mathrm{Expert}_{e_{m,j}}(X[m,:]).
+$$
 
-For each selected expert, exactly one of these outcomes is permitted:
+The response is one already-weighted, already-summed partial:
 
-1. its resident owner succeeds and its result is committed once;
-2. an exact, request-scoped CPU fallback executes and its result is committed once; or
+```text
+remote_partial      [M_remote, hidden]  FP16 or FP32
+token-row map       [M_remote]
+route completion    per original token/route position
+```
+
+`M_remote` is the number of staged rows and may be zero. After deterministic scatter, unstaged rows are zero. The provider MUST NOT return one host-visible tensor per expert or require repeated activation transfer for multiple remote routes belonging to one token.
+
+Per-route completion metadata MUST state exactly which remote routes are represented in the partial. Failed routes MUST be excluded from that partial and marked for exact recovery. If the provider cannot prove the successful subset after an error, the entire remote subset is uncommittable and MUST be recomputed exactly or the request MUST fail. A combined partial with ambiguous membership MUST NOT enter the join.
+
+## CUDA join and reduction ordering
+
+After identity and completion validation, the state owner copies the remote partial into a preallocated CUDA buffer and forms:
+
+$$
+Y_{\mathrm{routed}}
+=
+Y_{\mathrm{CUDA\ local}}
++
+Y_{\mathrm{B70\ remote}}
++
+Y_{\mathrm{exact\ recovery}}.
+$$
+
+The terms are accumulated in a documented stable order, not completion-race order. The remote partial MUST join on CUDA **before any final tensor-parallel or expert-parallel reduction**. The shared expert remains CUDA-owned and is combined according to canonical upstream vLLM semantics; the B70 result MUST NOT bypass or duplicate that logic.
+
+At initial qualification TP=1. Any later TP/EP mode requires its own proof that the hybrid routed partial joins at the same semantic point as stock vLLM and participates in the final reduction exactly once.
+
+## Publication, identity, and stale-completion protection
+
+The pinned-memory ring uses release/acquire publication:
+
+- CUDA publishes a request only after its device-to-host copies and descriptor writes are complete;
+- the B70 provider claims a request only after acquire validation;
+- the provider publishes a response only after the XPU-to-host output and status writes are complete;
+- CUDA claims a response only after acquire validation; and
+- a slot is reusable only after every CUDA and XPU reference has ended.
+
+Before any response can affect the join, it MUST match the immutable request plan on all applicable identity fields:
+
+- provider protocol and descriptor version;
+- request sequence and ring slot;
+- provider generation;
+- placement and weight generation/fingerprint;
+- layer;
+- staged token count, route count, hidden size, and top-k;
+- token-row and route-subset identity;
+- activation/output dtype;
+- request and output buffer identity/version; and
+- successful or explicitly partial terminal status.
+
+Sequence distinguishes ring publications and wraparound. Provider generation distinguishes worker incarnations. Placement/weight generation distinguishes compact ownership and resident weights. Buffer version distinguishes reused storage. None substitutes for another.
+
+A mismatch, late reply, duplicate reply, provider restart, or completion after recovery closes the remote lane without consuming its payload. The missing routes then follow an exact recovery outcome or the request fails explicitly. Storage whose backend use cannot be proven complete MUST be quarantined rather than reused.
+
+## Exact failure semantics
+
+The only permitted outcomes for each selected route are:
+
+1. its current normal-path owner succeeds and the route commits once;
+2. that lane is closed and the same logical route is recomputed exactly on an available CUDA or CPU correctness path, then commits once; or
 3. the request fails explicitly.
 
-There is no fourth outcome. In particular, timeout, worker reset, invalid metadata, or transport failure must not turn into a zero, a lossy substitute, an unreported route drop, or an indefinite wait.
+Timeout, device loss, kernel error, invalid capability, invalid compact slot, generation mismatch, backpressure, cancellation, and restart MUST NOT become silent partial success or indefinite waiting. Recovery uses the original activation, global expert ID, routing weight, and canonical route position. CPU recovery is request-scoped emergency work, never a steady-state placement tier.
 
-If a B70 worker misses its deadline, the coordinator must stop waiting indefinitely. It may run the exact CPU fallback if that remains viable; otherwise it must fail the request explicitly. Any later B70 completion is stale and must be rejected. Repeated worker failures are recorded and cause worker quarantine.
+The existing Colibri recovery-mask behavior is proven reference evidence for exact failed-route recovery. Production requires a batched per-token/per-route status representation rather than Colibri's single-token mask.
 
-## Deterministic dispatch and joining
+## Capability and model fail-closed behavior
 
-The state owner remains the source of the real router output. Dispatch partitions that output by execution owner without changing route identity or order. For the subset assigned to a B70, the returned partial must represent
+The CUDA adapter MUST compare the model manifest, placement, CUDA artifact, B70 artifact, and provider handshake before publishing hybrid work. Protocol version, model identity, architecture, dimensions, top-k, activation/output dtypes, quantization format, group size, scale dtype, layout, kernel family, capacities, provider generation, weight generation, and placement fingerprint MUST agree.
 
-$$
-\mathrm{B70Partial} \approx \sum_{e\in\text{B70 routes}} w_e\,\mathrm{Expert}_e(x),
-$$
+An absent, unknown, or mismatched field is incompatibility. Unsupported shapes, dtypes, models, route counts, and kernel families MUST fail before execution. A model that is not qualified for B70 remains on stock upstream vLLM CUDA; it MUST NOT be silently sent through a generic B70 kernel. A hybrid placement whose required owner/artifact is unavailable MUST fail startup or use an explicitly validated all-CUDA placement.
 
-where $\approx$ acknowledges only characterized floating-point effects. It does not permit missing, substituted, or duplicated routes.
+## Numerical contract
 
-The join must satisfy all of the following:
+Both provider artifacts MUST derive independently from the same BF16/FP16 higher-precision source checkpoint and bind to its exact identity. CUDA and B70 expert outputs are validated separately against that source before their sum is validated.
 
-- the 5090, B70, and CPU subsets together account for all selected routes;
-- the B70 receives only the subset assigned to it;
-- owner-local and remote partials join once;
-- canonical route order is retained;
-- duplicate work cannot be added a second time;
-- a fixed configuration produces deterministic output; and
-- no unexplained route divergence is accepted.
+Allowed numerical differences are only those covered by a declared precision contract and pre-agreed tolerance for:
 
-A duplicate completion for an already completed logical route is rejected, not accumulated. An undefined duplicate expert ID in an input route subset is rejected before it can alter the join; any explicitly valid repeated expert selection remains represented as distinct canonical route positions and each such selected position is accounted for once.
+- source-to-provider quantization;
+- activation conversion;
+- gate/up, activation, and down-projection arithmetic;
+- routing-weight multiplication;
+- provider accumulation and returned-partial dtype;
+- CUDA scatter/add order; and
+- any later qualified TP/EP reduction.
 
-## Publication and stale-completion protection
+Tolerances MUST be fixed before observing results and MUST specify absolute/relative error, zero-reference handling, and NaN/Inf policy. Speed does not waive an unexplained mismatch. Route identity, ownership, generation, shape, and completion checks are exact even when tensor comparison uses a tolerance.
 
-Request and response publication use release/acquire ordering:
+The proven native Colibri comparator uses signed-S4, group size 64, FP16 scales, FP16 activation staging, ESIMD fused gate/up/SiLU/down execution, and a routing-weighted hidden-size partial, with numerical agreement against its CPU reference. Those facts validate the Colibri GS64 reference path only. The planned llm-scaler batched production provider, and any separately quantized GS128 alternative, require independent qualification.
 
-- a request is not published until the CUDA device-to-host transfer has completed; and
-- a response is not published until the B70 output transfer has completed.
+## Qualification hierarchy
 
-Before a completion can affect the join, it must match the active request on every one of these fields:
+Passing a lower level does not establish a higher one.
 
-- request ID;
-- generation;
-- placement epoch;
-- layer;
-- token count; and
-- buffer version.
+1. **Artifact and one-expert comparison:** validate the CUDA and B70 artifacts independently against the common higher-precision source at dequantized rows, gate/up output, activation, down output, and complete expert output.
+2. **Batched provider mathematics:** compare the returned weighted `[M_remote, hidden]` wire partial with exactly the B70-owned staged routes for full scheduler batches `M=1`, `M=2..32`, and representative prefill sizes, then verify deterministic scatter into the full `[M, hidden]` CUDA buffer.
+3. **Layer replay:** preserve canonical CUDA top-k and compare the post-join routed result with all-CUDA execution, including mixed ownership, no remote routes, compact remapping, and join-before-reduction placement.
+4. **Teacher-forced replay:** compare routes, per-layer results, logits, recurrent/KV behavior, and top-1 tokens across long and multi-turn sequences.
+5. **Generation:** compare deterministic greedy generation and required quality workloads, including intentional B70 failure and restart.
 
-A mismatch in any field rejects the completion. A placement-epoch change invalidates work from the prior placement even if the expert ID is otherwise valid. Late, duplicate, and mismatched work therefore fails closed: it cannot be added to a later token, another layer, a new buffer generation, or a new expert placement. The active request must then complete through another permitted exact outcome or fail explicitly.
+Required staged-provider cases include all staged routes remote and mixed local/remote semantic subsets; duplicate and non-sorted IDs under canonical semantics; multiple tokens choosing one expert; unequal, zero, and near-zero weights; boundary compact slots; changing decode/prefill batch sizes; invalid capability and generations; timeout; kernel failure; and stale completion. Adapter/ring cases separately include a zero-remote batch, which must issue no provider request and must preserve an additive-identity CUDA remote lane, plus ring wraparound and cancellation.
 
-## Validation hierarchy
+No document currently records the production vLLM+B70 path as having passed these gates.
 
-Correctness is established in four levels. Passing a lower level does not imply that a higher level passes.
+## Failure matrix
 
-### Level 1 — Tensor comparison
-
-Compare individual expert outputs with the canonical CPU oracle, including the gate/up/down computation, SiLU multiply, W4 scales, and floating-point accumulation. Record numerical error rather than relying on kernel throughput alone.
-
-### Level 2 — Layer replay
-
-Replay a heterogeneous MoE layer with the same router output. Require the same selected expert IDs, exact route accounting and order, and bounded layer-output error. Exercise routes on B70, 5090, and CPU in the same layer, including deadline fallback, stale completion, and worker reset.
-
-### Level 3 — Teacher-forcing replay
-
-Across long sequences with fixed prompts and teacher-forced tokens, compare logits and route IDs with the canonical owner. Require canonical route IDs, only the assigned subset at each B70, exactly-once joining, bounded and characterized numerical drift, consistent top-1 logits/tokens, and coherent multi-turn state.
-
-### Level 4 — Generation oracle
-
-Run token-exact greedy replay over an agreed corpus where practical and run the required quality benchmarks. Generated tokens are compared end to end, including multi-turn context and intentional B70 failure. Mixed quantization or reduced-return modes require explicit quality approval before acceptance.
-
-## Numerical acceptance
-
-Cross-vendor kernels may change floating-point accumulation order. Numerical equality is therefore evaluated with these requirements:
-
-- expert tensor and layer-output error is bounded and characterized;
-- logit error is bounded and characterized;
-- route divergence must be explained; unexplained divergence fails the gate;
-- top-1 logits and generated tokens remain consistent in fixed-prompt teacher-forcing checks;
-- greedy generation is token-exact over an agreed corpus where practical; and
-- quality approval is explicit before mixed quantization or reduced-return output is enabled.
-
-No numeric tolerance is specified by the source design. A test plan must agree and record tolerances before evaluation; this document does not invent them. A path does not pass merely because its output appears close, and a performance improvement does not override route or token behavior that changes materially.
-
-## Multi-turn and KV-state equivalence
-
-Multi-turn state and prefix/KV persistence must remain observationally equivalent to the canonical execution across turns:
-
-- every sparse layer executes through the fabric during the supported-model gate;
-- multi-turn context remains coherent;
-- prefix and KV persistence do not reuse expert results in place of running the current router;
-- concurrent requests cannot exchange route, generation, epoch, layer, token-count, or buffer state;
-- teacher-forced route IDs and top-1 logits/tokens remain consistent; and
-- greedy generated tokens are compared with the oracle, including after an intentional B70 failure.
-
-A unit tensor comparison cannot establish multi-turn or KV equivalence. That claim requires the end-to-end replay and generation gates above.
-
-## Explicit failure matrix
-
-| Condition | Required handling | Forbidden effect | Evidence required |
-|---|---|---|---|
-| Resident owner completes with matching identity and current epoch | Accept once and mark its logical route complete | A second commit of the same route | Layer replay covering one and multiple routes |
-| No routes are assigned to a B70 | Return/consume the defined empty partial and continue accounting elsewhere | Treating the empty subset as proof that all selected routes completed | Empty-subset layer replay |
-| One or multiple valid routes are assigned to a B70 | Compute only that subset and join each selected route once | Lost, extra, or owner-mismatched routes | Subset tests for one and multiple routes |
-| B70 deadline expires and exact CPU fallback is viable | Execute the request-scoped CPU fallback; reject any late B70 completion | Indefinite wait or later double addition | Deadline test with CPU-oracle comparison |
-| B70 deadline expires and exact fallback is not viable | Fail the request explicitly | Zero fill, lossy result, silent drop, or indefinite wait | Explicit-failure test |
-| Completion arrives after fallback, cancellation, or request advancement | Reject it as stale | Mutation of the current or later request | Late-completion replay |
-| Completion duplicates already committed work | Reject the duplicate | Double-counted expert contribution | Duplicate-completion replay |
-| Request ID, generation, placement epoch, layer, token count, or buffer version mismatches | Reject before the join; use another permitted exact outcome or fail explicitly | Cross-request, cross-token, cross-layer, cross-buffer, or cross-placement contamination | One negative case for each identity field |
-| Placement epoch changes while work is outstanding | Invalidate the prior-epoch completion; recompute exactly if viable or fail explicitly | Addition of a result from the old owner/placement | Placement-epoch-change replay |
-| Worker resets or becomes unhealthy | Use exact CPU fallback if viable, otherwise fail explicitly; quarantine on repeated failures | Partial success represented as a complete route set | Worker-reset and intentional-failure replay |
-| Local expert ID or expert-parallel mapping is invalid | Reject the work before execution or join | Substitution with a different resident expert | Invalid-ID and mapping tests |
-| Input contains an undefined duplicate route ID | Reject or apply the canonical explicitly defined handling before dispatch; never double count | Ambiguous or repeated accumulation | Duplicate-ID test documenting the canonical behavior |
-| Route is masked/padded | Preserve the canonical mask/padding semantics | Executing padding as a selected expert or dropping a real selected route | Masked/padded route test |
-| Selected route has zero weight | Account for it under canonical route semantics | Treating it as evidence that some other selected route may be omitted | Zero-weight route test |
-| Cross-vendor result exceeds the agreed numerical gate or materially changes route/token behavior | Reject that execution path as validated; investigate against the oracle | Accepting speed as a substitute for correctness | All four validation levels, as applicable |
+| Condition | Required outcome | Forbidden outcome |
+|---|---|---|
+| Matching current B70 completion | Accept its proved route subset once | Duplicate or race-ordered addition |
+| No remote route | Skip B70 submission and use a zero remote lane | Treat all selected routes as complete |
+| Partial route failure with exact status | Join only proved successes; recover exactly the marked failures | Add failed/ambiguous routes or recover successes twice |
+| Ambiguous B70 failure | Discard the whole remote partial; recover the remote subset exactly or fail | Guess which routes completed |
+| Deadline/backpressure/device loss/kernel error | Close remote lane; exact CUDA/CPU recovery or explicit failure | Indefinite wait, zero fill, or lossy substitute |
+| Late or duplicate completion | Reject and drain only for resource safety | Reopen a closed lane |
+| Sequence, provider, placement, weight, or buffer generation mismatch | Reject before H2D/join; recover or fail | Best-effort acceptance |
+| Invalid global ID or compact slot | Reject before execution | Substitute another resident expert |
+| Provider capability mismatch | Fail startup/request as appropriate; keep unsupported model on stock CUDA | Generic-kernel fallback |
+| Numerical gate failure | Mark that provider/artifact combination unqualified | Widen tolerance after the result |
 
 ## End-to-end acceptance
 
-A heterogeneous path is correctness-eligible only after it demonstrates, against Colibri's all-CPU or CUDA oracle as applicable:
-
-- all selected experts accounted for exactly once in a real heterogeneous layer;
-- route identity and canonical order preserved;
-- deterministic output for a fixed configuration;
-- bounded and characterized tensor/logit drift under agreed tolerances;
-- coherent teacher-forced, multi-turn, KV/prefix, and greedy-generation behavior;
-- exact CPU degradation or explicit failure under deadline and worker faults;
-- stale and duplicate work rejected; and
-- no correctness regression while placement or scheduling optimizations are introduced.
+The hybrid path is correctness-eligible only when all selected routes are accounted for exactly once; both artifacts trace to one higher-precision source; batched B70 partials pass their oracle; the CUDA join occurs before final TP/EP reduction; stale and ambiguous work cannot enter a request; exact failure recovery or explicit failure is demonstrated; no normal-path CPU matrix work occurs; and teacher-forced, recurrent/KV, logit, and generated-token behavior pass their declared gates.

@@ -2,80 +2,83 @@
 
 ## Purpose and status
 
-This document defines the hardware assumptions, topology audit, transport baseline, and admission gates for the Shooting Brake design described in [`architecture.md`](architecture.md). It is a design and measurement contract, not evidence that the target topology or cross-vendor transport has already been validated.
+This document defines the production hardware boundary, topology checks, transport baseline, and safety gates for the Shooting Brake design in [`architecture.md`](architecture.md). It follows the active plan in [`../plan.md`](../plan.md). It is a design and qualification contract, not a claim that the upstream-vLLM plus llm-scaler production path is implemented or qualified.
 
-The terms below are deliberate:
+Evidence terms are strict:
 
-- **Observed report** means a value recorded by the current repository notes. It still requires reproduction and interpretation.
-- **Upstream claim** means a vendor specification or guidance, not a measurement on this workstation.
-- **Design target** means the topology or behavior the runtime is intended to support.
-- **Unverified assumption** means the design may use the assumption for planning, but must not present it as a hardware fact until the audit below supplies evidence.
+- **Production target** is behavior required of the upstream vLLM 0.26+ integration.
+- **Colibri reference evidence** is an observation from the existing native CUDA+B70 implementation. It proves a narrower transport, correctness, placement, or failure property; it is not a production-vLLM result.
+- **Upstream claim** is a vendor or upstream-project property, not a measurement on this host.
+- **Derived bound** is arithmetic from claims or observations, not achievable-performance evidence.
 
-## Target topology
+## Production topology and ownership
 
-The design target is one local PCIe host containing:
+The supported production topology is one local PCIe host containing:
 
-- one NVIDIA RTX 5090 as the state-owning GPU;
-- four Intel B70 cards as separately addressed resident-expert workers;
-- the host CPU and DDR5 as the exact CPU-fallback tier for weights that fit its configured memory budget;
-- NVMe as the full model repository and as a startup, recovery, and background-staging tier.
+- one NVIDIA RTX 5090, owned exclusively by the upstream vLLM CUDA worker;
+- one Intel B70, owned exclusively by one isolated persistent PyTorch-XPU/llm-scaler provider process;
+- host CPU and memory for orchestration, the fixed pinned-memory request ring, telemetry, and exact emergency recovery only; and
+- NVMe for model artifacts, startup, provider restart, and recovery, never ordinary foreground expert execution.
 
-The RTX 5090 remains authoritative for the sequential residual stream, attention and KV state, router and canonical top-k selection, dense layers, shared experts, local experts, sampling, and request state. Each B70 owns only its resident expert arena, command queues, and request execution. See [`memory.md`](memory.md) for the corresponding memory planes and ownership rules.
+The CUDA worker owns serving, scheduling, continuous batching, attention, KV and recurrent state, router logits, canonical top-k, dense and shared paths, hot routed experts, residual state, sampling, and request state. The B70 provider owns only its cold/overflow routed-expert weights, stable XPU buffers, XPU streams, qualified kernels, and request execution. It never owns router/top-k, shared experts, attention, KV, sampling, or serving.
 
-These are separate memory and bandwidth domains. Four B70s and one RTX 5090 are **not** 160 GB of unified VRAM, and the B70s are **not** one bandwidth-coherent 2.4 TB/s device. Capacity or vendor peak-bandwidth sums must not be used as if every byte were locally accessible by every processor.
+These are separate memory and bandwidth domains. The RTX 5090 and B70 are not unified VRAM, and their peak bandwidths must not be added as if every byte were locally accessible. The CPU is not a normal expert tier and performs no normal-path matrix multiplication. See [`memory.md`](memory.md) and [`placement.md`](placement.md).
 
-The repository describes the current desktop host as a Core Ultra system without the server-class AMX/AVX-512 environment assumed by some CPU-MoE results. Its immediate CPU baseline is therefore the existing AVX2/AVX-VNNI path; a future Xeon/AMX host would be a different measured configuration, not evidence for this one.
+CUDA and Intel dependencies remain process-isolated. The versioned pinned-memory protocol is the compatibility boundary between the upstream-vLLM CUDA state owner and the separately pinned PyTorch-XPU/llm-scaler provider environment.
 
 ## Required physical-topology audit
 
-Before cross-device performance conclusions, capture the following for the RTX 5090 and for **each** B70, identified by stable PCI address:
+Before production performance claims, record the following for the RTX 5090 and the single B70, identified by stable PCI address:
 
 | Evidence | Required result |
 |---|---|
 | Link | Negotiated PCIe generation and width at idle and under transfer load |
-| Path | Root port, any intervening switch, and the relationship between all five GPUs and NVMe |
-| Locality | NUMA node for the device and for its pinned host rings |
+| Path | Root port, intervening switch, and relationship between the RTX 5090, B70, host memory, and NVMe |
+| Locality | NUMA node for each device and the pinned ring |
 | Addressing | ReBAR state and observed IOMMU/ACS behavior |
-| Capacity | Actual allocatable VRAM, not nominal board capacity |
-| Transfers | Sustained GPU-to-pinned-host and pinned-host-to-GPU bandwidth |
-| Contention | Transfer results alone, with concurrent RTX 5090 copies, with concurrent NVMe activity, and under the intended combined load |
-| Concurrency | Independent DMA and expert compute while all five GPUs are active |
-| Stability | Errors, retries, queue stalls, and completion correctness during sustained load |
-| Environment | Exact GPU driver versions and the runtime/API versions used for the measurement |
-| Operating envelope | Temperatures, clocks, power state, throttling indicators, and whether results are steady-state |
+| Capacity | Actual allocatable VRAM after runtime reservations, not nominal board capacity |
+| Transfers | Sustained CUDA↔pinned-host and pinned-host↔B70 bandwidth plus p50/p95/p99 latency |
+| Concurrency | Independent DMA and expert compute while the CUDA state path and B70 provider are active |
+| Stability | Errors, retries, queue stalls, stale completions, and completion correctness during a soak |
+| Environment | Exact CUDA, NVIDIA driver, PyTorch XPU, oneAPI, Level Zero, llm-scaler, and kernel-bundle versions |
+| Operating envelope | Temperatures, clocks, power state, throttling indicators, and steady-state duration |
 
-A topology diagram without these per-slot results is descriptive only. A device enumeration is not proof of negotiated width, NUMA locality, concurrent DMA stability, or usable transport latency.
+Enumeration or a topology diagram is descriptive only. It does not establish negotiated width, NUMA locality, DMA overlap, tail latency, or stable simultaneous execution.
 
-### Suspicious B70 link report
+### Suspicious B70 link reference
 
-The repository records this **observed report**:
+Repository notes contain this historical observation:
 
 ```text
 B70 sysfs: 2.5 GT/s ×1 current and maximum
 ```
 
-This line must not be silently treated either as the verified topology or as a harmless idle-link power state. Reproduce it per B70, identify the PCI address and slot, and measure the negotiated link under load. If the card remains at 2.5 GT/s ×1 under load, treat it as genuinely Gen1 ×1 for the gate below. If it retrains, retain both the idle and loaded evidence and explain the transition.
+Treat it as **Colibri/reference evidence requiring reproduction and interpretation**, not as the qualified production link. Record the B70 PCI address and slot and measure the link under load. If it remains at 2.5 GT/s ×1, treat the path as Gen1 ×1 and stop production integration benchmarking until topology, firmware, or slot configuration is corrected. If it retrains, retain both idle and loaded evidence.
 
-## Cross-vendor transport baseline
+## Production transport
 
-Direct NVIDIA-to-Intel peer memory access is **not established**. CUDA P2P is not a general CUDA-to-Level-Zero interoperability guarantee; permissive PCIe topology or IOMMU settings alone do not prove driver support, shareable memory handles, synchronization semantics, or correct completion ordering.
+Direct NVIDIA-to-Intel peer memory is not assumed. CUDA P2P does not establish CUDA-to-Level-Zero interoperability, handle sharing, synchronization, or completion ordering. The production baseline is a fixed, bounded pinned-host shared-memory ring:
 
-The required baseline is host-pinned staging:
+```text
+upstream vLLM CUDA worker
+    ↕ fixed versioned pinned-memory request/completion ring
+isolated persistent PyTorch-XPU B70 provider
+    └── qualified llm-scaler tiny/batched/prefill ESIMD kernels
+```
 
-- allocate one preallocated inbound ring and one preallocated outbound ring per B70;
-- place those rings on the CPU/NUMA node closest to that B70, subject to audit rather than assumption;
-- use bounded, double- or triple-buffered queues with no per-token allocation and no global mutex on the token path;
-- use monotonic sequence information, explicit deadlines, and completion-safe slot reuse;
-- keep stable activation/result buffers, pre-created events and kernels, and pre-bound weight arenas;
-- use immediate command submission where the measured Intel runtime supports it; do not rebuild pipelines or descriptors per sparse layer.
+The ring must:
 
-Intel guidance favoring immediate command lists is an **upstream claim**. Low submission overhead on these B70s remains a measurement requirement. The repository's approximately 0.8 ms synchronous-submit precedent is a warning about the class of overhead to eliminate, not a measured result for the proposed B70 worker.
+- be allocated and capacity-negotiated at startup;
+- contain multiple reusable slots with stable addresses;
+- hold activation rows, canonical expert IDs and routing weights, route masks/maps, and one output row per transported token;
+- use monotonically increasing request sequence, provider/weight generation, layer, placement generation, token count, route count, and buffer version;
+- publish with explicit release/acquire ordering;
+- apply bounded queues, backpressure, deadlines, and completion-safe slot reuse;
+- use pre-created events, CUDA copy streams, XPU streams, and stable provider tensors;
+- perform no hot-path allocation, `.item()`, device-wide synchronization, weight transfer, or quantization; and
+- send no request for a layer/step with zero B70-owned routes.
 
-The first performance proof should use the Colibri C runtime, CUDA backend, and an Intel SYCL/DPC++ or Level Zero module behind a C ABI in one process, so IPC is not confounded with the primitive. Worker-process isolation is a later operational choice and may be adopted only after the empty-ring round trip has been measured. Even then, transport remains shared pinned rings—not JSON, protobuf, gRPC, Python, or ordinary pipes.
-
-### Publication and reuse rules
-
-The later revised protocol is authoritative. A slot follows:
+A representative slot lifecycle is:
 
 ```text
 FREE
@@ -87,49 +90,49 @@ FREE
   -> FREE
 ```
 
-Publication uses release/acquire ordering. The request cannot become `REQUEST_READY` before CUDA device-to-host completion, and the response cannot become `RESPONSE_READY` before the B70 output transfer completes. A completion is rejected unless request ID, generation, placement epoch, layer, token count, and buffer version all match. These checks prevent a late B70 result from entering a later token or placement epoch.
+`REQUEST_READY` cannot publish before CUDA D2H completion. `RESPONSE_READY` cannot publish before the provider output is visible to the CUDA-side process. A completion is accepted only when sequence, slot, layer, placement generation, weight/provider generation, token count, and buffer version match. A timeout or invalid completion identifies exact failed token-route entries for exact CUDA/CPU recovery or explicit request failure.
 
-Pinned staging is a baseline, not proof that it meets the token-path budget. NUMA locality, page locking, DMA overlap, and stable concurrency are **unverified assumptions** until the matrix below has been run on every slot.
+Pinned staging is the required baseline, not proof of adequate performance. Ordinary pipes, JSON, protobuf, and gRPC are not token-path transports. Direct peer transport may replace pinned staging only after equivalent ordering, lifecycle, failure, output-agreement, and tail-latency evidence on this exact stack.
 
-## Bandwidth and latency evidence matrix
+## Colibri reference evidence
 
-Measure every B70 independently and all B70s concurrently. Preserve raw samples or traces sufficient to reproduce p50, p95, and p99; an average alone is insufficient.
+The native worker in `colibri-variants/colibri-qwen36/c/b70_moe_sycl.cpp` has already demonstrated, for the proven Colibri GS64 path:
 
-| Path or primitive | Payloads | Required concurrency variants | Required evidence |
-|---|---:|---|---|
-| Pinned host → B70 | bandwidth sweep plus 12, 24, 48, 96 KiB latency points | isolated; concurrent RTX 5090 copy; concurrent NVMe; intended combined load | negotiated link under load, throughput, p50/p95/p99, NUMA placement, temperature/clocks |
-| B70 → pinned host | bandwidth sweep plus 12, 24, 48, 96 KiB latency points | isolated; concurrent RTX 5090 copy; concurrent NVMe; intended combined load | negotiated link under load, throughput, p50/p95/p99, NUMA placement, temperature/clocks |
-| RTX 5090 → pinned ring → B70 → pinned ring → RTX 5090 | empty-ring round trip and representative activation/result sizes | isolated; all four workers active; NVMe background activity | end-to-end p50/p95/p99, queue wait, direction-specific copies, publication/completion timing |
-| B70 DMA plus expert compute | representative routed-expert shapes | one worker; all four B70s plus RTX 5090 active | overlap, service-time distribution, errors/stalls, sustained clocks and throttling |
-| NVMe background staging | representative background reads | alone; concurrent GPU copies and compute | GPU-transfer and tail-latency interference; confirmation that foreground tokens do not issue storage reads |
+- persistent B70 expert weights and compact `(layer, expert) -> slot` ownership;
+- signed-S4 GS64 conversion, FP16 activation staging, and ESIMD gate/up/SiLU/down execution;
+- canonical selected IDs and routing weights supplied to B70;
+- one routing-weighted hidden-size partial returned to the CUDA side;
+- asynchronous issue/take separation;
+- exact failed-route recomputation rather than silent contribution loss;
+- numerical agreement with the CPU reference;
+- end-to-end CUDA+B70 generation with zero normal-path CPU expert fallback; and
+- controlled hybrid throughput close to the corresponding all-CUDA Colibri expert configuration.
 
-The measurement record must identify the card and slot, root path, NUMA placement, ReBAR/IOMMU/ACS state, driver/runtime versions, power and thermal state, test duration, payload shape, queue depth, and concurrency mode. Results from one B70 or an idle system do not establish four-card behavior.
+Observed one-token B70 issue/take was roughly 56–100 µs per active MoE layer. This is a useful transport/correctness/latency baseline only. The native worker has one in-order queue, one pending operation, fixed single-token scratch, no continuous-batch aggregation, and no large-prefill grouped path. It does not prove the planned batched llm-scaler provider, process-ring overhead, upstream-vLLM integration, graph behavior, production throughput, or production tail latency.
 
-No transport claim may be made from topology inspection alone. In particular, NVIDIA–Intel P2P may be described as supported only after direct evidence establishes all of the following on this exact software and hardware configuration:
+The B70's 608 GB/s specification is an upstream claim. For an ideal 18 MiB W4 expert it implies a roughly 31 µs weight-read lower bound, but that omits scales, dequantization, launch, intermediates, imbalance, transport, and join. It must not be reported as measured latency.
 
-1. mutually usable allocation or memory-handle semantics;
-2. correct synchronization and publication ordering in both directions;
-3. stale-completion and slot-reuse correctness under concurrency;
-4. per-size p50/p95/p99 latency and sustained bandwidth;
-5. stable simultaneous operation with all five GPUs and NVMe contention;
-6. driver/runtime versions and thermal/throttling evidence for the run;
-7. end-to-end output agreement against the host-pinned baseline.
+## Qualification matrix
 
-Absent that evidence, host-pinned staging remains the production baseline.
+Preserve raw samples sufficient for p50/p95/p99 and record topology, runtime versions, payload, queue depth, concurrency, clocks, power, and thermal state.
 
-## Performance bounds are not measurements
+| Path or primitive | Required cases | Required evidence |
+|---|---|---|
+| CUDA → pinned host | compact activation rows `[M_remote, hidden]` drawn from full scheduler batches `M=1`, `2..32`, larger decode, and prefill | bandwidth, p50/p95/p99, copy-stream overlap, no device-wide synchronization |
+| Pinned host → B70 and reverse | the same active `[M_remote, hidden]` rows plus route metadata and one `[M_remote, hidden]` wire partial | negotiated link under load, NUMA placement, p50/p95/p99, provider copy time |
+| Empty fixed-ring round trip | queue depths and slots through wraparound/backpressure | publication/completion time, stale-reply rejection, bounded CPU consumption |
+| Ring plus llm-scaler provider | tiny, small/grouped decode, and grouped prefill shapes | queue, copies, kernel, total remote path, exposed CUDA wait, errors/stalls |
+| Concurrent CUDA+B70 layer | local CUDA routed/shared work overlapping the one B70 operation | branch overlap, critical path, join time, output agreement |
+| Recovery and restart | timeout, invalid generation, provider loss/restart, cancellation, work in flight | no stale acceptance or silent contribution loss; exact recovery or explicit failure |
+| NVMe artifact activity | startup/restart and separately induced background reads | foreground interference and confirmation of zero ordinary decode reads |
 
-An ideal W4 expert is estimated to read about 18 MiB. Dividing by the B70's **upstream-claimed** 608 GB/s bandwidth gives an approximately 31 µs perfect weight-read lower bound; two balanced experts give approximately 62 µs. These figures exclude group scales, dequantization, XMX utilization losses, intermediates, elementwise work, launch cost, and routing imbalance.
+## Safety and admission gates
 
-The resulting roughly 100–160 µs sparse-layer design budget is plausible only with balanced work, persistent or immediate submission, overlapped transport, and no per-layer host synchronization. It remains unproven until a standalone expert benchmark and the transport matrix exist. Marketing TOPS or peak bandwidth must not be substituted for batch-one MoE latency evidence.
-
-## Hard gates and fallback decisions
-
-The following gates are normative:
-
-1. **Topology gate:** if a B70 is genuinely Gen1 ×1 under load, stop architecture benchmarking and fix topology, firmware, or slot configuration first. Device-local kernel speed cannot compensate for a broken host link.
-2. **Five-GPU stability gate:** every B70 must sustain stable independent DMA and compute under simultaneous five-GPU load before the topology is admitted for serving experiments.
-3. **Foreground transport gate:** if empty cross-vendor round-trip p99 is too high for the foreground latency path, batch more aggressively, restrict B70s to prefill/background work, and avoid mandatory B70 participation in foreground batch-one decode. Do not hide the result behind device-local benchmarks.
-4. **Storage-path gate:** ordinary foreground decode must never synchronously read an expert from NVMe. NVMe is limited to startup, recovery, frozen formats, and optional background preload. A configuration that requires foreground storage reads is not robust interactive serving.
-
-Large batch-one decode gains, low CUDA-to-Level-Zero p99, and stable four-B70 submission on this motherboard are plausible but unproven. The audit and matrix above are the evidence required to change that status.
+1. **Topology:** a B70 that remains Gen1 ×1 under load blocks cross-device production benchmarking.
+2. **Runtime isolation:** CUDA and XPU ownership must remain in separate pinned environments/processes; startup fails closed on device, protocol, manifest, capability, shape, dtype, layout, group-size, or generation mismatch.
+3. **Ring safety:** wraparound, backpressure, cancellation, simultaneous completion, stale replies, provider restart, and shutdown with work in flight must not reuse a slot early or accept an invalid partial.
+4. **Steady-state allocation:** no weights or scratch tensors are allocated, uploaded, converted, or migrated during dispatch.
+5. **Failure semantics:** B70 loss must never silently omit a selected expert. Exact failed routes are recomputed on an available CUDA/CPU correctness path or the request fails explicitly.
+6. **Storage path:** ordinary warmed decode performs no synchronous NVMe expert read.
+7. **Thermal and power stability:** performance evidence is inadmissible if it hides throttling, unstable clocks, device errors, or an unreported power limit.
+8. **Production evidence:** acceptance is based on the controlled comparison with stock all-CUDA upstream vLLM in [`benchmarking.md`](benchmarking.md), not on Colibri timing or theoretical bandwidth.

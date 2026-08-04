@@ -1,456 +1,401 @@
 # Shooting Brake Architecture
 
+## Authority and status
+
+[`../plan.md`](../plan.md) is the sole authoritative active architecture and implementation plan. This document explains that architecture's boundaries and data flow. If it diverges from `plan.md`, `plan.md` controls.
+
+**Production status:** planned and under qualification. The target is upstream vLLM 0.26+ on one RTX 5090 as the CUDA state owner plus one isolated persistent PyTorch-XPU/llm-scaler provider on one Intel Arc Pro B70. That production integration is not yet claimed complete.
+
+**Reference status:** `colibri-variants/colibri-qwen36/` has already demonstrated a native CUDA+B70 Qwen3.6 GS64 path. Its transport lifecycle, expert residency, conversion, route ownership, numerical agreement, placement behavior, and exact recovery semantics are proven reference evidence. It is not the selected production model host.
+
 ## Purpose
 
-Shooting Brake is a heterogeneous Mixture-of-Experts inference system. It keeps the model's sequential state—attention, KV state, router, dense layers, shared experts, and sampling—on the fastest state-owning GPU, while secondary devices execute routed experts from resident weight banks. It moves activations and weighted expert partials between devices instead of moving expert weights on the foreground token path.
+Shooting Brake extends upstream vLLM with a narrow heterogeneous routed-expert boundary:
 
-The intended product is one OpenAI-compatible model endpoint backed by a self-tuning execution fabric spanning:
+- vLLM remains responsible for scheduling, continuous batching, serving, sequential model state, CUDA routing, local CUDA compute, and output generation;
+- a Qwen-scoped out-of-tree `HybridMoERunner` / `HybridRoutedExperts` adapter partitions the canonical selected routes after top-k;
+- a versioned pinned-memory request ring submits only remote routes to a separate persistent B70 process;
+- qualified llm-scaler kernels execute the B70-resident experts and return one routing-weighted compact `[M_remote, hidden]` wire partial, which CUDA scatters into the full `[M, hidden]` batch;
+- CUDA asynchronously copies and adds that partial before model execution continues.
 
-- NVIDIA CUDA for the state-owning GPU;
-- Intel XPU/Level Zero or SYCL for resident expert workers;
-- DDR5 for exact cold-expert fallback;
-- NVMe for startup, recovery, and background staging;
-- persistent routing and performance telemetry for placement decisions.
+The normal path moves activations, route metadata, and weighted partials. It never moves expert weights and never performs CPU matrix computation.
 
-The repository directories under `shooting-brake/` are not nine competing runtimes. Each has a specific role: production substrate, policy reference, kernel source, correctness baseline, optimization research, or measurement tooling.
-
-## System Invariants
-
-These constraints apply across every repository boundary:
-
-1. **Placement changes performance, not model semantics.** Router decisions, selected expert IDs, route weights, expert precision, and reduction order remain faithful.
-2. **The state owner remains authoritative.** The primary GPU owns the sequential residual stream, attention/KV state, router execution, dense layers, shared experts, and sampling.
-3. **Secondary GPUs are expert workers.** They receive activations plus route metadata and return one weighted partial per original token.
-4. **Move activations, not weights.** Permanent or epoch-stable expert banks remain resident on worker devices. Ordinary decode must not migrate expert weights.
-5. **DDR5 fallback is exact.** Missing, unhealthy, or late device work can fall back without changing the requested computation.
-6. **NVMe is not an ordinary foreground decode tier.** It supports startup, recovery, and background promotion. A normal token should not synchronously wait for an NVMe expert read.
-7. **Prediction is optional.** Prefetch and route prediction may improve latency but are never required for correctness.
-8. **Generated or experimental kernels are candidates, not ground truth.** Every path is compared with a canonical CPU or state-owner-GPU oracle.
-9. **Optimization is accepted only from end-to-end evidence.** Kernel throughput alone is insufficient; TTFT, decode latency, tail latency, transfers, queueing, memory, and output agreement must be measured together.
-
-## Target Runtime
+## Production topology
 
 ```mermaid
 flowchart LR
-    Client[OpenAI-compatible client] --> API[Colibri API and serving layer]
-    API --> Owner[State-owning RTX 5090]
+    Client[OpenAI-compatible client] --> API[Upstream vLLM serving and scheduler]
+    API --> Owner[RTX 5090 CUDA state owner]
 
-    Owner --> Attn[Attention and KV state]
-    Attn --> Router[Router and top-k]
-    Router --> Place[Placement scheduler]
+    Owner --> State[Attention / KV / GDN state]
+    State --> Router[CUDA router and canonical top-k]
+    Router --> Hybrid[Qwen-scoped HybridMoERunner]
 
-    Place --> Local[5090-resident experts]
-    Place --> XPU1[B70 worker bank 1]
-    Place --> XPU2[B70 worker bank N]
-    Place --> CPU[DDR5 exact fallback]
+    Hybrid --> Local[Stock-compatible CUDA routed experts]
+    Hybrid --> Shared[Stock shared expert]
+    Hybrid --> Ring[Versioned pinned-memory request ring]
+    Ring --> Provider[Persistent PyTorch-XPU B70 provider]
+    Provider --> Kernels[Qualified llm-scaler ESIMD kernels]
+    Kernels --> Provider
+    Provider --> Ring
 
-    Local --> Join[Ordered weighted partial join]
-    XPU1 --> Join
-    XPU2 --> Join
-    CPU --> Join
+    Ring --> RoutedJoin[Async CUDA copy and routed-partial addition]
+    Local --> RoutedJoin
+    RoutedJoin --> Combine[Stock shared-expert combine / residual continuation]
+    Shared --> Combine
+    Combine --> Output[LM head / sampling / response]
 
-    Join --> Owner
-    Owner --> Dense[Shared experts and dense path]
-    Dense --> Sample[LM head and sampling]
-    Sample --> API
-
-    Router --> Trace[Route telemetry]
-    Local --> Trace
-    XPU1 --> Trace
-    XPU2 --> Trace
-    CPU --> Trace
-    Trace --> Profile[Persistent placement profile]
-    Profile --> Place
-
-    NVMe[NVMe model storage] -. startup/recovery/background .-> CPU
-    CPU -. placement epochs .-> XPU1
-    CPU -. placement epochs .-> XPU2
+    CPU[CPU orchestration and exact emergency recovery] -. lifecycle / recovery only .-> Hybrid
 ```
 
-### Startup
+There is exactly one CUDA state owner and one B70 provider in the initial production configuration. Additional devices, alternative production hosts, and a multi-worker topology are outside the active Phase 0–10 plan.
 
-The intended startup sequence is:
+## Ownership boundaries
 
-1. Probe CUDA, Level Zero/SYCL, PCIe topology, NUMA layout, RAM, and storage.
-2. Verify model manifests and device-specific packed expert banks.
-3. Load state-owner tensors on the RTX 5090.
-4. Load permanent expert banks on the B70 workers.
-5. Establish the complete DDR5 cold bank where the configured memory budget allows it.
-6. Restore routing, placement, and measured-performance profiles.
-7. Reserve KV, prefix, pinned transport, scratch, and safety capacity.
-8. Run kernel and transport health checks.
-9. Reject unsafe or internally inconsistent configurations before serving.
+### CUDA state owner
 
-### Per-layer execution
+Upstream vLLM on the RTX 5090 owns:
 
-For each sparse layer:
+- request admission, scheduling, continuous batching, and serving APIs;
+- model and tokenizer configuration;
+- embeddings, dense projections, residuals, normalization, and output layers;
+- attention, KV cache, and DeltaNet/GDN recurrent state;
+- router logits and canonical top-k expert selection;
+- canonical selected expert IDs and routing weights;
+- hot routed experts and the shared expert;
+- route partitioning through the Shooting Brake adapter;
+- the authoritative model residual stream;
+- final partial addition, LM head, sampling, and response state.
 
-1. The state owner computes router logits and canonical top-k routes.
-2. The scheduler maps selected routes to the local GPU, one or more B70 workers, or DDR5 fallback.
-3. Each destination receives one activation per original token plus its local expert IDs and routing weights.
-4. Each destination remaps token rows by local expert, performs gate/up GEMM, activation, down GEMM, and weighted inverse gather.
-5. Each destination returns one combined weighted partial per original token—not one result per expert.
-6. The state owner joins partials in a deterministic order and continues the sequential model path.
-7. Routing, queue, copy, kernel, join, and fallback events are recorded for future placement epochs.
+Neither the transport nor the B70 provider may recompute router logits, softmax, top-k, shared-expert work, attention, or sampling.
 
-For GLM hidden size 6144 with BF16 transport, one activation or result vector is 12 KiB. A worker that owns several selected experts still receives the activation once and returns one combined 12 KiB partial.
+### Shooting Brake adapter
 
-## Repository Role Matrix
-
-The revisions below are the inspected revisions recorded in `../README.md`; they are provenance notes, not a claim that every checkout remains at that revision.
-
-| Repository | Recorded origin/revision | Role in Shooting Brake | Adoption status | Principal limitation |
-|---|---|---|---|---|
-| `colibri-variants/` | JustVugg/colibri and local variants | Proven heterogeneous CUDA+B70 implementation, model-format reference, CPU oracle, routing and placement reference | Correctness and transport reference | Variant capabilities differ; `colibri-variants/colibri-qwen36/` is the proven CUDA+B70 path, not the selected production host |
-| `lucebox/` | Luce-Org/lucebox-hub | Reference for traffic-learned hot/cold placement, bounded cache behavior, routing profiles, and self-tuning serving | Reuse selected algorithms and invariants | Designed around CUDA/CPU offload, not a cross-vendor execution fabric |
-| `vllm/` | upstream vLLM, local `v0.26.1rc0-285-g1c0d20791` checkout | RTX 5090 state owner, scheduler, continuous batching, attention/KV, CUDA MoE, LM head, sampling, and serving | Selected production CUDA host | The B70 bridge must remain out-of-tree and versioned across vLLM upgrades |
-| `cudnn-frontend/` | NVIDIA cuDNN frontend checkout | CUDA graph/API patterns and supported backend examples | Reference dependency | NVIDIA-only; it does not define the cross-vendor transport or worker contract |
-| `playground/llama.cpp/` | llama.cpp checkout | Experiments and comparative implementation reference | Playground only | Not the selected state-owner or serving runtime |
-| `intel-xpu/vllm-xpu/vllm-xpu-kernels/` | vllm-project/vllm-xpu-kernels, `dd3bc2127cff` | Primary B70 W4/INT4 expert-compute candidate: remap, grouped GEMM, activation, gather | Primary Intel kernel source | PyTorch/XPU extension; no CUDA-owner transport or resident-worker service |
-| `intel-xpu/llm-scaler/` | Intel llm-scaler checkout | Known-working patched B70 INT4 baseline and A/B reference | Preserve as comparison oracle | Pinned older APIs and local patches diverge from current upstream kernels |
-| `intel-xpu/intel-xpu-backend-for-triton/` | Intel XPU Triton backend | Alternative MXFP4 ragged-expert implementation | Later kernel provider | MXFP4 E2M1 block-32 differs from Colibri integer W4; available benchmark path is CUDA-centric |
-| `intel-xpu/vllm-xpu/Xe-Fuse/` | IntelLabs/Xe-Fuse, `3e6f0425ecb8` | BF16 fused-expert upper bound, fused epilogues, BMG-G31 tile examples | Later/reference backend | No W4 path, router/remap/gather pipeline, or residency runtime |
-| `intel-xpu/vllm-xpu/Xe-Forge/` | IntelLabs/Xe-Forge, `ea0d20ab7fed` | Tile search and generated-kernel optimization after correctness is established | Later autotuner only | Current MoE template uses synthetic routing and disables verification by default |
-| `intel-xpu/vllm-xpu/vllm-xpu-breakdown/` | yangulei/vllm-xpu-breakdown, `dc477078bc0d` | Trace-grounded XPU profiling, shape reconstruction, replay, reports, and regression history | Measurement layer | Does not natively understand expert identity, residency, placement reason, or cross-device transport |
-| `intel-xpu/LLM.xpu/` | xinming-wei/LLM.xpu, `689be270aa29` | Reference for async request lifecycle, shared host buffers, and row-sliced device ownership | Borrow lifecycle ideas only | Llama/OpenVINO NPU+iGPU focus; no MoE, discrete B70 fabric, CUDA interop, placement, or NVMe tier |
-
-## Repository Details
-
-### `vllm/`: production RTX 5090 state owner
-
-Upstream vLLM is the selected production CUDA host. Keep scheduling, continuous batching, attention/KV state, DeltaNet/GDN state, router/top-k, hot and shared experts, residuals, LM head, sampling, and serving in this runtime. Shooting Brake adds only the narrow modular-MoE adapter required to submit preselected overflow routes to the persistent B70 provider and join one weighted hidden-size partial.
-
-The adapter is out-of-tree and versioned. Intel XPU dependencies do not enter vLLM's CUDA process, and llm-scaler's complete vLLM 0.21 patch is not applied to this vLLM 0.26+ checkout.
-
-`cudnn-frontend/` is a nearby NVIDIA backend reference for supported graph construction and kernel integration. It does not own placement, transport, failure recovery, or the B70 protocol.
-
-### `colibri-variants/`: heterogeneous correctness and transport reference
-
-Colibri is the proven CUDA+B70 reference implementation rather than the selected production model host. Reuse or preserve:
-
-- GLM-5.2 loading and execution;
-- packed quantized model formats;
-- quantized CPU expert kernels for exact fallback;
-- CUDA dense and state-owner execution;
-- existing CUDA multi-device resident-expert precedent;
-- attention, KV state, router, shared experts, dense layers, LM head, and sampling;
-- VRAM/RAM/NVMe hierarchy;
-- frequency, recency, pinning, and repinning mechanisms;
-- canonical route telemetry;
-- persistent KV and context support;
-- resource planning;
-- OpenAI-compatible serving and continuous request handling;
-- existing backend and tier correctness tests.
-
-Important implementation areas documented in the root plan:
-
-- `colibri-variants/colibri/c/colibri.c`: model execution, CPU fallback, tier orchestration, and prefetch paths;
-- `colibri-variants/colibri/c/backend_cuda.cu`: CUDA state-owner path and multi-device resident-expert precedent;
-- `colibri-variants/colibri/c/backend_vulkan.c`: heterogeneous secondary-device precedent;
-- `colibri-variants/colibri/c/tier.h`: frequency/recency placement;
-- `colibri-variants/colibri/c/route_trace.h`: canonical route traces;
-- `colibri-variants/colibri/c/kv_persist.h`: persistent conversation state;
-- `colibri-variants/colibri/c/resource_plan.py`: hardware-aware planning;
-- `colibri-variants/colibri/c/tests/`: correctness harnesses.
-
-Generalize only the boundaries required by heterogeneous Intel workers:
-
-- fixed CUDA/Vulkan device assumptions;
-- at-most-one-secondary-device logic;
-- synchronous secondary-device submission;
-- frequency-only placement;
-- CPU-side per-expert accumulation when a device can return one packed partial.
-
-Colibri remains the correctness oracle while new worker paths are introduced.
-
-### `lucebox/`: placement and self-tuning policy reference
-
-Lucebox contributes the Luce Spark behavior that motivates the placement layer:
-
-- traffic-derived per-layer expert frequency;
-- persistent placement profiles;
-- bounded cache capacity;
-- explicit hot/cold expert separation;
-- asynchronous promotion;
-- self-tuning serving;
-- routing statistics and learned residency decisions.
-
-Shooting Brake extends that idea from one CUDA hot cache to an $N$-device execution fabric. Placement must minimize the distributed critical path, not merely the cold-miss rate. Secondary cards compute with resident weights; they are not passive storage slots.
-
-Reuse the policy concepts and invariants, not the CUDA/CPU-specific architecture wholesale.
-
-### `intel-xpu/vllm-xpu/vllm-xpu-kernels/`: primary B70 expert kernel source
-
-This repository is the primary candidate for resident W4 expert execution on Intel B70/Xe2.
-
-Relevant interfaces:
-
-- `intel-xpu/vllm-xpu/vllm-xpu-kernels/vllm_xpu_kernels/fused_moe_interface.py`;
-- `intel-xpu/vllm-xpu/vllm-xpu-kernels/csrc/xpu/grouped_gemm/grouped_gemm_interface.h`;
-- `intel-xpu/vllm-xpu/vllm-xpu-kernels/csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp`;
-- `intel-xpu/vllm-xpu/vllm-xpu-kernels/csrc/xpu/grouped_gemm/xe_2/grouped_gemm_xe2_interface.hpp`;
-- `intel-xpu/vllm-xpu/vllm-xpu-kernels/csrc/xpu/grouped_gemm/xe_2/grouped_gemm_xe2.hpp`;
-- `intel-xpu/vllm-xpu/vllm-xpu-kernels/csrc/moe/remap_hidden_states.cpp`;
-- `intel-xpu/vllm-xpu/vllm-xpu-kernels/csrc/moe/moe_gather.cpp`.
-
-The direct grouped-GEMM contract accepts a contiguous activation matrix, packed expert weights and scales, a row count per expert, and a contiguous output. Supported formats include BF16/FP16, FP8, INT4, and MXFP4, with quantization groups 32, 64, 128, and 256.
-
-Its existing fused-MoE flow already performs:
+The Qwen-scoped out-of-tree adapter owns only the post-top-k routed-expert boundary:
 
 ```text
-hidden states
-  -> remap rows by local expert
-  -> grouped GEMM gate/up
-  -> activation
-  -> grouped GEMM down
-  -> weighted inverse gather
-  -> per-token MoE output
+HybridMoERunner
+HybridRoutedExperts
+ShootingBrakeExpertProviderClient
 ```
 
-The Shooting Brake adaptation is narrow: accept only routes owned by one B70, map global expert IDs to device-local IDs, execute them, and return one weighted B70 partial per original token.
+It must:
 
-The runtime must not embed or fork all of vLLM. It should put only the required grouped-MoE operations behind a stable B70 expert-worker ABI.
+1. accept vLLM's canonical `topk_ids [M, topk]` and `topk_weights [M, topk]`;
+2. map global expert IDs through one immutable placement generation;
+3. partition routes into CUDA-local, B70-remote, and invalid/recovery masks;
+4. publish remote work without synchronizing the whole CUDA device;
+5. run the compatible stock CUDA MoE backend for local routes;
+6. receive one weighted remote partial and its completion metadata;
+7. add the partial on CUDA before any final tensor/expert-parallel reduction;
+8. initiate exact failed-route recovery or fail explicitly.
 
-#### Quantization compatibility gate
+The adapter is selected only by an explicitly qualified Qwen architecture/configuration. Unsupported models remain on the stock all-CUDA path.
 
-Matching dimensions and group size do not establish compatibility. Validate:
+### B70 provider
 
-- signed nibble and zero-point convention;
-- gate/up row ordering;
-- interleaved versus split gate/up storage;
-- scale dtype and orientation;
-- N-major versus K-major packing;
-- row padding and alignment;
-- Colibri-specific quantization corrections.
+The isolated persistent PyTorch-XPU process owns:
 
-The first conversion target is exactly one expert, compared numerically with the Colibri CPU and state-owner-GPU references before bulk conversion.
+- explicit selection of the one B70 device;
+- a pinned llm-scaler/PyTorch-XPU/vLLM-XPU-kernel/oneAPI environment;
+- provider capability reporting and compatibility validation;
+- compact persistent B70 expert storage;
+- `(layer, global expert) -> compact B70 slot` mapping;
+- grow-only or fixed preallocated activation, route, scratch, and output tensors;
+- tiny, small/batched, and prefill kernel selection from measured thresholds;
+- remap, gate/up, activation, down, and weighted accumulation;
+- health, issue, take, completion, timing, and failure reporting.
 
-### `intel-xpu/llm-scaler/`: patched B70 correctness and performance baseline
+It receives preselected route IDs and weights. It returns one weighted partial per submitted token row, not one tensor per expert. It owns no model-level request state.
 
-`intel-xpu/llm-scaler/` is retained because its pinned vLLM XPU kernel revision is known to work on the target hardware and includes material local fixes. It is an A/B reference, not the long-term source of truth.
+The initial production provider reuses qualified operators from `intel-xpu/llm-scaler/`. Its complete vLLM 0.21 patch must not be applied to the upstream vLLM 0.26+ CUDA host. A Torch-free native provider is considered only if profiling shows that the isolated PyTorch-XPU wrapper materially dominates the useful B70 work.
 
-The documented checkout pins vLLM XPU kernels at `3cab97a` and applies:
+### CPU
+
+The CPU owns orchestration only:
+
+- process startup and shutdown;
+- protocol negotiation and manifest checks;
+- queue and placement management;
+- telemetry and operational controls;
+- provider health monitoring and restart;
+- exact emergency recovery when viable.
+
+CPU execution is not a normal expert tier. No normal-path gate/up, activation, down, router, attention, or other matrix compute runs on the CPU. Recovery recomputes exactly the failed routes from the authoritative activation and route weights; it does not silently substitute approximate or incomplete work.
+
+## Canonical per-layer execution
+
+For a scheduler step containing `M` token rows:
+
+### 1. Route on CUDA
+
+vLLM computes:
 
 ```text
-intel-xpu/llm-scaler/vllm/patches/vllm_xpu_kernels.patch
+hidden states     x                [M, hidden]
+router logits     router_logits    [M, experts]
+selected experts  topk_ids         [M, topk] int32
+routing weights   topk_weights     [M, topk]
 ```
 
-The patch includes a Xe2 block-2D scale-prefetch guard for scale surfaces that are too small or insufficiently aligned. Without it, shapes such as `K=1408`, `group_num=11` can enter an overread/device-loss class of failure. Current standalone upstream kernels therefore cannot replace the patched version merely because they are newer.
+The selected IDs and weights are canonical. The B70 provider cannot alter or recompute them.
 
-The two versions also differ in grouped-GEMM API shape and activation behavior. They require a controlled identical-input A/B covering:
+### 2. Partition by immutable ownership
 
-- the scale-prefetch safety guard;
-- old explicit INT4/MXFP4 format arguments;
-- current simplified dispatch;
-- `gelu_tanh` behavior;
-- numerical results across all supported shapes;
-- sequential execution of different shapes in one process;
-- latency and tail behavior.
-
-### `intel-xpu/intel-xpu-backend-for-triton/`: alternative MXFP4 provider
-
-This repository provides an alternative ragged-expert implementation through Intel's Triton/XPU stack. It is valuable for later MXFP4 comparisons and possibly as another kernel provider.
-
-It is not the first Colibri W4 backend because its relevant representation is MXFP4 E2M1 with block size 32, while the initial Colibri contract uses integer W4 with different packing and scale semantics. The referenced benchmark path is also CUDA-centric rather than a complete B70 resident-worker runtime.
-
-Treat it as an explicitly converted and validated alternative, never as a format-compatible drop-in.
-
-### `intel-xpu/vllm-xpu/Xe-Fuse/`: fused BF16 upper bound and epilogue framework
-
-Relevant paths:
-
-- `intel-xpu/vllm-xpu/Xe-Fuse/include/xe-fuse/builder/epilogue_builder.hpp`;
-- `intel-xpu/vllm-xpu/Xe-Fuse/include/xe-fuse/kernels/gemm_moe_expert.hpp`;
-- `intel-xpu/vllm-xpu/Xe-Fuse/include/xe-fuse/visitors/xe_pairwise_compute.hpp`;
-- `intel-xpu/vllm-xpu/Xe-Fuse/examples/moe_expert_builder.cpp`;
-- `intel-xpu/vllm-xpu/Xe-Fuse/examples/moe_expert_fused.cpp`.
-
-Xe-Fuse targets Intel BMG-G31/Xe20 through SYCL/CUTLASS and supplies:
-
-- GEMM accumulator/epilogue fusion;
-- fused SiLU, SwiGLU, and GeGLU;
-- RMSNorm and residual operations;
-- batched expert slices in one launch;
-- compile-time tile selection;
-- a direct C++/SYCL path;
-- BF16 execution;
-- W8A8 INT8 dequantization.
-
-Use it as:
-
-1. a native B70 fused-FFN benchmark;
-2. a BF16 performance upper bound;
-3. a reference for fusing activation into the first GEMM;
-4. a possible worker backend after compatible quantized support exists.
-
-Do not use it as the initial W4 runtime. It currently lacks INT4/W4, ragged router/remap/gather, weight-residency service, CUDA-to-XPU transport, and registered end-to-end MoE tests.
-
-### `intel-xpu/vllm-xpu/Xe-Forge/`: post-correctness kernel autotuner
-
-Relevant paths:
-
-- `intel-xpu/vllm-xpu/Xe-Forge/src/xe_forge/core/tile_search/agent.py`;
-- `intel-xpu/vllm-xpu/Xe-Forge/src/xe_forge/core/tile_search/validators/gemm.py`;
-- `intel-xpu/vllm-xpu/Xe-Forge/src/xe_forge/core/tile_search/templates/moe_gemm.cpp.j2`;
-- `intel-xpu/vllm-xpu/Xe-Forge/src/xe_forge/core/sycl_executor.py`;
-- `intel-xpu/vllm-xpu/Xe-Forge/docs/TILE.md`.
-
-Xe-Forge proposes tile configurations, validates DPAS constraints, generates SYCL/CUTLASS source, compiles it, benchmarks it, and feeds results into subsequent search rounds. It understands GEMM, Flash Attention, MoE GEMM, grouped GEMM, subgroup constraints, Xe DPAS tiles, and BMG-G31 hardware limits.
-
-It enters only after the baseline W4 worker is correct. Its current MoE template uses synthetic routing, random data, BF16/F16, no real router/top-k or INT4 format, and `verify=0` by default. A generated kernel must not be accepted unless the Shooting Brake harness provides deterministic inputs, reference outputs, verification against the canonical oracle, representative row distributions, sequential mixed-shape tests, build/hardware provenance, and p95/p99 regression checks.
-
-### `intel-xpu/vllm-xpu/vllm-xpu-breakdown/`: profiling, replay, and regression layer
-
-Useful paths:
-
-- `intel-xpu/vllm-xpu/vllm-xpu-breakdown/breakdown/profiler.py`;
-- `intel-xpu/vllm-xpu/vllm-xpu-breakdown/breakdown/graph_from_trace.py`;
-- `intel-xpu/vllm-xpu/vllm-xpu-breakdown/breakdown/report.py`;
-- `intel-xpu/vllm-xpu/vllm-xpu-breakdown/breakdown/bench/timing.py`;
-- `intel-xpu/vllm-xpu/vllm-xpu-breakdown/breakdown/bench/rank.py`;
-- `intel-xpu/vllm-xpu/vllm-xpu-breakdown/run_profile.py`.
-
-Reuse its headless components for:
-
-- real XPU operation traces;
-- shapes and dtypes;
-- CPU operator and device-kernel time;
-- kernel, memcpy, and memset events;
-- module hierarchy reconstructed from profiling correlation IDs;
-- separate prefill and decode views;
-- CSV, JSON, HTML, and Chrome traces;
-- headless kernel replay;
-- replay-versus-trace fidelity;
-- historical regression records;
-- roofline-guided optimization ranking.
-
-The optional Flask UI is not part of the runtime contract.
-
-Shooting Brake must add explicit semantic spans that a generic XPU profiler cannot infer:
+One placement generation maps each supported routed expert to exactly one normal-path owner:
 
 ```text
-route decision
-expert ownership
-request enqueue
-CUDA D2H
-B70 H2D
-B70 remap
-B70 GEMM1
-B70 activation
-B70 GEMM2
-B70 gather
-B70 D2H
-CUDA H2D
-partial join
-fallback
+(layer, global expert) -> CUDA local slot
+(layer, global expert) -> B70 compact slot
 ```
 
-Each event also needs expert identity, residency, placement reason, queue wait, transfer direction, pinned/pageable status, PCIe path, placement epoch, fallback reason, and NVMe recovery metadata. The profiling layer can then correlate those semantic spans with actual device kernels.
+The adapter partitions selected routes without changing their original weights:
 
-### `intel-xpu/LLM.xpu/`: asynchronous lifecycle reference
+```text
+CUDA-resident route -> local mask
+B70-resident route  -> remote mask
+missing/invalid     -> recovery or explicit error
+```
 
-Relevant paths:
+The local and remote masks are disjoint and cover all valid selected routes. A provider or weight generation mismatch is an error, never a reason to accept stale work.
 
-- `intel-xpu/LLM.xpu/csrc/end2end/ov/context.cc`;
-- `intel-xpu/LLM.xpu/csrc/end2end/ov/context.h`;
-- `intel-xpu/LLM.xpu/tests/intel_profile/layer_slices/mm.cc`;
-- `intel-xpu/LLM.xpu/tests/intel_profile/layer_slices/post_attn_xpu.cc`;
-- `intel-xpu/LLM.xpu/docs/async_processing.md`.
+### 3. Publish remote work
 
-The useful lifecycle pattern is:
+Only token rows with at least one B70 route enter the fixed pinned-memory ring. A request contains bounded, negotiated descriptors for:
 
-1. Allocate reusable shared host activation buffers.
-2. Divide the leading tensor dimension into device-owned row slices.
-3. Point device requests directly at those host slices.
-4. Start requests asynchronously.
-5. Wait at an explicit join boundary.
-6. Consume the completed logical output in place.
-7. Permit preemption only at explicit stage boundaries.
+```text
+activation rows                 [M_remote, hidden]
+remote expert IDs               [M_remote, topk]
+remote routing weights          [M_remote, topk]
+valid route mask and row map
+layer ID
+request and completion sequence
+protocol version
+provider generation
+placement generation
+weight generation
+```
 
-This informs the worker protocol and pinned-host ring design.
+Publication uses explicit acquire/release ordering. The decode hot path performs no allocation, `.item()`, unbounded polling, or whole-device CUDA synchronization.
 
-LLM.xpu is not a Shooting Brake base runtime: its maintained path targets Llama 2/3 through OpenVINO on NPU+iGPU, with no validated MoE execution, discrete B70 expert residency, CUDA interop, expert placement, or NVMe tier. Borrow lifecycle invariants, not the runtime.
+### 4. Execute local and remote branches concurrently
 
-## Ownership Boundaries
+CUDA executes local routed experts through a stock-compatible vLLM backend while the B70 executes remote routes. If the selected CUDA backend cannot skip arbitrary remote route IDs safely, `HybridRoutedExperts` compacts the local routes and unpermutes/reduces them afterward; it does not pass unsupported sentinel IDs speculatively.
 
-### State-owner responsibilities
+The B70 groups token rows by compact local expert, executes the qualified tiny/batched/prefill path, preserves the canonical weights, and accumulates:
 
-Owned by the Colibri-based primary runtime:
+$$
+Y_{\text{B70}}[t] = \sum_{e \in R_{\text{B70}}(t)} w_{t,e}\,\operatorname{Expert}_e(x_t).
+$$
 
-- model and tokenizer loading;
-- request batching and serving;
-- attention and recurrent/KV state;
-- router logits and canonical top-k selection;
-- shared experts and dense layers;
-- local CUDA experts;
-- sampling and output;
-- cross-device scheduling;
-- ordered partial reduction;
-- failure policy;
-- persistent routing and placement profiles.
+### 5. Return one remote partial
 
-### B70 worker responsibilities
+The provider returns:
 
-A B70 worker owns:
+```text
+remote partial   [M_remote, hidden]
+status           per token / route
+completion       request, provider, placement, and weight generations
+```
 
-- an epoch-stable resident expert bank;
-- global-to-local expert mapping;
-- reusable activation, route, scratch, and output buffers;
-- remap by local expert;
-- grouped gate/up GEMM;
-- activation;
-- grouped down GEMM;
-- weighted inverse gather;
-- one weighted partial per original token;
-- device-local health and timing counters.
+The provider returns one row for each staged token, paired with the original row map. CUDA scatters those rows into a preallocated zero-initialized `[M, hidden]` buffer; tokens that were not staged therefore have zero B70 contribution. The compact wire response keeps transport independent of both the full scheduler batch and the number of remote experts selected for a token.
 
-It does not own attention, KV state, router logits, global top-k, dense layers, shared experts, sampling, or model-level request state.
+### 6. Join on CUDA
 
-### Placement scheduler responsibilities
+After validating completion metadata, the CUDA owner copies the partial into a preallocated CUDA buffer and computes:
 
-The scheduler combines:
+$$
+Y_{\text{routed}} = Y_{\text{CUDA local}} + Y_{\text{B70 remote}}.
+$$
 
-- per-layer route frequency;
-- recency;
-- measured worker throughput by shape and batch geometry;
-- transfer cost and PCIe topology;
-- queue depth;
-- deadline and tail-latency cost;
-- device health;
-- fallback cost;
-- placement migration cost.
+The addition occurs before final tensor/expert-parallel reduction and before residual continuation. Failed or missing route bits are recomputed exactly when the configured recovery path is viable; otherwise the request fails explicitly.
 
-Placement changes at explicit epochs, not on every route. Early implementations use static expert ownership; traffic-calibrated placement comes only after the worker contract and measurements are stable.
+## Versioned pinned-memory protocol
 
-## Adoption Order
+The cross-vendor boundary is Shooting Brake-owned and stable across independent vLLM and provider upgrades. It is a fixed-capacity multi-slot ring, not a Python object handoff and not a direct CUDA-tensor call into an XPU operator.
 
-The repositories enter the implementation in this order:
+Each slot has an explicit lifecycle such as:
 
-1. **Colibri** remains the model owner and correctness oracle.
-2. **llm-scaler** and **current vLLM XPU kernels** are pinned and compared on identical inputs.
-3. The missing Xe2 safety fix and API differences are reconciled.
-4. One Colibri W4 expert is converted and validated.
-5. **vllm-xpu-kernels** supplies the first B70 weighted-partial worker path.
-6. A versioned pinned-host transport ring connects the CUDA owner to the B70 worker.
-7. Static expert placement is integrated before adaptive placement.
-8. **vllm-xpu-breakdown** becomes the headless profiling and regression layer.
-9. **Lucebox** and Colibri routing histories inform traffic-calibrated placement epochs.
-10. **Xe-Fuse**, **Xe-Forge**, and the **Intel Triton backend** are evaluated only after the baseline path is correct and measured.
+```text
+FREE -> CUDA_PUBLISHED -> B70_RUNNING -> B70_COMPLETE -> CUDA_CONSUMED -> FREE
+```
 
-## Non-Goals
+The precise wire states and memory ordering are defined in [`expert-fabric.md`](expert-fabric.md). Architectural requirements are:
 
-The architecture deliberately does not:
+- startup negotiation of protocol version and maximum shapes;
+- no slot reuse before both runtimes have completed their accesses;
+- monotonically identifiable requests and completions;
+- provider, placement, and weight generations on every operation;
+- rejection of stale, duplicated, malformed, or out-of-capacity work;
+- bounded queueing, timeout, cancellation, and shutdown behavior;
+- provider restart with a generation bump;
+- per-token/per-route failure metadata sufficient for exact recovery;
+- no payload logging in normal telemetry.
 
-- embed or fork all of vLLM;
-- replace Colibri with LLM.xpu;
-- treat Xe-Forge-generated code as a correctness reference;
-- assume MXFP4 and integer W4 are layout-compatible;
-- make route prediction necessary for correctness;
-- transfer expert weights for normal foreground tokens;
-- split a single expert into remote matrix-by-matrix operations unless measurements later prove it necessary;
-- move attention, KV state, routing, or sampling to the B70 workers;
-- accept a newer kernel revision without reproducing the patched baseline's safety and numerical behavior.
+Host staging is the initial cross-vendor contract. Direct interop or stream-memory optimizations are optional only after this protocol is correct and measured.
 
-## One-Line Definition
+## Manifest and compatibility boundary
 
-> Shooting Brake keeps the model's sequential state on the fastest GPU and turns heterogeneous secondary GPUs into resident MoE expert engines, moving activations instead of weights and scheduling every sparse layer against measured critical-path cost.
+Startup requires an explicit capability/model/provider manifest. At minimum it records:
+
+- model architecture and qualified adapter identifier;
+- hidden size, routed expert count, top-k, layer count, and supported batch bounds;
+- activation, route-weight, output, scale, and accumulation dtypes;
+- source checkpoint and converted CUDA/B70 weight fingerprints;
+- quantization family, group size, packing, layout, and prepack version;
+- provider protocol and schema versions;
+- upstream vLLM adapter compatibility range;
+- llm-scaler, PyTorch-XPU, vLLM-XPU-kernel, oneAPI, Level Zero, and driver versions;
+- supported tiny, batched, and prefill kernel families;
+- CUDA/B70 ownership and placement generation;
+- exact recovery capability and unsupported-shape policy.
+
+A mismatch fails at startup with an actionable error. New upstream-vLLM model support does not imply B70 support. A model enters the remote path only after its seam, shapes, routing semantics, artifacts, kernels, and mixed CUDA+B70 numerics are qualified explicitly.
+
+## Correctness and failure invariants
+
+1. **Canonical routing:** vLLM is the only router/top-k authority.
+2. **Exact ownership:** every selected route has one normal-path owner for the active placement generation.
+3. **Exactly once:** each selected route contributes once, is recovered once, or causes explicit failure.
+4. **Weighted remote result:** the B70 partial already contains original routing weights and only B70-owned routes.
+5. **No stale acceptance:** request, provider, placement, protocol, and weight generations must match.
+6. **No silent generic fallback:** unsupported shapes or kernels fail explicitly rather than entering an unqualified operator.
+7. **No normal CPU matrix path:** CPU is orchestration and exact emergency recovery only.
+8. **No foreground weight movement:** weights load before service or at an explicit placement transition, never per token.
+9. **Deterministic join boundary:** remote work joins before the defined final reduction and residual continuation.
+10. **Observable failure:** timeout, restart, recovery, cancellation, rejected work, and fallback are recorded.
+
+See [`correctness.md`](correctness.md) for the complete numerical and route contract.
+
+## Proven Colibri reference
+
+The native implementation in `colibri-variants/colibri-qwen36/c/b70_moe_sycl.cpp` has demonstrated:
+
+```c
+b70_moe_init(...)
+b70_moe_upload(...)
+b70_moe_issue(...)
+b70_moe_take(...)
+b70_moe_shutdown()
+```
+
+Its proven scope includes:
+
+- persistent B70 weights and compact layer/expert ownership;
+- Colibri signed-S4 GS64 conversion into the ESIMD layout;
+- FP16 activation/weight staging with canonical IDs and route weights;
+- fused ESIMD gate/up/SiLU/down execution;
+- routing-weighted hidden-size accumulation;
+- asynchronous issue/take separation;
+- numerical agreement with the CPU reference;
+- exact failed-route recovery;
+- end-to-end CUDA+B70 generation without normal-path CPU expert fallback.
+
+The current logical transaction is single-token and native:
+
+```text
+activation       [2048] FP32 host input
+expert IDs       [routes] int32
+routing weights  [routes] FP32
+    -> B70 GS64 ESIMD expert execution
+weighted partial [2048] FP32 host output
+```
+
+The observed roughly `56–100 µs` one-token issue/take range and other Colibri throughput results are reference measurements. They do not establish production vLLM throughput, continuous-batch behavior, grouped prefill performance, graph compatibility, or PyTorch-XPU provider overhead.
+
+The planned production transaction is batched and runtime-neutral:
+
+```text
+activation       [M_remote, hidden] FP16/BF16
+expert IDs       [M_remote, topk] int32
+routing weights  [M_remote, topk] FP32/FP16
+route mask, token_row_map into [M], layer, sequence, and generation metadata
+    -> isolated persistent llm-scaler B70 provider
+weighted partial [M_remote, hidden] FP16/FP32
+completion and recovery metadata; CUDA scatter target [M, hidden]
+```
+
+Colibri therefore supplies the correctness, transport, placement, and failure baseline while production engineering focuses on batching, the provider boundary, and insertion into vLLM's modular routed-expert lifecycle.
+
+## Repository role matrix
+
+| Repository | Architecture role | Production status and boundary |
+|---|---|---|
+| `vllm/` | CUDA state owner: scheduler, continuous batching, attention/KV/GDN, canonical router/top-k, CUDA experts, residual, LM head, sampling, serving | Selected production host; keep the B70 adapter narrow, out-of-tree, and Qwen-scoped |
+| `intel-xpu/llm-scaler/` | Qualified tiny/batched/prefill ESIMD operator source for B70 | Selected initial provider kernel lineage; use inside the isolated PyTorch-XPU process, not as the CUDA host |
+| `intel-xpu/vllm-xpu/vllm-xpu-kernels/` | Independently versioned XPU kernel dependency/binding surface | Validate operator signatures, layouts, shapes, safety fixes, and numerics for each pinned provider release |
+| `colibri-variants/colibri-qwen36/` | Native GS64 CUDA+B70 correctness, transport, placement, failure, and latency reference | Proven comparator; not the production model host |
+| `exllamav3-quant-inference/` | Pinned-ring and CUDA stream-memory optimization ideas | Reference only after the process-ring contract works |
+| `lucebox/` | Traffic-derived hot/cold placement concepts | Later policy reference; immutable static ownership is first |
+| `cudnn-frontend/` | CUDA graph and supported backend construction examples | NVIDIA-only reference; no ownership of the cross-vendor protocol |
+| `intel-xpu/intel-xpu-backend-for-triton/` | Alternative MXFP4/ragged expert research | Later explicit conversion path, not GS64 compatibility |
+| `intel-xpu/vllm-xpu/Xe-Fuse/` | BF16 fused expert and epilogue upper-bound reference | Later candidate, not the initial quantized path |
+| `intel-xpu/vllm-xpu/Xe-Forge/` | Post-correctness tile search | Generated kernels require independent correctness and end-to-end evidence |
+| `intel-xpu/vllm-xpu/vllm-xpu-breakdown/` | XPU profiling, replay, and regression ideas | Reference instrumentation extended with route/ownership/protocol semantics |
+| `intel-xpu/LLM.xpu/` | Async lifecycle and shared host-buffer patterns | Reference only; not a MoE provider or model host |
+| `playground/llama.cpp/` | Comparative experiments | Not the selected production runtime |
+
+Detailed provenance belongs in [`research.md`](research.md).
+
+## Startup sequence
+
+The production startup order is:
+
+1. probe the RTX 5090, B70, PCIe/NUMA topology, drivers, runtimes, and available memory;
+2. load and validate the explicit model/provider/capability manifest;
+3. start the isolated B70 provider and negotiate the protocol and capacities;
+4. allocate the fixed pinned-memory ring and provider/CUDA staging buffers;
+5. load only the compact B70-owned expert artifact and verify its fingerprint;
+6. initialize upstream vLLM and the qualified Qwen-scoped adapter;
+7. load the immutable CUDA/B70 ownership map and generations;
+8. run provider mathematical, ring lifecycle, and all-CUDA adapter health checks appropriate to the admitted configuration;
+9. reject any mismatch before serving;
+10. enable hybrid routing only after the current phase gates allow it.
+
+## Performance model
+
+For one MoE layer, the relevant critical path is approximately:
+
+$$
+T_{\mathrm{MoE}} \approx
+\max\left(
+T_{\mathrm{CUDA\ local}},
+T_{\mathrm{CUDA\to host\to B70}} + T_{\mathrm{B70}} + T_{\mathrm{B70\to host\to CUDA}}
+\right)
++ T_{\mathrm{join}}.
+$$
+
+For Qwen3.6 hidden size 2048, one FP16 activation or returned partial row is 4096 bytes. Remote-route count changes B70 compute but not the final per-token return width.
+
+Production performance depends on scheduler-step aggregation, overlap with CUDA local/shared work, fixed buffer reuse, hot-expert CUDA placement, zero-remote fast paths, piecewise CUDA graphs, and exposed wait. Isolated B70 kernel latency, nominal PCIe bandwidth, aggregate GPU memory, or Colibri throughput alone cannot establish a vLLM production benefit.
+
+The controlled benchmark must compare identical stock all-CUDA vLLM, hybrid CUDA+B70, CPU-recovery/offload baseline, and reduced-CUDA-capacity configurations. Capacity gained must be reported with throughput, TTFT, ITL, tails, memory, route shares, failure behavior, and output agreement.
+
+## Active implementation order
+
+Architecture delivery follows only Phase 0 through Phase 10 in [`../plan.md`](../plan.md). [`implementation-plan.md`](implementation-plan.md) is the subordinate gate checklist for those same phases. The architecture introduces no alternate Stage sequence, GLM-first target, or multi-device rollout.
+
+The immediate work is Phase 0: freeze both runtime baselines and artifacts, define the versioned protocol and capability schemas, and record all-CUDA vLLM eager/graph correctness and performance workloads. Production hybrid execution begins only after its prerequisite gates are satisfied.
+
+## Non-goals
+
+The active architecture does not:
+
+- use Colibri as the production serving host;
+- apply llm-scaler's complete vLLM 0.21 patch to upstream vLLM 0.26+;
+- put Intel XPU libraries in the CUDA state-owner process;
+- represent the B70 as a fake NCCL/XCCL expert-parallel rank;
+- call XPU-dispatch operators with CUDA tensors;
+- let the B70 recompute router/top-k or shared-expert work;
+- move attention, KV/GDN state, residuals, LM head, or sampling to the B70;
+- transfer or quantize expert weights during decode;
+- use CPU matrix compute in the normal path;
+- silently enter a generic kernel for an unsupported model or shape;
+- assume every new upstream vLLM model is B70-compatible;
+- treat MXFP4, other W4 formats, and Colibri GS64 as interchangeable;
+- require route prediction, dynamic migration, direct device interop, or a native provider for correctness;
+- claim production performance from Colibri reference measurements.
+
+## One-line definition
+
+> Shooting Brake keeps upstream vLLM scheduling and sequential model state on one RTX 5090 and uses one isolated B70 provider for qualified resident routed experts, joined through a versioned pinned-memory weighted-partial contract with no normal-path CPU matrix compute.

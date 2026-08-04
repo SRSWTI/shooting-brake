@@ -23,7 +23,7 @@ upstream vLLM 0.26+ CUDA model runner on RTX 5090
             └── remote routes -> versioned pinned-memory request ring
                                   -> persistent PyTorch-XPU B70 provider
                                   -> intel-xpu/llm-scaler tiny/batched/prefill ESIMD kernels
-                                  -> one weighted [M, hidden] partial
+                                  -> one weighted [M_remote, hidden] wire partial
                                   -> asynchronous CUDA copy and addition
 ```
 
@@ -72,14 +72,14 @@ weighted routed partial [2048] FP32 host output
 The production, model-runtime-neutral transaction is batched:
 
 ```text
-activation       [M, hidden] FP16/BF16
-expert IDs       [M, topk]   int32
-routing weights  [M, topk]   FP32 or FP16
-remote route mask and token/route map
+activation       [M_remote, hidden] FP16/BF16
+expert IDs       [M_remote, topk]   int32
+routing weights  [M_remote, topk]   FP32 or FP16
+remote route mask and token_row_map [M_remote] -> original rows [M]
 layer, request, sequence, placement-generation metadata
     ↓
-remote partial   [M, hidden] FP16 or FP32
-per-token/per-route completion and recovery metadata
+remote partial   [M_remote, hidden] FP16 or FP32
+per-route and staged-token completion and recovery metadata
 ```
 
 The current native worker is a valid correctness and latency baseline, but it is not the production endpoint: it has one in-order queue, one pending operation, one fixed scratch set, no continuous-batch aggregation, and no large-prefill grouped path.
@@ -271,25 +271,25 @@ That is a useful ownership model, but it is not guaranteed that every NVFP4/Flas
 
 If its existing kernel cannot skip arbitrary remote routes, the hybrid runner must compact local routes before calling it and unpermute/reduce afterward.
 
-### 5. Return one B70 partial per token
+### 5. Return one B70 partial per staged token row
 
-The B70 should return:
+The B70 returns the compact wire response:
 
 ```text
-remote_partial[M, 2048]
+remote_partial[M_remote, 2048]
 ```
 
 already:
 
 - multiplied by the original routing weights;
-- summed over all B70 routes belonging to each token;
-- zero for tokens without a B70 route.
+- summed over all B70 routes belonging to each staged token row;
+- paired with the original `token_row_map` and per-route status.
 
-This matches vLLM's routed-result shape exactly and keeps transport independent of the number of remote experts.
+After completion validation, CUDA scatters this response into a preallocated, zero-initialized `[M, 2048]` buffer. Unstaged tokens therefore have zero B70 contribution. That full-batch CUDA buffer matches vLLM's routed-result shape and keeps wire transport independent of both the full scheduler batch and the number of remote experts.
 
 ### 6. Join on CUDA
 
-Copy `remote_partial` back to a preallocated CUDA buffer and compute:
+Validate and copy `remote_partial`, scatter it through `token_row_map` into the preallocated full-batch CUDA buffer, and compute:
 
 $$
 Y_{\text{routed}} = Y_{\text{CUDA local}} + Y_{\text{B70 remote}}
@@ -423,31 +423,42 @@ This is safer than loading Torch CUDA, PyTorch XPU, oneAPI, Level Zero, and both
 
 A complete second XPU vLLM instance is unnecessary. The provider owns only expert weights, fixed buffers, XPU streams, kernel selection, and request execution; it does not own attention, KV/recurrent state, routing, shared experts, sampling, or serving.
 
-Start with the existing llm-scaler Python/XPU bindings because they already cover the required batching regimes. Preserve the native Torch-free worker as:
-
-- a correctness and latency comparator;
-- an emergency narrow-shape provider;
-- a possible later deployment target if profiling proves dispatcher overhead significant.
+Start with the existing llm-scaler Python/XPU bindings because they already cover the required batching regimes. Preserve the native Torch-free worker as a correctness and latency comparator. It may become a later deployment target only if profiling proves dispatcher overhead material and it independently passes the production provider protocol, capability, batching, artifact, and failure gates.
 
 Do not extract or fork kernels preemptively. Upstream kernel reuse is cheaper to maintain than a second private implementation.
 
 ### Ring descriptor
 
-A practical request descriptor needs at least:
+A practical request descriptor needs at least the same normative fields as the fabric contract:
 
 ```c
 struct B70Request {
+    uint32_t protocol_version;
+    uint32_t descriptor_size;
+
     uint64_t request_seq;
+    uint64_t provider_generation;
+    uint64_t placement_generation;
     uint64_t weight_generation;
+    uint64_t placement_fingerprint;
+    uint64_t route_subset_fingerprint;
+    uint64_t deadline_ns;
 
     uint32_t ring_slot;
     uint32_t layer;
-    uint32_t num_tokens;
+    uint32_t num_batch_tokens;   /* full scheduler-step M */
+    uint32_t num_staged_tokens;  /* compact M_remote */
     uint32_t num_routes;
+    uint32_t hidden_size;
+    uint32_t topk;
 
     uint32_t activation_dtype;
+    uint32_t weight_dtype;
     uint32_t output_dtype;
+    uint32_t request_buffer_version;
+    uint32_t output_buffer_version;
     uint32_t status;
+    uint32_t error;
     uint32_t reserved;
 };
 ```
@@ -455,16 +466,19 @@ struct B70Request {
 Associated fixed buffers:
 
 ```text
-activation       [capacity_tokens, 2048]
-expert_ids       [capacity_tokens, 8]
-routing_weights  [capacity_tokens, 8]
-route_mask       [capacity_tokens]
-output           [capacity_tokens, 2048]
+activation          [capacity_staged_tokens, hidden]
+expert_ids          [capacity_staged_tokens, topk]
+routing_weights     [capacity_staged_tokens, topk]
+remote_route_mask   [capacity_staged_tokens, topk]
+token_row_map       [capacity_staged_tokens] -> [num_batch_tokens]
+route_position_map  [capacity_routes]
+output              [capacity_staged_tokens, hidden]
+route_status        [capacity_routes]
 ```
 
-Completion must publish only after the SYCL output copy is visible to the CUDA-side process.
+Completion must publish only after the SYCL output copy is visible to the CUDA-side process. It echoes all identity, generation, shape, dtype, fingerprint, buffer-version, and status fields needed to bind the result to the immutable request.
 
-`request_seq`, `ring_slot`, `layer`, and `weight_generation` prevent stale replies or stale expert slots from being paired with a newer model request.
+The sequence, slot, provider/placement/weight generations, fingerprints, and buffer versions jointly prevent stale replies, ownership, routes, or expert slots from being paired with a newer model request.
 
 ### Failure semantics
 
@@ -801,20 +815,22 @@ For `[M, hidden]`, transfer only rows with at least one B70-owned route. Preserv
 Compare:
 
 ```text
-Y_reference = weighted sum of exactly the B70-owned routes
-Y_provider  = returned [M, hidden] partial
+Y_reference_remote = weighted sum of exactly the B70-owned staged routes
+Y_provider_wire    = returned [M_remote, hidden] partial before CUDA scatter
 ```
 
 Required cases:
 
 - `M=1`, `M=2..32`, and representative prefill `M`;
-- all routes remote, mixed local/remote, and no remote routes;
+- all staged routes remote and mixed local/remote semantic subsets;
 - duplicate and non-sorted expert IDs;
 - multiple tokens selecting the same expert;
 - unequal and near-zero routing weights;
 - boundary expert IDs and compact-slot remapping;
 - invalid placement/weight generation;
 - injected device/kernel failure.
+
+A layer with no B70-owned route is not a provider-mathematics case: adapter/ring and layer-replay gates must prove zero provider submission and an additive-identity CUDA remote lane.
 
 Validate both CUDA and B70 expert artifacts against the same higher-precision source checkpoint before validating their summed result.
 
@@ -876,7 +892,7 @@ The B70 partial must join before final tensor/expert-parallel reduction. Start a
 
 ### Phase 7 — Add continuous-batch decode and grouped prefill
 
-Aggregate all scheduler-step remote token rows into one B70 layer request. Tune decode thresholds between tiny and grouped kernels. Add llm-scaler's prefill gather/up/down/accumulate path without moving router or shared-expert work to B70.
+Constrain each upstream scheduler step to the provider's negotiated token/route capacity, then aggregate all of that step's remote token rows into exactly one B70 layer request. Oversized prefill is chunked by upstream scheduling before layer execution, never split into multiple ring transactions inside one layer step. Tune decode thresholds between tiny and grouped kernels. Add llm-scaler's prefill gather/up/down/accumulate path without moving router or shared-expert work to B70.
 
 **Gate:** correctness holds across changing batch sizes, mixed prefill/decode scheduling, request completion, cancellation, and zero-remote-route layers.
 

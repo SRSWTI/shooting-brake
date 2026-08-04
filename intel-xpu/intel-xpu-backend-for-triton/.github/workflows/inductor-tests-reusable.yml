@@ -1,0 +1,111 @@
+name: Pytorch inductor tests reusable
+
+on:
+  workflow_call:
+    inputs:
+      pytorch_ref:
+        description: PyTorch ref, keep empty for default
+        type: string
+        default: ""
+      suite:
+        description: Space separated lists of test suites or "all"
+        type: string
+        default: "all"
+      runner_label:
+        description: Runner label, keep empty for default
+        type: string
+        default: ""
+      runner_version:
+        description: Runner label for version
+        type: string
+        default: runner-0.0.22
+      python_version:
+        description: Python version
+        type: string
+        default: "3.10"
+      pytorch_repo:
+        description: PyTorch repo (e.g. user/repo)
+        type: string
+        default: "pytorch/pytorch"
+
+permissions: read-all
+
+env:
+  PYTHON_VERSION: "${{ inputs.python_version }}"
+  PYTORCH_REPO: "${{ inputs.pytorch_repo }}"
+
+jobs:
+  build:
+    name: Test
+    runs-on: ${{ (inputs.runner_label == 'lts' || contains(inputs.runner_label, 'igc')) && fromJSON(format('["linux","{0}"]', inputs.runner_label)) || fromJSON(format('["linux","rolling","{0}","{1}"]', inputs.runner_label || 'max1100', inputs.runner_version)) }}
+    timeout-minutes: 960
+    defaults:
+      run:
+        shell: bash -noprofile --norc -eo pipefail -c "source /opt/intel/oneapi/setvars.sh > /dev/null; source {0}"
+    steps:
+      - name: Print inputs
+        run: |
+          cat <<EOF
+          ${{ toJSON(inputs) }}
+          EOF
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Setup PyTorch
+        uses: ./.github/actions/setup-pytorch
+        with:
+          ref: ${{ inputs.pytorch_ref }}
+          cache: disabled
+
+      - name: Setup Triton
+        uses: ./.github/actions/setup-triton
+
+      - name: Install python test dependencies
+        run: |
+          pip install 'pandas<3.0' scipy tqdm
+          pip uninstall pytest-skip
+
+      - name: Report environment details
+        if: always()
+        timeout-minutes: 1
+        run: |
+          source ./scripts/capture-hw-details.sh --quiet
+          TIMESTAMP=$(date '+%Y%m%d%H%M%S')
+          mkdir -p pytorch/test/test-reports
+          cat <<EOF | tee pytorch/test/test-reports/.env
+          TIMESTAMP=$TIMESTAMP
+          JOB_NAME=${{ join(matrix.*, '-') }}
+          GITHUB_RUN_ID=$GITHUB_RUN_ID
+          GITHUB_RUN_NUMBER=$GITHUB_RUN_NUMBER
+          GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT
+          PYTHON_VERSION=$PYTHON_VERSION
+          PYTORCH_REPO=$PYTORCH_REPO
+          PYTORCH_COMMIT_ID=$PYTORCH_COMMIT_ID
+          TRITON_REPO=$GITHUB_REPOSITORY
+          TRITON_COMMIT_ID=$GITHUB_SHA
+          TORCHVISION_COMMIT_ID=$TORCHVISION_COMMIT_ID
+          LIBIGC1_VERSION=$LIBIGC1_VERSION
+          LEVEL_ZERO_VERSION=$LEVEL_ZERO_VERSION
+          GPU_DEVICE=$GPU_DEVICE
+          AGAMA_VERSION=$AGAMA_VERSION
+          COMPILER_VERSION=$COMPILER_VERSION
+          EOF
+
+      - name: Run inductor tests
+        run: |
+          export PYTORCH_TESTING_DEVICE_ONLY_FOR="xpu"
+          bash scripts/test-pytorch.sh ${{ inputs.suite }}
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-${{ env.PYTHON_VERSION }}
+          path: pytorch/test/test-reports
+          include-hidden-files: true

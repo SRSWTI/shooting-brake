@@ -1,0 +1,143 @@
+name: E2E performance
+run-name: ${{ inputs.run_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pytorch_ref:
+        description: PyTorch ref, keep empty for default
+        type: string
+        default: ""
+      suite:
+        description: Test suite
+        type: choice
+        options:
+          - all
+          - huggingface
+          - timm_models
+          - torchbench
+        default: all
+      mode:
+        description: Inference, inference-with-freezing, or training
+        type: choice
+        options:
+          - all
+          - inference
+          - inference-with-freezing
+          - training
+        default: all
+      dtype:
+        description: Data type
+        type: choice
+        options:
+          - all
+          - amp_bf16
+          - amp_fp16
+          - bfloat16
+          - float16
+          - float32
+        default: all
+      models:
+        description: Run all models or a subset from .github/models/performance/{suite}.txt
+        type: choice
+        options:
+          - all
+          - subset
+        default: subset
+      check_all_subset_models:
+        description: In "subset" mode, keep going after errors
+        type: boolean
+        default: false
+      only_one_model:
+        description: Run only this one model
+        type: string
+        default: ""
+      runner_label:
+        description: Runner label, keep empty for default
+        type: string
+        default: ""
+      TORCH_COMPILE_DEBUG:
+        description: TORCH_COMPILE_DEBUG
+        type: string
+        default: ""
+      run_name:
+        description: Custom run name
+        type: string
+        default: "E2E performance"
+
+permissions: read-all
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: linux
+    outputs:
+      suite: ${{ steps.set-matrix.outputs.suite }}
+      mode: ${{ steps.set-matrix.outputs.mode }}
+      dtype: ${{ steps.set-matrix.outputs.dtype }}
+      models: ${{ steps.set-matrix.outputs.models }}
+    timeout-minutes: 10
+    steps:
+      - name: Set matrix
+        id: set-matrix
+        run: |
+          if [[ -z "${{ inputs.suite }}" || "${{ inputs.suite }}" == "all" ]]; then
+            suite='["huggingface", "timm_models", "torchbench"]'
+          else
+            suite='["${{ inputs.suite }}"]'
+          fi
+          if [[ -z "${{ inputs.mode }}" || "${{ inputs.mode }}" == "all" ]]; then
+            mode='["inference", "inference-with-freezing", "training"]'
+          else
+            mode='["${{ inputs.mode }}"]'
+          fi
+          if [[ -z "${{ inputs.dtype }}" || "${{ inputs.dtype }}" == "all" ]]; then
+            dtype='["amp_bf16", "amp_fp16", "bfloat16", "float16", "float32"]'
+          else
+            dtype='["${{ inputs.dtype }}"]'
+          fi
+          if [[ -z "${{ inputs.models }}" ]]; then
+            models="subset"
+          else
+            models="${{ inputs.models }}"
+          fi
+          echo "suite=$suite" >> $GITHUB_OUTPUT
+          echo "mode=$mode" >> $GITHUB_OUTPUT
+          echo "dtype=$dtype" >> $GITHUB_OUTPUT
+          echo "models=$models" >> $GITHUB_OUTPUT
+
+      - name: Print inputs
+        run: |
+          cat <<EOF
+          ${{ toJSON(github.event.inputs) }}
+          EOF
+
+      - name: Print setup outputs
+        run: |
+          cat <<EOF
+          ${{ toJSON(steps.set-matrix.outputs) }}
+          EOF
+
+  run_tests:
+    name: Run test matrix
+    needs: setup
+    strategy:
+      matrix:
+        suite: ${{ fromJson(needs.setup.outputs.suite) }}
+        mode: ${{ fromJson(needs.setup.outputs.mode) }}
+        dtype: ${{ fromJson(needs.setup.outputs.dtype) }}
+      fail-fast: false
+    uses: ./.github/workflows/e2e-reusable.yml
+    secrets:
+      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HUGGING_FACE_HUB_TOKEN }}
+    with:
+      pytorch_ref: ${{ inputs.pytorch_ref }}
+      suite: ${{ matrix.suite }}
+      mode: ${{ matrix.mode }}
+      test_mode: performance
+      dtype: ${{ matrix.dtype }}
+      models: ${{ inputs.models }}
+      check_all_subset_models: ${{ inputs.check_all_subset_models || false }}
+      only_one_model: ${{ inputs.only_one_model }}
+      runner_label: ${{ inputs.runner_label }}
+      TORCH_COMPILE_DEBUG: ${{ inputs.TORCH_COMPILE_DEBUG }}

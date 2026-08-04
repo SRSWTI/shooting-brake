@@ -1,0 +1,36 @@
+// Conversions from TritonIntelGPU DpasEncodingAttr to LinearLayout.
+
+#ifndef TRITON_DIALECT_TRITONINTELGPU_IR_LINEARLAYOUTCONVERSIONS_H
+#define TRITON_DIALECT_TRITONINTELGPU_IR_LINEARLAYOUTCONVERSIONS_H
+
+#include "intel/include/Dialect/TritonIntelGPU/IR/Attributes.h"
+#include "triton/Tools/LinearLayout.h"
+
+namespace mlir::triton::gpu {
+
+// DPAS operand A: opIdx=0
+// DPAS operand B: opIdx=1
+// DPAS operand C (default): opIdx=2
+LinearLayout DPAStoLinearLayout(ArrayRef<int64_t> shape, Attribute layout,
+                                unsigned opIdx = 2);
+
+// DPAS operand A: opIdx=0
+// DPAS operand B: opIdx=1
+// DPAS operand C (default): opIdx=2
+// DPAS scale A: opIdx=3
+// DPAS scale B: opIdx=4
+LinearLayout BlockScaledDPAStoLinearLayout(ArrayRef<int64_t> shape,
+                                           Attribute layout, unsigned opIdx = 2,
+                                           int scaleKIndex = -1);
+
+LinearLayout dotOperandDpasToLinearLayout(DotOperandEncodingAttr dotDpasLayout,
+                                          ArrayRef<int64_t> shape);
+
+LinearLayout
+subgroup2DBlockToLinearLayout(ArrayRef<int64_t> shape,
+                              intel::Subgroup2DBlockEncodingAttr layout,
+                              unsigned kWidth);
+
+} // namespace mlir::triton::gpu
+
+#endif // TRITON_DIALECT_TRITONINTELGPU_IR_LINEARLAYOUTCONVERSIONS_H

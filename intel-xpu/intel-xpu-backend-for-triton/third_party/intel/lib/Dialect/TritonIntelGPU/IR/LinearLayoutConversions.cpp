@@ -1,0 +1,810 @@
+#include <vector>
+
+#include "intel/include/Dialect/TritonIntelGPU/IR/Dialect.h"
+#include "intel/include/Dialect/TritonIntelGPU/IR/LinearLayoutConversions.h"
+#include "triton/Dialect/Triton/IR/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Tools/LayoutUtils.h"
+#include "triton/Tools/LinearLayout.h"
+#include "triton/Tools/StrUtil.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MathExtras.h"
+
+using namespace mlir::triton::gpu::intel;
+
+namespace mlir::triton::gpu {
+namespace {
+
+// We use the following nomenclature in this file.
+//
+//  - ctaLayout: A layout for one block, i.e. input dims [register, lane, warp]
+//    for register layouts, and input dims [offset] for shared layouts.
+//  - cgaLayout: Arrangement of multiple blocks, i.e. input dims [block].
+//
+// Note that this is inconsistent with the type name CGAEncodingAttr.  That type
+// is equivalent to our cgaLayout.
+//
+// IMO the name CGAEncodingAttr is wrong.  If we tried to be consistent anyway,
+// then we'd have to rename ctaLayout to "warpLayout".  I think that's more
+// confusing than being inconsistent about "cgaLayout", especially when we have
+// to consider the size of the warpLayout (surely that's not the "warpSize").
+
+#define S(v) StringAttr::get(ctx, (v))
+
+// Returns a 1D -> ND layout that's equivalent to creating a 1D -> 1D mapping of
+// size product(shape) and then reshaping to permute(shape, order).
+LinearLayout identityND(StringAttr inDimName, ArrayRef<unsigned> shape,
+                        ArrayRef<unsigned> order,
+                        ArrayRef<StringAttr> outDimNames) {
+  assert(shape.size() == order.size() && "shape and order must have same size");
+
+  MLIRContext *ctx = inDimName.getContext();
+  LinearLayout ret = LinearLayout::empty();
+  for (int i = 0; i < shape.size(); i++) {
+    // Start with the most-minor dimension, which is order[0].
+    int dim = order[i];
+    ret *= LinearLayout::identity1D(shape[dim], inDimName, outDimNames[dim]);
+  }
+  return ret;
+}
+
+// Make a LinearLayout that maps a block-id to an N-dimensional index.
+//
+// The tensor is split up into CTAsPerCGA pieces, which are distributed among
+// the CTAsPerCGA CTAs (i.e. blocks) in the CGA (i.e. groups).
+//
+// See the nomenclature note at the top of the file for an explanation of why
+// this is called makeCgaLayout when it accepts a CGAEncodingAttr.
+LinearLayout makeCgaLayout(CGAEncodingAttr layout) {
+  MLIRContext *ctx = layout.getContext();
+  StringAttr kBlock = S("block");
+
+  int rank = layout.getCTAOrder().size();
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
+
+  LinearLayout ret = LinearLayout::empty();
+  for (int i = 0; i < rank; i++) {
+    // Start with the most minor dimension, which is order[0].
+    int dim = layout.getCTAOrder()[i];
+    int split = layout.getCTASplitNum()[dim];
+    int ctas = layout.getCTAsPerCGA()[dim];
+    assert(ctas % split == 0 && "split must divide ctas");
+    ret *= LinearLayout::identity1D(split, kBlock, outDimNames[dim]) *
+           LinearLayout::zeros1D(ctas / split, kBlock, outDimNames[dim]);
+  }
+
+  // Transpose to standard order (dim0, dim1, ...).
+  return ret.transposeOuts(outDimNames);
+}
+
+// Shrinks the output set of a layout function while leaving the input set
+// unchanged, by making high-order inputs in inDimName map to the same output.
+// Attempts to shrink down to desiredSize, but this is not always possible just
+// by modifying one the specified input dimension.
+//
+// We do this by making the most-major inputs to the layout map to 0.  This
+// effectively duplicates data along that input dimension.  For example, this
+// layout has out-dim size 32:
+//
+//   L(register=1) = 8
+//   L(register=2) = 4
+//   L(register=4) = 1
+//   L(lane=1) = 2
+//   L(lane=2) = 16.
+//
+// If we shrink it to size 16 along the `lane` dimension, we set L(lane=2) to 0:
+//
+//   L(register=1) = 8
+//   L(register=2) = 4
+//   L(register=4) = 1
+//   L(lane=1) = 2
+//   L(lane=2) = 0.
+//
+// This means that lane=2 has the same data as lane=0.
+//
+// If we shrink to size 8 along the lane dimension, we set L(lane=1) = 0 as
+// well.  But when we do this, we have to remove bit 1 (the value of L(lane=1))
+// from all other bases:
+//
+//   L(register=1) = 4
+//   L(register=2) = 2
+//   L(register=1) = 1
+//   L(lane=1) = 0
+//   L(lane=2) = 0.
+//
+// Note this only works because the bases are powers of two.  I don't quite know
+// what to do when they're not.
+LinearLayout shrinkCodomain(const LinearLayout &layout, StringAttr inDimName,
+                            StringAttr outDimName, int desiredSize) {
+  assert(llvm::isPowerOf2_32(desiredSize) &&
+         "desiredSize must be a power of 2");
+  int outDimIdx = layout.getOutDimIndex(outDimName);
+  int desiredZeros =
+      llvm::Log2_32(layout.getOutDimSize(outDimName) / desiredSize);
+  if (desiredZeros == 0) {
+    return layout;
+  }
+
+  // Find the desiredZeros most-major basis vectors that are not already zero.
+  // These are the ones we will set to zero.
+  SmallVector<int> basesToZero;
+  for (int i = layout.getInDimSizeLog2(inDimName) - 1;
+       i >= 0 && basesToZero.size() < desiredZeros; i--) {
+    int basis = layout.getBasis(inDimName, i, outDimName);
+    if (basis != 0) {
+      basesToZero.push_back(basis);
+    }
+  }
+
+  // Bail if all the bases are already zero; nothing more we can do.
+  if (basesToZero.empty()) {
+    return layout;
+  }
+
+  // The algorithm below only works because the bases are powers of two.  I'm
+  // not sure what to do otherwise.
+  assert(llvm::all_of(basesToZero,
+                      [&](int basis) { return llvm::isPowerOf2_32(basis); }) &&
+         "bad bases");
+
+  // We want to zero out the bases in `basesToZero`, and also "shift out" the
+  // corresponding bits from all other bases.  For example if we remove the
+  // basis with value 8 = 0b100, then if another basis has value 26 = 0b11010,
+  // the 1 in its 3rd position gets removed and it becomes 10 = 0b1010.
+  //
+  // We could manually alter the bases in `layout` to achieve this, but it's
+  // perhaps simpler to use the linearity of LLs to our advantage.
+  //
+  // Consider the function O which is the identity map from out-dims to
+  // out-dims.  We can easily calculate what happens when we remove the relevant
+  // bases from O.  Call this new function O'.
+  //
+  // Because of linearity, removing the bases from L is equivalent to composing
+  // L with O'.  So that's what we do below.
+
+  // Construct the out-dims -> out-dims identity layout O.
+  LinearLayout outputIdentity = LinearLayout::empty();
+  for (StringAttr dim : layout.getOutDimNames()) {
+    outputIdentity *=
+        LinearLayout::identity1D(layout.getOutDimSize(dim), dim, dim);
+  }
+
+  // Modify O to remove the relevant bases.
+  //
+  // TODO(jlebar): I don't like manually modifying bases here.  Perhaps this
+  // should be a function on LinearLayout.
+  LinearLayout::BasesT newBases = outputIdentity.getBases();
+  llvm::sort(basesToZero);
+  for (int basis : basesToZero) {
+    int idx = llvm::Log2_32(basis);
+    assert(idx >= 0 && "bad basis");
+    for (size_t i = newBases[outDimName].size() - 1; i > idx; i--) {
+      newBases[outDimName][i][outDimIdx] =
+          newBases[outDimName][i - 1][outDimIdx];
+    }
+    newBases[outDimName][idx][outDimIdx] = 0;
+  }
+
+  // Construct O'.
+  LinearLayout transform(std::move(newBases),
+                         llvm::to_vector(layout.getOutDimNames()));
+
+  // Compose O' with L.
+  return layout.compose(transform);
+}
+
+} // anonymous namespace
+
+// clang-format off
+// The layout example repeat_count=8, systolic_depth=8,
+// execution_size=16 and operands_per_chan=2 for warp size 32.
+// For A operand:
+//                       K = 16 (K = systolic depth * opsPerChan)
+// <---------------------------------------------------------------------------->
+// t0   t1   t2   t3   t4   t5   t6   t7   t8   t9   t10  t11  t12  t13  t14  t15   ^
+// t16  t17  t18  t19  t20  t21  t22  t23  t24  t25  t26  t27  t28  t29  t30  t31   |
+// t0   t1   t2   t3   t4   t5   t6   t7   t8   t9   t10  t11  t12  t13  t14  t15   |
+// t16  t17  t18  t19  t20  t21  t22  t23  t24  t25  t26  t27  t28  t29  t30  t31   |
+// t0   t1   t2   t3   t4   t5   t6   t7   t8   t9   t10  t11  t12  t13  t14  t15   | M = 8 (repeat count)
+// t16  t17  t18  t19  t20  t21  t22  t23  t24  t25  t26  t27  t28  t29  t30  t31   |
+// t0   t1   t2   t3   t4   t5   t6   t7   t8   t9   t10  t11  t12  t13  t14  t15   |
+// t16  t17  t18  t19  t20  t21  t22  t23  t24  t25  t26  t27  t28  t29  t30  t31   v
+// In this case, the LinearLayout bases are:
+// Register:  {{2,0}, {4,0}}
+// Lane:      {{0,1}, {0,2}, {0,4}, {0,8}, {1,0}}
+// clang-format on
+std::vector<std::vector<int32_t>> DPASRegBasesA(int opsPerChannel,
+                                                int repeatCount,
+                                                int threadsPerWarp,
+                                                int systolicDepth) {
+  std::vector<std::vector<int32_t>> regBases;
+
+  // pack the value to i16 for scalar bit width <=16.
+  assert((opsPerChannel == 4 || opsPerChannel == 2 || opsPerChannel == 1) &&
+         "invalid opsPerChannel number.");
+  int packedOpsPerLane = opsPerChannel == 4 ? 2 : 1;
+  int packedColNum = (systolicDepth * opsPerChannel) / packedOpsPerLane;
+  int rowsPerWarp = mlir::ceil<int>(threadsPerWarp, packedColNum);
+  int warpRepeats = repeatCount / rowsPerWarp;
+
+  for (int opc = 1; opc < packedOpsPerLane; opc *= 2) {
+    regBases.push_back({0, opc});
+  }
+
+  for (int warp = 1; warp < warpRepeats; warp *= 2) {
+    regBases.push_back({warp * rowsPerWarp, 0});
+  }
+
+  return regBases;
+}
+
+std::vector<std::vector<int32_t>>
+DPASLaneBasesA(int opsPerChannel, int threadsPerWarp, int systolicDepth) {
+  std::vector<std::vector<int32_t>> laneBases;
+
+  // pack the value to i16 for scalar bit width <=16.
+  assert((opsPerChannel == 4 || opsPerChannel == 2 || opsPerChannel == 1) &&
+         "invalid opsPerChannel number.");
+  int packedOpsPerLane = opsPerChannel == 4 ? 2 : 1;
+  int packedColNum = (systolicDepth * opsPerChannel) / packedOpsPerLane;
+
+  for (int tid = 1; tid < packedColNum; tid *= 2) {
+    laneBases.push_back({0, packedOpsPerLane * tid});
+  }
+  for (int tid = packedColNum; tid < threadsPerWarp; tid *= 2) {
+    laneBases.push_back({tid / packedColNum, 0});
+  }
+
+  return laneBases;
+}
+
+// For B operand:
+//               execution size = 16
+//<-------------------------------------------------->
+// t0  t1  t2  t3  ~ t12 t13 t14 t15   ^              ^
+//.   .   .   .   .   .   .   .   .   | opsPerChan=2 |
+// t0  t1  t2  t3  ~ t12 t13 t14 t15   v              |
+// t16 t17 t18 t19 ~ t28 t29 t30 t31                  |
+//.   .   .   .   .   .   .   .   .                  |
+// t16 t17 t18 t19 ~ t28 t29 t30 t31                  | systolic depth = 8
+// t0  t1  t2  t3  ~ t12 t13 t14 t15                  |
+//.   .   .   .   .   .   .   .   .                  |
+// t0  t1  t2  t3  ~ t12 t13 t14 t15                  |
+// t16 t17 t18 t19 ~ t28 t29 t30 t31                  |
+//.   .   .   .   .   .   .   .   .                  |
+// t16 t17 t18 t19 ~ t28 t29 t30 t31                  v
+// In this case, the LinearLayout bases are:
+// Register:  {{1,0}, {4,0}, {8,0}}
+// Lane:      {{0,1}, {0,2}, {0,4}, {0,8}, {2,0}}
+std::vector<std::vector<int32_t>> DPASRegBasesB(int opsPerChannel,
+                                                int executionSize,
+                                                int threadsPerWarp,
+                                                int systolicDepth) {
+  int rowsPerWarp = threadsPerWarp / executionSize;
+  int warpRepeats = systolicDepth / rowsPerWarp;
+  std::vector<std::vector<int32_t>> regBases;
+
+  for (int opc = 1; opc < opsPerChannel; opc *= 2) {
+    regBases.push_back({opc, 0});
+  }
+  for (int rid = rowsPerWarp; rid < systolicDepth; rid *= 2) {
+    regBases.push_back({rid * opsPerChannel, 0});
+  }
+
+  return regBases;
+}
+
+std::vector<std::vector<int32_t>>
+DPASLaneBasesB(int opsPerChannel, int threadsPerWarp, int executionSize) {
+  std::vector<std::vector<int32_t>> laneBases;
+
+  for (int tid = 1; tid < executionSize; tid *= 2) {
+    laneBases.push_back({0, tid});
+  }
+  int rowsPerWarp = threadsPerWarp / executionSize;
+  for (int row = 1; row < rowsPerWarp; row *= 2) {
+    laneBases.push_back({row * opsPerChannel, 0});
+  }
+
+  return laneBases;
+}
+
+// For C operand:
+//        execution size = 16
+//<---------------------------------->
+// t0  t1  t2  t3  ~ t12 t13 t14 t15          ^
+// t16 t17 t18 t19 ~ t28 t29 t30 t31          |
+// .   .   .   .   .   .   .   .   .          |
+// .   .   .   .   .   .   .   .   .          | repeatCount = 8
+// t0  t1  t2  t3  ~ t12 t13 t14 t15          |
+// t16 t17 t18 t19 ~ t28 t29 t30 t31          v
+// In this case, the LinearLayout bases are:
+// Register:  {{2,0}, {4,0}}
+// Lane:      {{0,1}, {0,2}, {0,4}, {0,8}, {1,0}}
+std::vector<std::vector<int32_t>>
+DPASRegBasesC(int repeatCount, int executionSize, int threadsPerWarp) {
+  int rowsPerWarp = threadsPerWarp / executionSize;
+
+  std::vector<std::vector<int32_t>> regBases;
+
+  for (int rid = rowsPerWarp; rid < repeatCount; rid *= 2) {
+    regBases.push_back({rid, 0});
+  }
+
+  return regBases;
+}
+
+std::vector<std::vector<int32_t>>
+DPASLaneBasesC(int repeatCount, int executionSize, int threadsPerWarp) {
+  std::vector<std::vector<int32_t>> laneBases;
+
+  for (int tid = 1; tid < executionSize; tid *= 2) {
+    laneBases.push_back({0, tid});
+  }
+  int rowsPerWarp = threadsPerWarp / executionSize;
+  for (int row = 1; row < rowsPerWarp; row *= 2) {
+    laneBases.push_back({row, 0});
+  }
+
+  return laneBases;
+}
+
+LinearLayout DPAStoLinearLayout(ArrayRef<int64_t> shape, Attribute layout,
+                                unsigned opIdx) {
+  assert(opIdx < 3 && "opIdx must be 0, 1, or 2");
+  auto dpas = dyn_cast<DpasEncodingAttr>(layout);
+  assert(dpas && "Must be DPAS layout");
+
+  int rank = shape.size();
+  assert(rank == dpas.getWarpsPerCTA().size() && (rank == 2 || rank == 3) &&
+         "Invalid rank");
+
+  MLIRContext *ctx = dpas.getContext();
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
+
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+  StringAttr kWarp = S("warp");
+
+  auto warpsPerCTA = dpas.getWarpsPerCTA();
+  int threadsPerWarp = product<unsigned>(dpas.getThreadsPerWarp());
+  unsigned opsPerChannel = dpas.getOpsPerChannel();
+  auto repCluster = dpas.getRepCluster();
+  auto tileLayout = LinearLayout::empty();
+  int systolicDepth = dpas.getSystolicDepth();
+  int repeatCount = dpas.getRepeatCount();
+  int executionSize = dpas.getExecutionSize();
+  unsigned KDim, nonKDim;
+  if (opIdx == 0) { // Operand A
+    auto regBasesA = DPASRegBasesA(opsPerChannel, repeatCount, threadsPerWarp,
+                                   systolicDepth);
+    auto laneBasesA =
+        DPASLaneBasesA(opsPerChannel, threadsPerWarp, systolicDepth);
+    tileLayout = LinearLayout({{kRegister, regBasesA}, {kLane, laneBasesA}},
+                              ArrayRef(outDimNames).take_back(2));
+    // A only repeats by repCluster[rank - 2]
+    nonKDim = rank - 2;
+    KDim = rank - 1;
+    tileLayout *= LinearLayout::identity1D(repCluster[nonKDim], kRegister,
+                                           outDimNames[nonKDim]);
+
+    // K-dimension is shared among warps
+    tileLayout *=
+        LinearLayout::zeros1D(warpsPerCTA[KDim], kWarp, outDimNames[KDim]);
+    tileLayout *= LinearLayout::identity1D(warpsPerCTA[nonKDim], kWarp,
+                                           outDimNames[nonKDim]);
+    if (rank == 3)
+      tileLayout *=
+          LinearLayout::identity1D(warpsPerCTA[0], kWarp, outDimNames[0]);
+
+  } else if (opIdx == 1) { // Operand B
+    auto regBasesB = DPASRegBasesB(opsPerChannel, executionSize, threadsPerWarp,
+                                   systolicDepth);
+    auto laneBasesB =
+        DPASLaneBasesB(opsPerChannel, threadsPerWarp, executionSize);
+    tileLayout = LinearLayout({{kRegister, regBasesB}, {kLane, laneBasesB}},
+                              ArrayRef(outDimNames).take_back(2));
+    // B only repeats by repCluster[rank - 1]
+    nonKDim = rank - 1;
+    KDim = rank - 2;
+    tileLayout *= LinearLayout::identity1D(repCluster[nonKDim], kRegister,
+                                           outDimNames[nonKDim]);
+
+    // K-dimension is shared among warps
+    tileLayout *= LinearLayout::identity1D(warpsPerCTA[nonKDim], kWarp,
+                                           outDimNames[nonKDim]);
+    tileLayout *=
+        LinearLayout::zeros1D(warpsPerCTA[KDim], kWarp, outDimNames[KDim]);
+    if (rank == 3)
+      tileLayout *=
+          LinearLayout::identity1D(warpsPerCTA[0], kWarp, outDimNames[0]);
+  } else { // opIdx=2 -> Operand C
+    auto regBasesC = DPASRegBasesC(repeatCount, executionSize, threadsPerWarp);
+    auto laneBasesC =
+        DPASLaneBasesC(repeatCount, executionSize, threadsPerWarp);
+    tileLayout = LinearLayout({{kRegister, regBasesC}, {kLane, laneBasesC}},
+                              ArrayRef(outDimNames).take_back(2));
+    // The per-inst layout is repeated at each repCluster.
+    // Hence, multiply with the identity layouts starting from the
+    // least significant dimension.
+    nonKDim = rank - 2;
+    KDim = rank - 1;
+    tileLayout *= LinearLayout::identity1D(repCluster[KDim], kRegister,
+                                           outDimNames[KDim]);
+    tileLayout *= LinearLayout::identity1D(repCluster[nonKDim], kRegister,
+                                           outDimNames[nonKDim]);
+
+    // // The identical layout is repeated among warps
+    tileLayout *=
+        LinearLayout::identity1D(warpsPerCTA[KDim], kWarp, outDimNames[KDim]);
+    tileLayout *= LinearLayout::identity1D(warpsPerCTA[nonKDim], kWarp,
+                                           outDimNames[nonKDim]);
+    if (rank == 3)
+      tileLayout *=
+          LinearLayout::identity1D(warpsPerCTA[0], kWarp, outDimNames[0]);
+  }
+
+  // Lastly, the layout repeats to match the shape.
+  // Operand A/B repeats through the K-dimension first then repeats
+  // through the non-K dimension.
+  SmallVector<int64_t> numReps = dpas.getDPASRepetitions(shape, opIdx);
+
+  // numReps is always 3D, we should add 1 to dim id when rank is 2
+  int repDimK = rank == 2 ? KDim + 1 : KDim;
+  int repDimNonK = rank == 2 ? nonKDim + 1 : nonKDim;
+  tileLayout *=
+      LinearLayout::identity1D(numReps[repDimK], kRegister, outDimNames[KDim]);
+  tileLayout *= LinearLayout::identity1D(numReps[repDimNonK], kRegister,
+                                         outDimNames[nonKDim]);
+  if (rank == 3)
+    tileLayout *=
+        LinearLayout::identity1D(numReps[0], kRegister, outDimNames[0]);
+
+  return combineCtaCgaWithShape(
+      std::move(tileLayout), CGAEncodingAttr::get1CTALayout(ctx, rank), shape);
+}
+
+// clang-format off
+// There are only 8 or 16 values for scale A per bdpas.
+// The values are duplicated within the warp.
+// Example of repeat_count=8, operands_per_chan=4 for warp size 16.
+// For Scale A operand:
+//               RC = 8
+// <------------------------------------>
+// t0|t8   t1|t9   ...   t6|t14   t7|t15
+//
+// In this case, the LinearLayout bases are:
+// Register:  size 1 dimension
+// Lane:      {{1,0}, {2,0}, {4,0}, {0,0}}
+//
+// Example of repeat_count=8, operands_per_chan=8 for warp size 16.
+//                RC = 8
+// <------------------------------------->+
+// t0|t8   t1|t9   ...   t6|t14   t7|t15  |
+// t0|t8   t1|t9   ...   t6|t14   t7|t15  v  K = (systolic*ops_per_chan)/32 = 2
+// In this case, the LinearLayout bases are:
+// Register:  {{0,1}}
+// Lane:      {{1,0}, {2,0}, {4,0}, {0,0}}
+//
+// clang-format on
+std::vector<std::vector<int32_t>>
+BlockScaledDPASRegBasesScaleA(int opsPerChannel) {
+  assert((opsPerChannel == 2 || opsPerChannel == 4 || opsPerChannel == 8) &&
+         "invalid opsPerChannel number for bdpas.");
+
+  std::vector<std::vector<int32_t>> regBases;
+  if (opsPerChannel == 8)
+    regBases.push_back({0, 1});
+
+  return regBases;
+}
+
+std::vector<std::vector<int32_t>>
+BlockScaledDPASLaneBasesScaleA(int repeatCount, int threadsPerWarp) {
+  assert((repeatCount == 8) && "invalid repeatCount number for bdpas.");
+
+  std::vector<std::vector<int32_t>> laneBases;
+  int tid = 1;
+  while (tid < repeatCount) {
+    laneBases.push_back({tid, 0});
+    tid *= 2;
+  }
+  while (tid < threadsPerWarp) {
+    laneBases.push_back({0, 0});
+    tid *= 2;
+  }
+  return laneBases;
+}
+
+// clang-format off
+// There are only 16 or 32 values for scale B per bdpas.
+// The values are duplicated within the warp.
+// Example of exec_size=16, operands_per_chan=4 for warp size 16.
+// For Scale B operand:
+//            exec_size = 16
+// <-------------------------------------->
+// t0   t1   t2   t3  ... t13   t14   t15
+//
+// In this case, the LinearLayout bases are:
+// Register:  size 1 dimension
+// Lane:      {{1,0}, {2,0}, {4,0}, {8,0}}
+//
+// Example of exec_size=16, operands_per_chan=8 for warp size 16.
+//            exec_size = 16
+// <-------------------------------------->+
+// t0   t1   t2   t3  ... t13   t14   t15  |
+// t0   t1   t2   t3  ... t13   t14   t15  v  K = (systolic*ops_per_chan)/32 = 2
+//
+// In this case, the LinearLayout bases are:
+// Register:  {{0,1}}
+// Lane:      {{1,0}, {2,0}, {4,0}, {8,0}}
+// clang-format on
+std::vector<std::vector<int32_t>>
+BlockScaledDPASRegBasesScaleB(int opsPerChannel) {
+  assert((opsPerChannel == 2 || opsPerChannel == 4 || opsPerChannel == 8) &&
+         "invalid opsPerChannel number for bdpas.");
+
+  std::vector<std::vector<int32_t>> regBases;
+  if (opsPerChannel == 8)
+    regBases.push_back({0, 1});
+
+  return regBases;
+}
+
+std::vector<std::vector<int32_t>>
+BlockScaledDPASLaneBasesScaleB(int execSize, int threadsPerWarp) {
+  assert((execSize == 16) && "invalid execSize number for bdpas.");
+
+  std::vector<std::vector<int32_t>> laneBases;
+  int tid = 1;
+  while (tid < execSize) {
+    laneBases.push_back({tid, 0});
+    tid *= 2;
+  }
+  while (tid < threadsPerWarp) {
+    laneBases.push_back({0, 0});
+    tid *= 2;
+  }
+  return laneBases;
+}
+
+LinearLayout BlockScaledDPAStoLinearLayout(ArrayRef<int64_t> shape,
+                                           Attribute layout, unsigned opIdx,
+                                           int scaleKIndex) {
+  assert(opIdx < 5 && "opIdx must be 0, 1, 2, 3, or 4");
+  auto dpas = cast<DpasEncodingAttr>(layout);
+  [[maybe_unused]] unsigned rc = dpas.getRepeatCount();
+  assert(rc == 8 && "block scaled dpas only supports repeatCount=8");
+  if (opIdx < 3)
+    return DPAStoLinearLayout(shape, layout, opIdx);
+
+  int rank = shape.size();
+  assert(rank == dpas.getWarpsPerCTA().size() && (rank == 2 || rank == 3) &&
+         "Invalid rank");
+
+  MLIRContext *ctx = dpas.getContext();
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
+
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+  StringAttr kWarp = S("warp");
+
+  auto warpsPerCTA = dpas.getWarpsPerCTA();
+  int threadsPerWarp = product<unsigned>(dpas.getThreadsPerWarp());
+  auto repCluster = dpas.getRepCluster();
+  auto tileLayout = LinearLayout::empty();
+  int repeatCount = dpas.getRepeatCount();
+  int executionSize = dpas.getExecutionSize();
+  std::optional<unsigned> fp4Kpack = dpas.getFp4KPack();
+  int opsPerChannel = fp4Kpack ? dpas.getOpsPerChannel() * (*fp4Kpack)
+                               : dpas.getOpsPerChannel();
+  assert(
+      ((opsPerChannel == 2) || (opsPerChannel == 4) || (opsPerChannel == 8)) &&
+      "block scaled dpas only supports opsPerChannel of 2, 4 or 8");
+  unsigned dpasKDim, dpasNonKDim;
+  auto getUnsignedKDim = [&](int scaleKIdx, unsigned rank) -> unsigned {
+    if (scaleKIdx < 0)
+      return rank + scaleKIdx;
+    else
+      return scaleKIdx;
+  };
+
+  unsigned scaleOpKDim = getUnsignedKDim(scaleKIndex, rank);
+  assert((scaleOpKDim == rank - 1) &&
+         "scaleOpKDim must be the last dim of blocked scale");
+  unsigned scaleOpNonKDim = getUnsignedKDim(scaleKIndex ^ 1, rank);
+  if (opIdx == 3) { // Operand Scale A
+    auto regBasesA = BlockScaledDPASRegBasesScaleA(opsPerChannel);
+    auto laneBasesA =
+        BlockScaledDPASLaneBasesScaleA(repeatCount, threadsPerWarp);
+    tileLayout = LinearLayout({{kRegister, regBasesA}, {kLane, laneBasesA}},
+                              ArrayRef(outDimNames).take_back(2));
+    // A only repeats by repCluster[rank - 2]
+    dpasNonKDim = rank - 2;
+    dpasKDim = rank - 1;
+
+    tileLayout *= LinearLayout::identity1D(repCluster[dpasNonKDim], kRegister,
+                                           outDimNames[scaleOpNonKDim]);
+
+    // K-dimension is shared among warps
+    tileLayout *= LinearLayout::zeros1D(warpsPerCTA[dpasKDim], kWarp,
+                                        outDimNames[scaleOpKDim]);
+
+    tileLayout *= LinearLayout::identity1D(warpsPerCTA[dpasNonKDim], kWarp,
+                                           outDimNames[scaleOpNonKDim]);
+
+    if (rank == 3)
+      tileLayout *=
+          LinearLayout::identity1D(warpsPerCTA[0], kWarp, outDimNames[0]);
+
+  } else { // Operand Scale B
+    auto regBasesB = BlockScaledDPASRegBasesScaleB(opsPerChannel);
+    auto laneBasesB =
+        BlockScaledDPASLaneBasesScaleB(executionSize, threadsPerWarp);
+    tileLayout = LinearLayout({{kRegister, regBasesB}, {kLane, laneBasesB}},
+                              ArrayRef(outDimNames).take_back(2));
+    // B only repeats by repCluster[rank - 1]
+    dpasNonKDim = rank - 1;
+    dpasKDim = rank - 2;
+    tileLayout *= LinearLayout::identity1D(repCluster[dpasNonKDim], kRegister,
+                                           outDimNames[scaleOpNonKDim]);
+
+    // K-dimension is shared among warps
+    tileLayout *= LinearLayout::identity1D(warpsPerCTA[dpasNonKDim], kWarp,
+                                           outDimNames[scaleOpNonKDim]);
+    tileLayout *= LinearLayout::zeros1D(warpsPerCTA[dpasKDim], kWarp,
+                                        outDimNames[scaleOpKDim]);
+
+    if (rank == 3)
+      tileLayout *=
+          LinearLayout::identity1D(warpsPerCTA[0], kWarp, outDimNames[0]);
+  }
+
+  // Lastly, the layout repeats to match the shape.
+  // Align the order of the repetitions to Operand A/B, repeats through the
+  // K-dimension first then repeats through the non-K dimension.
+  SmallVector<int64_t> numReps;
+  for (auto [i, shape] : llvm::enumerate(shape)) {
+    int32_t tileShape = tileLayout.getOutDimSize(outDimNames[i]);
+    numReps.push_back(mlir::ceil<int64_t>(shape, tileShape));
+  }
+
+  tileLayout *= LinearLayout::identity1D(numReps[scaleOpKDim], kRegister,
+                                         outDimNames[scaleOpKDim]);
+  tileLayout *= LinearLayout::identity1D(numReps[scaleOpNonKDim], kRegister,
+                                         outDimNames[scaleOpNonKDim]);
+  if (rank == 3)
+    tileLayout *=
+        LinearLayout::identity1D(numReps[0], kRegister, outDimNames[0]);
+
+  tileLayout = combineCtaCgaWithShape(
+      std::move(tileLayout), CGAEncodingAttr::get1CTALayout(ctx, rank), shape);
+  return tileLayout;
+}
+
+LinearLayout dotOperandDpasToLinearLayout(DotOperandEncodingAttr dotDpasLayout,
+                                          ArrayRef<int64_t> shape) {
+  auto dpasLayout = cast<intel::DpasEncodingAttr>(dotDpasLayout.getParent());
+
+  return DPAStoLinearLayout(shape, dpasLayout, dotDpasLayout.getOpIdx());
+}
+
+namespace {
+
+static LinearLayout broadcastedDotOperandLayout(MLIRContext *ctx,
+                                                ArrayRef<unsigned> shape,
+                                                ArrayRef<unsigned> order,
+                                                unsigned broadcastDim,
+                                                StringAttr inDimName) {
+  int rank = shape.size();
+  auto dimNames = standardOutDimNames(ctx, rank);
+  LinearLayout layout = LinearLayout::empty();
+
+  for (auto d : order) {
+    if (d == broadcastDim) {
+      layout *= LinearLayout::zeros1D(shape[d], inDimName, dimNames[d]);
+    } else {
+      layout *= LinearLayout::identity1D(shape[d], inDimName, dimNames[d]);
+    }
+  }
+  return layout;
+}
+
+using basisT = std::vector<std::vector<int32_t>>;
+
+// Creates a row major tile layout with register/lane input dimensions according
+// to the provided height, width, and threadsPerWarp. The relationship between
+// the width and threadsPerWarp determines the packing of rows across lanes:
+//  - if width == threadsPerWarp:
+//      block row elements are mapped to registers in row major order, i.e. one
+//      column per lane
+// - if width < threadsPerWarp:
+//      multiple rows are mapped to the first register to fill the warp, i.e.
+//      width * rowsPerWarp = threadsPerWarp
+// - if width > threadsPerWarp:
+//      multiple elements of each row are assigned to registers such that
+//      packedElementsPerLane row values exist in consecutive registers for each
+//      lane
+std::pair<basisT, basisT>
+createRegisterLaneBases(const int height, const int width,
+                        const unsigned threadsPerWarp) {
+  const int packedElementsPerLane =
+      mlir::ceil<int>(width, static_cast<int>(threadsPerWarp));
+
+  basisT laneBases;
+  for (int i = packedElementsPerLane; i < width; i = i << 1) {
+    laneBases.push_back({0, i});
+  }
+
+  const int rowsPerWarp =
+      mlir::ceil<int>(threadsPerWarp, 1 << laneBases.size());
+  // Place subsequent rows into adjacent lanes until all lanes have been filled
+  for (int i = 1; i < rowsPerWarp; i = i << 1) {
+    laneBases.push_back({i, 0});
+  }
+
+  basisT regBases;
+
+  // Add packed row-wise elements (width > threadsPerWarp) before adding columns
+  for (int i = 1; i < packedElementsPerLane; i = i << 1) {
+    regBases.push_back({0, i});
+  }
+
+  for (int i = 1; i < height / rowsPerWarp; i = i << 1) {
+    regBases.push_back({i * rowsPerWarp, 0});
+  }
+
+  return std::make_pair(regBases, laneBases);
+}
+
+} // namespace
+
+LinearLayout
+subgroup2DBlockToLinearLayout(ArrayRef<int64_t> blockShape,
+                              intel::Subgroup2DBlockEncodingAttr layout,
+                              unsigned kWidth) {
+  auto ctx = layout.getContext();
+  int rank = blockShape.size();
+  assert(rank == layout.getRank() && "unexpected block shape rank, layout rank "
+                                     "and block shape rank must be equal");
+  auto dimNames = standardOutDimNames(ctx, rank);
+  auto loadTileSize = layout.getInstrShape();
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+  StringAttr kWarp = S("warp");
+
+  // Start by creating register/lane bases corresponding to the desired load
+  // tile size
+  auto [regBases, laneBases] = createRegisterLaneBases(
+      loadTileSize[0], loadTileSize[1], layout.getThreadsPerWarp());
+
+  LinearLayout::BasesT bases;
+  bases[kRegister] = regBases;
+  bases[kLane] = laneBases;
+  auto ctaLayout = LinearLayout(bases, dimNames);
+
+  assert(ctaLayout.getInDimSize(kLane) <= layout.getThreadsPerWarp() &&
+         "number of lanes should not exceed threads per warp");
+
+  // Increasing the block count always increases the inner dimension for the
+  // register/lane layout regardless of order
+  ctaLayout *=
+      LinearLayout::identity1D(layout.getNumBlocks(), kRegister, dimNames[1]);
+
+  // Broadcast the layout according to warpsPerCTA, then combine with the
+  // overall CGALayout and reshape according to the provided blockShape.
+  auto warpOrder = getMatrixOrder(rank, /*rowMajor*/ true);
+  auto order = layout.getOrder();
+  assert(order.size() == 2 && "only rank 2 order supported");
+  unsigned inner = order[0];
+
+  ctaLayout *= broadcastedDotOperandLayout(ctx, layout.getWarpsPerCTA(),
+                                           warpOrder, inner, kWarp)
+                   .transposeOuts(llvm::to_vector(ctaLayout.getOutDimNames()));
+  return combineCtaCgaWithShape(ctaLayout, layout.getCGALayout(), blockShape);
+}
+
+} // namespace mlir::triton::gpu

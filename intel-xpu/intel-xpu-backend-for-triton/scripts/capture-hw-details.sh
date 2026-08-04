@@ -1,0 +1,150 @@
+#!/bin/bash
+
+QUIET=false
+for arg in "$@"; do
+  case $arg in
+    -q|--quiet)
+      QUIET=true
+      shift
+      ;;
+    --help)
+      echo "Example usage: ./capture-hw-details.sh [-q | --quiet]"
+      exit 1
+      ;;
+    *)
+      ARGS+="${arg} "
+      shift
+      ;;
+  esac
+done
+
+function libigc_version {
+    if [[ $OSTYPE = msys || $OSTYPE = cygwin ]]; then
+        pwsh -Command '
+            $igc = @(Get-Process -Name dwm -Module | Where-Object ModuleName -eq 'igc64.dll').FileVersionInfo.FileVersion | Sort-Object -Unique
+            if ($igc.Count -gt 1) {
+                Write-Host "MULTIPLE"
+            }
+            elseif ($igc.Count -eq 1) {
+                Write-Host $igc
+            }
+            else {
+                Write-Host "Not Found"
+            }'
+        return
+    fi
+    if dpkg-query --show libigc2 &> /dev/null; then
+        dpkg-query --show --showformat='${version}\n' libigc2 | grep -oP '.+(?=~)'
+    elif dpkg-query --show libigc1 &> /dev/null; then
+        dpkg-query --show --showformat='${version}\n' libigc1 | grep -oP '.+(?=~)'
+    else
+        echo "Not Installed"
+    fi
+}
+
+function level_zero_version {
+    if [[ $OSTYPE = msys || $OSTYPE = cygwin ]]; then
+        powershell -Command "(Get-Item C:\Windows\system32\ze_loader.dll).VersionInfo.ProductVersion"
+        return
+    fi
+    if dpkg-query --show libze1 &> /dev/null; then
+        dpkg-query --show --showformat='${version}\n' libze1 | grep -oP '.+(?=~)'
+    elif dpkg-query --show intel-level-zero-gpu &> /dev/null; then
+        dpkg-query --show --showformat='${version}\n' intel-level-zero-gpu | grep -oP '.+(?=~)'
+    else
+        echo "Not Installed"
+    fi
+}
+
+function agama_version {
+    if [[ $OSTYPE = msys || $OSTYPE = cygwin ]]; then
+        powershell -Command '(Get-WmiObject Win32_VideoController | where {$_.VideoProcessor -like "*Intel*" }).DriverVersion'
+        return
+    fi
+    local pkg version ocloc_version ocloc_upstream ocloc_build
+    if dpkg-query --show libigc2 &> /dev/null; then
+        pkg=libigc2
+    elif dpkg-query --show libigc1 &> /dev/null; then
+        pkg=libigc1
+    else
+        echo "Not Installed"
+        return
+    fi
+    version="$(dpkg-query --show --showformat='${version}\n' "$pkg")"
+
+    if dpkg-query --show intel-ocloc &> /dev/null; then
+        ocloc_version="$(dpkg-query --show --showformat='${version}\n' intel-ocloc)"
+        ocloc_upstream="${ocloc_version%%-*}"
+        ocloc_build="$(echo "$ocloc_upstream" | cut -d. -f3)"
+    fi
+
+    if [[ ${ocloc_build:-} =~ ^[0-9]+$ ]] && ((ocloc_build > 38308)); then
+        # New scheme: the ocloc "<build>.<revision>", e.g. "38646.6".
+        echo "$ocloc_upstream" | cut -d. -f3-
+    else
+        # Old scheme: build number embedded in the libigc Debian revision,
+        # e.g. "1.0.17537.24-1032~22.04" -> "1032".
+        echo "$version" | sed 's/.*-\(.*\)~.*/\1/'
+    fi
+}
+
+function gpu_device {
+    # Allow overriding GPU_DEVICE when other methods are unreliable (i.e. if reported name is too common)
+    if [[ -v GPU_DEVICE ]]; then
+        echo "$GPU_DEVICE"
+        return
+    fi
+
+    if command -v clinfo &> /dev/null; then
+        GPU_DEVICE=$(clinfo --json | jq -r '[.devices[].online[] | select(.CL_DEVICE_TYPE.raw == 4)][0].CL_DEVICE_NAME')
+    fi
+
+    # Handle a special case when clinfo could not detect GPUs in the system.
+    # In this case, GPU_DEVICE is "null" (returned by jq).
+    if [[ ${GPU_DEVICE:-null} != null ]]; then
+        echo "$GPU_DEVICE"
+        return
+    fi
+
+    if command -v nvidia-smi &> /dev/null; then
+        nvidia-smi -L | sed -e 's,\(.*\) (UUID.*),\1,'
+    elif command -v sycl-ls &> /dev/null; then
+        ONEAPI_DEVICE_SELECTOR=level_zero:gpu sycl-ls --verbose 2>/dev/null | grep Name | sed -n '2p' | sed -E 's/\s+Name\s+:\s+(.+)$/\1/'
+    else
+        echo "Not Installed"
+    fi
+}
+
+# Use LIBIGC1_VERSION also for libigc2 for backward compatibility.
+export LIBIGC1_VERSION="$(libigc_version)"
+
+export LEVEL_ZERO_VERSION="$(level_zero_version)"
+
+# Use AGAMA_VERSION for GPU driver version on both Linux and Windows for backward compatibility.
+export AGAMA_VERSION="$(agama_version)"
+
+export GPU_DEVICE="$(gpu_device)"
+
+if python -c "import torch" &> /dev/null; then
+    export TORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
+else
+    export TORCH_VERSION="Not installed"
+fi
+
+if icpx --version &> /dev/null; then
+    export COMPILER_VERSION=$(icpx --version | grep "DPC++/C++ Compiler" | sed 's/.*(\(.*\))/\1/' | cut -d '.' -f 1-3)
+else
+    export COMPILER_VERSION="Not installed"
+fi
+
+if [[ $QUIET = false ]]; then
+    echo "LIBIGC1_VERSION=$LIBIGC1_VERSION"
+    echo "LEVEL_ZERO_VERSION=$LEVEL_ZERO_VERSION"
+    echo "AGAMA_VERSION=$AGAMA_VERSION"
+    echo "GPU_DEVICE=$GPU_DEVICE"
+    echo "TORCH_VERSION=$TORCH_VERSION"
+    echo "COMPILER_VERSION=$COMPILER_VERSION"
+    if [[ ${BENCHMARKING_METHOD:-} ]]; then
+        echo "BENCHMARKING_METHOD=$BENCHMARKING_METHOD"
+    fi
+fi

@@ -1,0 +1,276 @@
+// Generic server-facing backend for target layer split.
+
+#include "layer_split_backend.h"
+
+#include "io_utils.h"
+
+#include <chrono>
+#include <cstdio>
+#include <cmath>
+#include <utility>
+
+namespace dflash::common {
+
+LayerSplitBackend::LayerSplitBackend(std::unique_ptr<LayerSplitAdapter> adapter)
+    : adapter_(std::move(adapter)) {}
+
+LayerSplitBackend::~LayerSplitBackend() { shutdown(); }
+
+bool LayerSplitBackend::init() {
+    if (!adapter_) {
+        std::fprintf(stderr, "[target-split] missing model adapter\n");
+        return false;
+    }
+    shutdown_done_ = false;
+    return adapter_->init();
+}
+
+void LayerSplitBackend::print_ready_banner() const {
+    std::printf("[daemon] ready\n");
+    std::fflush(stdout);
+}
+
+bool LayerSplitBackend::park(ParkTarget target) {
+    std::fprintf(stderr,
+                 "[target-split] park is not supported yet (target=%s)\n",
+                 park_target_name(target));
+    return false;
+}
+
+bool LayerSplitBackend::unpark(ParkTarget target) {
+    std::fprintf(stderr,
+                 "[target-split] unpark is not supported yet (target=%s)\n",
+                 park_target_name(target));
+    return false;
+}
+
+GenerateResult LayerSplitBackend::run_from_state(const GenerateRequest & req,
+                                                 const DaemonIO & io,
+                                                 int base_pos,
+                                                 bool reset_state,
+                                                 const std::vector<int32_t> & history_prefix) {
+    GenerateResult result;
+    if (!adapter_) {
+        result.fail(GenerateErrorCode::AdapterUnavailable);
+        return result;
+    }
+
+    DaemonIO out_io = io.with_token_callback(req.on_token);
+    if (base_pos + (int)req.prompt.size() + req.n_gen + 1 > adapter_->max_context()) {
+        result.fail(GenerateErrorCode::ContextOverflow);
+        return result;
+    }
+    if (req.do_sample && req.sampler.needs_logit_processing() &&
+        !adapter_->supports_cpu_sampling()) {
+        result.fail(GenerateErrorCode::SamplingUnsupported);
+        return result;
+    }
+
+    adapter_->begin_request(req);
+    if (reset_state) adapter_->reset_request_state();
+
+    const int prompt_len = (int)req.prompt.size();
+    const int adapter_chunk = adapter_->prefill_chunk_tokens();
+    int last_tok = (base_pos > 0 && prompt_len == 0)
+        ? adapter_->current_last_token()
+        : -1;
+    int consumed = 0;
+    auto t_prefill_start = std::chrono::steady_clock::now();
+    while (consumed < prompt_len) {
+        int n_tokens = prompt_len - consumed;
+        if (adapter_chunk > 0 && n_tokens > adapter_chunk) {
+            n_tokens = adapter_chunk;
+        }
+        if (req.snap_pos >= 0 && req.snap_slot >= 0 &&
+            req.snap_pos > base_pos + consumed &&
+            req.snap_pos < base_pos + consumed + n_tokens) {
+            n_tokens = req.snap_pos - (base_pos + consumed);
+        }
+        std::vector<int32_t> chunk(req.prompt.begin() + consumed,
+                                   req.prompt.begin() + consumed + n_tokens);
+        if (!adapter_->prefill(chunk, base_pos + consumed, last_tok)) {
+            result.fail(GenerateErrorCode::PrefillFailed);
+            return result;
+        }
+        consumed += n_tokens;
+        if (req.snap_pos >= 0 && req.snap_slot >= 0 &&
+            base_pos + consumed == req.snap_pos) {
+            if (adapter_->snapshot_save(req.snap_slot)) {
+                std::printf("[snap] inline slot=%d cur_pos=%d\n",
+                            req.snap_slot, req.snap_pos);
+                std::fflush(stdout);
+            }
+        }
+    }
+    result.prefill_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t_prefill_start).count();
+
+    if (req.n_gen > 0) {
+        if (last_tok < 0) {
+            result.fail(GenerateErrorCode::DecodeSeedMissing);
+            return result;
+        }
+        auto t_decode_start = std::chrono::steady_clock::now();
+        const bool use_dflash = !req.force_ar_decode && adapter_->can_dflash_decode();
+        if (use_dflash) result.spec_decode_ran = true;
+        float dflash_accept_rate = 0.0f;
+        const bool ok = use_dflash
+            ? adapter_->decode_dflash(req.prompt, base_pos, last_tok, req.n_gen,
+                                      result.tokens, out_io, dflash_accept_rate)
+            : adapter_->decode_ar(last_tok, base_pos + (int)req.prompt.size(), req.n_gen,
+                                  history_prefix,
+                                  result.tokens, out_io);
+        if (use_dflash) result.accept_rate = dflash_accept_rate;
+        if (!ok) {
+            result.fail(GenerateErrorCode::DecodeFailed);
+            return result;
+        }
+        result.decode_s = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t_decode_start).count();
+    }
+
+    result.succeed();
+    return result;
+}
+
+GenerateResult LayerSplitBackend::generate_impl(const GenerateRequest & req,
+                                                const DaemonIO & io) {
+    return run_from_state(req, io, /*base_pos=*/0, /*reset_state=*/true,
+                          req.prompt);
+}
+
+bool LayerSplitBackend::snapshot_save(int slot) {
+    return adapter_ && adapter_->snapshot_save(slot);
+}
+
+void LayerSplitBackend::snapshot_free(int slot) {
+    if (adapter_) adapter_->snapshot_free(slot);
+}
+
+bool LayerSplitBackend::snapshot_used(int slot) const {
+    return adapter_ && adapter_->snapshot_used(slot);
+}
+
+int LayerSplitBackend::snapshot_cur_pos(int slot) const {
+    return adapter_ ? adapter_->snapshot_cur_pos(slot) : 0;
+}
+
+ModelBackend::SnapshotRef LayerSplitBackend::snapshot_ref(int slot) const {
+    return adapter_ ? adapter_->snapshot_ref(slot) : SnapshotRef{};
+}
+
+bool LayerSplitBackend::snapshot_adopt(int slot,
+                                       ggml_context * ctx,
+                                       ggml_backend_buffer_t buf,
+                                       int cur_pos,
+                                       int32_t last_tok) {
+    return adapter_ && adapter_->snapshot_adopt(slot, ctx, buf, cur_pos, last_tok);
+}
+
+GenerateResult LayerSplitBackend::restore_and_generate_impl(
+        int slot, const GenerateRequest & req, const DaemonIO & io) {
+    GenerateResult result;
+    if (!adapter_ || !adapter_->snapshot_restore(slot)) {
+        result.fail(GenerateErrorCode::InvalidSnapshotSlot);
+        io.emit(-1);
+        return result;
+    }
+    const int snap_pos = adapter_->snapshot_cur_pos(slot);
+    if ((int)req.prompt.size() < snap_pos) {
+        // Snapshot covers more KV than the new prompt (client edited or
+        // summarized its history). Fall back to a fresh full prefill.
+        std::fprintf(stderr,
+            "[pc] snapshot longer than prompt (snap=%d > prompt=%zu) — "
+            "fresh prefill fallback\n", snap_pos, req.prompt.size());
+        return run_from_state(req, io, /*base_pos=*/0, /*reset_state=*/true,
+                              req.prompt);
+    }
+    GenerateRequest delta_req = req;
+    delta_req.prompt = std::vector<int32_t>(
+        req.prompt.begin() + snap_pos, req.prompt.end());
+    return run_from_state(delta_req, io, snap_pos, /*reset_state=*/false,
+                          req.prompt);
+}
+
+ModelBackend::CompressResult
+LayerSplitBackend::compress(const CompressRequest & req) {
+    return adapter_ ? adapter_->compress(req) : CompressResult{};
+}
+
+bool LayerSplitBackend::handle_compress(const std::string & line,
+                                        const DaemonIO & io) {
+    std::string args = line.size() > 9 ? line.substr(9) : std::string{};
+    bool skip_park = false;
+    const std::string suffix = " nopark";
+    if (args.size() >= suffix.size() &&
+        args.compare(args.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        skip_park = true;
+        args.resize(args.size() - suffix.size());
+    }
+
+    char ppath[1024];
+    int keep_x1000 = 0;
+    char drafter_path[1024] = {0};
+    const int n = std::sscanf(args.c_str(), "%1023s %d %1023s",
+                              ppath, &keep_x1000, drafter_path);
+    if (n < 2) {
+        std::fprintf(stderr, "[target-split][compress] bad args\n");
+        io.emit(-1);
+        return false;
+    }
+
+    CompressRequest req;
+    req.input_ids = read_int32_file(ppath);
+    req.keep_ratio = (float)keep_x1000 / 1000.0f;
+    if (!std::isfinite(req.keep_ratio) ||
+        req.keep_ratio < 0.0f || req.keep_ratio > 1.0f) {
+        std::fprintf(stderr,
+            "[target-split][compress] keep ratio must be in [0,1], got %d/1000\n",
+            keep_x1000);
+        io.emit(-1);
+        return false;
+    }
+    if (n >= 3 && drafter_path[0]) {
+        req.drafter_path = drafter_path;
+    } else if (adapter_) {
+        req.drafter_path = adapter_->default_compress_drafter_path();
+    }
+    req.skip_park = skip_park;
+
+    CompressResult result = compress(req);
+    for (int32_t t : result.compressed_ids) io.emit(t);
+    io.emit(-1);
+    return result.ok;
+}
+
+void LayerSplitBackend::free_drafter() {
+    if (adapter_) adapter_->free_drafter();
+}
+
+bool LayerSplitBackend::supports_dflash_spec_decode() const {
+    return adapter_ && adapter_->supports_dflash_spec_decode();
+}
+
+DFlashTarget * LayerSplitBackend::dflash_target() {
+    return adapter_ ? adapter_->dflash_target() : nullptr;
+}
+
+bool LayerSplitBackend::supports_remote_draft() const {
+    return adapter_ && adapter_->supports_remote_draft();
+}
+
+bool LayerSplitBackend::supports_kvflash() const {
+    return adapter_ && adapter_->supports_kvflash();
+}
+
+bool LayerSplitBackend::supports_mixed_backend_layer_split() const {
+    return adapter_ && adapter_->supports_mixed_backend_layer_split();
+}
+
+void LayerSplitBackend::shutdown() {
+    if (shutdown_done_) return;
+    shutdown_done_ = true;
+    if (adapter_) adapter_->shutdown();
+}
+
+}  // namespace dflash::common

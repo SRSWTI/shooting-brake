@@ -1,0 +1,55 @@
+/* torch_extension_gemm.cc — Op registration for FP8 GEMM (M>1) ESIMD kernels.
+ * Uses TORCH_LIBRARY_FRAGMENT to add ops to the existing library namespace.
+ */
+#include <ATen/core/dispatch/Dispatcher.h>
+#include <torch/all.h>
+#include <torch/library.h>
+#include <Python.h>
+
+#include "kernel_ops.h"
+
+TORCH_LIBRARY_FRAGMENT(custom_esimd_kernels_vllm, m) {
+  // FP8 GEMM per-tensor scale: input [M, K] fp16, weight [N, K] fp8, output [M, N] fp16
+  // Auto-dispatches based on M: GEMV for M<=3, DPAS for M>=2 (E4M3), WS fallback
+  m.def("esimd_gemm_fp8_pert(Tensor input, Tensor weight, Tensor weight_scale, "
+        "Tensor output) -> Tensor");
+  m.impl("esimd_gemm_fp8_pert", torch::kXPU, &esimd_gemm_fp8_pert);
+
+  // INT4 GEMM DPAS with per-group scale (group_size=128): M>=2.
+  // Weight [N, K/2] uint8 packed, scale [N, K/128] fp16.  N/K auto-detected.
+  m.def("esimd_gemm_int4_pgrp(Tensor input, Tensor weight, Tensor weight_scale, "
+        "Tensor output) -> Tensor");
+  m.impl("esimd_gemm_int4_pgrp", torch::kXPU, &esimd_gemm_int4_pgrp);
+
+  // FP8 block-scaled GEMM: DeepSeek 128x128 weight block scale + fp16 activation.
+  // input [M, K] fp16, weight [N, K] fp8_e4m3, weight_scale [ceil(N/128), ceil(K/128)]
+  // fp32, output [M, N] fp16 pre-allocated.
+  m.def("esimd_gemm_fp8_blockscale(Tensor input, Tensor weight, Tensor weight_scale, "
+        "Tensor output, int block_n, int block_k) -> Tensor");
+  m.impl("esimd_gemm_fp8_blockscale", torch::kXPU, &esimd_gemm_fp8_blockscale);
+
+  m.def("esimd_gemv_fp8_blockscale_fused2(Tensor input, "
+        "Tensor w0, Tensor s0, Tensor(a!) o0, Tensor w1, Tensor s1, "
+        "Tensor(b!) o1, int block_n, int block_k) -> Tensor(a!)");
+  m.impl("esimd_gemv_fp8_blockscale_fused2", torch::kXPU,
+         &esimd_gemv_fp8_blockscale_fused2);
+
+  m.def("esimd_gemv_fp8_blockscale_fp16_fused2(Tensor input, "
+        "Tensor w0, Tensor s0, Tensor(a!) o0, Tensor w1, Tensor(b!) o1, "
+        "int block_n, int block_k) -> Tensor(a!)");
+  m.impl("esimd_gemv_fp8_blockscale_fp16_fused2", torch::kXPU,
+         &esimd_gemv_fp8_blockscale_fp16_fused2);
+
+  m.def("esimd_norm_gemv_fp8_blockscale(Tensor x, Tensor z, Tensor norm_weight, "
+        "Tensor gemv_weight, Tensor gemv_scale, Tensor(a!) output, int HV, "
+        "int V, float eps) -> Tensor(a!)");
+  m.impl("esimd_norm_gemv_fp8_blockscale", torch::kXPU,
+         &esimd_norm_gemv_fp8_blockscale);
+}
+
+PyMODINIT_FUNC PyInit_custom_esimd_kernels_gemm() {
+    static struct PyModuleDef module = {
+        PyModuleDef_HEAD_INIT, "custom_esimd_kernels_gemm", nullptr, 0, nullptr
+    };
+    return PyModule_Create(&module);
+}

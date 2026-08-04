@@ -1,0 +1,1260 @@
+# pylint: disable=too-many-lines
+import dataclasses
+import json
+import re
+from pathlib import Path
+from typing import Any, cast
+from unittest.mock import patch
+
+import pandas as pd
+import pytest
+
+import triton_utils
+
+# TODO:  # pylint: disable=fixme
+# test list failure reasons skips should not be taken into the account
+# tst pretty prints
+# test sort by
+# test_test_filter with the partial test name matches
+
+
+def extract_json_substrings(s: str) -> list[dict[str, Any] | list[Any]]:
+    dec = json.JSONDecoder()
+    results: list[dict[str, Any] | list[Any]] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c in '{[':
+            try:
+                val, end = dec.raw_decode(s, i)
+            except json.JSONDecodeError:
+                i += 1
+                continue
+            results.append(val)
+            i = end
+        else:
+            i += 1
+    return results
+
+
+def extract_pass_rate_dicts(s: str) -> list[dict[str, Any]]:
+    out_jsons = extract_json_substrings(s)
+    assert len(out_jsons) > 0
+    return [cast(dict[str, Any], out_jsons) for out_jsons in out_jsons]
+
+
+def extract_pass_rate_dict(s: str) -> dict[str, Any]:
+    pass_rate_dicts = extract_pass_rate_dicts(s)
+    assert len(pass_rate_dicts) == 1
+    return pass_rate_dicts[0]
+
+
+TESTS_WITH_MULTIPLE_TESTSUITES = {
+    'language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" time="0.114" timestamp="2024-04-05T11:03:23.033702" hostname="hostname">
+        <testcase classname="test.unit.language.test_core" name="test_reduce_layouts[sum-int32-reduce2d-1-src_layout8-32-128]" time="0.114" />
+    </testsuite>
+</testsuites>
+''',
+    'interpreter.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" time="0.114" timestamp="2024-04-05T11:03:23.033702" hostname="hostname">
+        <testcase classname="test.unit.language.test_core" name="test_reduce_layouts[sum-int32-reduce2d-1-src_layout8-32-128]" time="0.114" />
+    </testsuite>
+</testsuites>
+'''
+}
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    ('tests_with_multiple_testsuites', 'ignore_testsuite_filter', 'passed', 'success'),
+    [
+        (False, [], 0, False),
+        (True, [], 2, True),
+        (False, ['interpreter'], 1, True),
+    ]
+)
+def test_tests_with_multiple_test_suites(  # pylint: disable=R0913, R0917
+    tmp_path,
+    tests_with_multiple_testsuites,
+    ignore_testsuite_filter,
+    passed,
+    success,
+):
+    rep1 = tmp_path / 'language.xml'
+    rep1.write_text(TESTS_WITH_MULTIPLE_TESTSUITES['language.xml'], encoding='utf-8')
+    rep2 = tmp_path / 'interpreter.xml'
+    rep2.write_text(TESTS_WITH_MULTIPLE_TESTSUITES['interpreter.xml'], encoding='utf-8')
+
+    config = triton_utils.Config(
+        action='pass_rate',
+        reports=str(tmp_path),
+        tests_with_multiple_testsuites=tests_with_multiple_testsuites,
+        ignore_testsuite_filter=ignore_testsuite_filter,
+    )
+
+    try:
+        out, _ = triton_utils.PassRateActionRunner(config)()
+        assert success
+        pass_rate_dict = extract_pass_rate_dict(out)
+        assert pass_rate_dict['passed'] == passed
+    except ValueError:
+        assert not success
+
+
+TESTS_WITH_DIFFERENT_STATUSES = {
+    'language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="1" failures="1" skipped="2" tests="5" time="86.361" timestamp="2024-04-05T11:03:23.033702" hostname="hostname">
+        <testcase classname="python.test.unit.language.test_core" name="test_reduce_layouts[sum-int32-reduce2d-1-src_layout8-32-128]" time="0.114" />
+        <testcase classname="python.test.unit.language.test_tensor_descriptor" name="test_tensor_descriptor_reduce[1-1024-device-2-uint16-or]" time="0.001">
+            <skipped type="pytest.xfail" message="Multi-CTA not supported" />
+        </testcase>
+        <testcase classname="python.test.unit.language.test_tensor_descriptor" name="test_host_\tensor_descriptor_matmul[128-128-16-4-2]" time="0.000">
+            <skipped type="pytest.skip" message="Skipped by pytest-skip">
+                /runner/.../test_tensor_descriptor.py:1708: Skipped by pytest-skip
+            </skipped>
+        </testcase>
+        <testcase classname="python.test.unit.language.test_core" name="test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]" time="0.001">
+            <error message="failed on setup with &quot;worker 'gw14' crashed while running 'test/unit/language/test_core.py::test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]'&quot;">
+                worker 'gw14' crashed while running 'test/unit/language/test_core.py::test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]'
+            </error>
+        </testcase>
+        <testcase classname="python.test.unit.language.test_matmul" name="test_blocked_scale_mxfp[False-4-128-128-256-1024-512-512]" time="86.245">
+            <failure message="AssertionError: Tensor-likes are not close! ...">
+                M = 1024, N = 512, K = 512, BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 256
+                language/test_matmul.py:859: AssertionError
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>
+''', 'scaled_dot.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites name="pytest tests">
+    <testsuite name="pytest" errors="0" failures="0" skipped="2" tests="3" time="12.498" timestamp="2025-10-22T16:53:55.914818+00:00" hostname="hostname">
+        <testcase classname="python.test.unit.language.test_matmul" name="test_mxfp8_mxfp4_matmul[0-False-False-float4-float4-False-False-False-3-128-64-128-1024-512-512]" time="0.000">
+            <skipped type="pytest.skip" message="Skipped by pytest-skip">
+                /runner/_work/.../test_matmul.py:1204: Skipped by pytest-skip
+            </skipped>
+        </testcase>
+        <testcase classname="python.test.unit.language.test_core" name="test_scaled_dot[32-32-64-False-True-False-e2m1-fp16-4-16-1]" time="12.947" />
+        <testcase classname="python.test.unit.language.test_matmul" name="test_preshuffle_scale_mxfp_cdna4[True-32-mxfp4-mxfp4-False-32-32-64-1024-1024-1024]" time="0.001">
+            <skipped type="pytest.xfail" message="Minimal tile size is .." />
+        </testcase>
+    </testsuite>
+</testsuites>
+'''
+}
+
+
+def test_error_on_failures_flag(tmp_path):
+    rep1 = tmp_path / 'language.xml'
+    rep1.write_text(TESTS_WITH_DIFFERENT_STATUSES['language.xml'], encoding='utf-8')
+
+    config = dataclasses.replace(
+        triton_utils.Config(),
+        action='pass_rate',
+        reports=str(tmp_path),
+        error_on_failures=True,
+    )
+
+    try:
+        triton_utils.run(config)
+        assert False
+    except SystemExit as e:
+        assert e.code == 1
+
+
+def test_export_to_csv(tmp_path):
+    rep1 = tmp_path / 'language.xml'
+    rep1.write_text(TESTS_WITH_DIFFERENT_STATUSES['language.xml'], encoding='utf-8')
+
+    config = dataclasses.replace(
+        triton_utils.Config(),
+        action='export_to',
+        reports=str(tmp_path),
+    )
+
+    try:
+        triton_utils.run(config)
+    except SystemExit as e:
+        assert e.code == 0
+
+
+@pytest.mark.parametrize(
+    ('has_explicit_level', 'expected_total'),
+    [
+        (False, 8),  # Default: both language (5) and scaled_dot (3)
+        (True, 8),   # Explicit level='all': same result
+    ]
+)
+def test_pass_rate_level_all(tmp_path, has_explicit_level, expected_total):
+    """Test that level='all' creates a single JSON file (default and explicit)."""
+    language_xml = tmp_path / 'language.xml'
+    language_xml.write_text(TESTS_WITH_DIFFERENT_STATUSES['language.xml'], encoding='utf-8')
+
+    scaled_dot_xml = tmp_path / 'scaled_dot.xml'
+    scaled_dot_xml.write_text(TESTS_WITH_DIFFERENT_STATUSES['scaled_dot.xml'], encoding='utf-8')
+
+    json_file = tmp_path / 'report.json'
+
+    # Build config with or without explicit level
+    config_kwargs = {
+        'action': 'pass_rate',
+        'reports': str(tmp_path),
+        'save_to_json': str(json_file),
+    }
+    if has_explicit_level:
+        config_kwargs['pass_rate_level'] = 'all'
+
+    config = triton_utils.Config(**config_kwargs)
+    triton_utils.PassRateActionRunner(config=config)()
+
+    # Verify single JSON file created
+    assert json_file.exists()
+    with open(json_file, encoding='utf-8') as f:
+        data = json.load(f)
+
+    # Should have aggregate stats for all testsuites
+    assert data['testsuite'] == 'all'
+    assert data['total'] == expected_total
+    assert 'passed' in data
+    assert 'failed' in data
+
+
+def test_pass_rate_level_testsuite_jsonl(tmp_path):
+    """Test that level='testsuite' creates a JSONL file with one JSON per testsuite."""
+    language_xml = tmp_path / 'language.xml'
+    language_xml.write_text(TESTS_WITH_DIFFERENT_STATUSES['language.xml'], encoding='utf-8')
+
+    scaled_dot_xml = tmp_path / 'scaled_dot.xml'
+    scaled_dot_xml.write_text(TESTS_WITH_DIFFERENT_STATUSES['scaled_dot.xml'], encoding='utf-8')
+
+    jsonl_file = tmp_path / 'report.jsonl'
+    config = triton_utils.Config(
+        action='pass_rate',
+        reports=str(tmp_path),
+        save_to_json=str(jsonl_file),
+        pass_rate_level='testsuite',
+    )
+    triton_utils.PassRateActionRunner(config=config)()
+
+    # Verify JSONL file created
+    assert jsonl_file.exists()
+
+    # Read and parse JSONL (one JSON per line)
+    with open(jsonl_file, encoding='utf-8') as f:
+        lines = f.readlines()
+
+    # Should have 2 lines (one per testsuite)
+    assert len(lines) == 2
+
+    # Parse each line as JSON
+    testsuites_data = [json.loads(line) for line in lines]
+
+    # Verify structure
+    testsuite_names = {data['testsuite'] for data in testsuites_data}
+    assert testsuite_names == {'language', 'scaled_dot'}
+
+    # Verify each has stats
+    for data in testsuites_data:
+        assert 'testsuite' in data
+        assert 'passed' in data
+        assert 'failed' in data
+        assert 'total' in data
+        assert 'ts' in data  # Common metadata present
+        assert 'git_ref' in data
+
+    # Verify language testsuite stats
+    language_data = next(d for d in testsuites_data if d['testsuite'] == 'language')
+    assert language_data['total'] == 5
+
+    # Verify scaled_dot testsuite stats
+    scaled_dot_data = next(d for d in testsuites_data if d['testsuite'] == 'scaled_dot')
+    assert scaled_dot_data['total'] == 3
+
+
+def test_pass_rate_invalid_level(tmp_path):
+    """Test that invalid level value raises an error."""
+    language_xml = tmp_path / 'language.xml'
+    language_xml.write_text(TESTS_WITH_DIFFERENT_STATUSES['language.xml'], encoding='utf-8')
+
+    json_file = tmp_path / 'report.json'
+    config = triton_utils.Config(
+        action='pass_rate',
+        reports=str(tmp_path),
+        save_to_json=str(json_file),
+        pass_rate_level='invalid',  # This should be caught by argparse
+    )
+
+    # Note: argparse validation happens at CLI level, so this test is mainly
+    # for completeness if someone bypasses CLI and calls directly
+    with pytest.raises(ValueError, match='Unsupported level'):
+        triton_utils.PassRateActionRunner(config=config)()
+
+
+def test_multiple_test_suites(tmp_path):
+    rep_language = tmp_path / 'language.xml'
+    rep_language.write_text(TESTS_WITH_DIFFERENT_STATUSES['language.xml'], encoding='utf-8')
+
+    rep_scaled_dot = tmp_path / 'scaled_dot.xml'
+    rep_scaled_dot.write_text(TESTS_WITH_DIFFERENT_STATUSES['scaled_dot.xml'], encoding='utf-8')
+
+    config = triton_utils.Config(
+        action='tests_stats',
+        reports=str(tmp_path),
+        tests_with_multiple_testsuites=True,
+        _report_grouping_level=triton_utils.TestGroupingLevel.TESTSUITE.value,
+    )
+
+    out = triton_utils.TestsStatsActionRunner(config=config)()
+
+    pass_rate_dicts = extract_pass_rate_dicts(out)
+
+    assert len(pass_rate_dicts) == 2
+    # Results order is not guaranteed, so check by key
+    results_by_name = {list(d.keys())[0]: d for d in pass_rate_dicts}
+    assert results_by_name['language']['language']['total'] == 5
+    assert results_by_name['scaled_dot']['scaled_dot']['total'] == 3
+
+
+@pytest.mark.parametrize(
+    ('status_filter', 'passed', 'skipped', 'xfailed', 'failed'),
+    [
+        ([], 1, 1, 1, 2),
+        (['passed'], 1, 0, 0, 0),
+        (['skipped'], 0, 1, 0, 0),
+        (['xfailed'], 0, 0, 1, 0),
+        (['failed'], 0, 0, 0, 2),
+        (['passed', 'failed'], 1, 0, 0, 2),
+    ]
+)
+def test_status_filter(  # pylint: disable=R0913, R0917
+        tmp_path,
+        status_filter,
+        passed,
+        skipped,
+        xfailed,
+        failed,
+):
+    test_rep_path = tmp_path / 'language.xml'
+    test_rep_path.write_text(TESTS_WITH_DIFFERENT_STATUSES['language.xml'], encoding='utf-8')
+
+    if status_filter:
+        config = triton_utils.Config(
+            action='pass_rate',
+            reports=str(tmp_path),
+            status_filter=status_filter,
+        )
+    else:
+        config = triton_utils.Config(
+            action='pass_rate',
+            reports=str(tmp_path),
+        )
+
+    out, _ = triton_utils.PassRateActionRunner(config)()
+    pass_rate_dict = extract_pass_rate_dict(out)
+    assert pass_rate_dict['passed'] == passed
+    assert pass_rate_dict['skipped'] == skipped
+    assert pass_rate_dict['xfailed'] == xfailed
+    assert pass_rate_dict['failed'] == failed
+
+
+@pytest.mark.parametrize(
+    ('layout', 'include_subdir_patterns', 'passed', 'skipped', 'xfailed', 'failed', 'empty_subdirs'),
+    [
+        (
+            {'language.xml': 'subdir', 'scaled_dot.xml': 'subdir2'},
+            [re.compile(r'^.*$')],
+            2, 2, 2, 2, False
+        ),
+        (
+            {'language.xml': 'subdir', 'scaled_dot.xml': 'subdir2'},
+            [re.compile(r'^.*$')],
+            2, 2, 2, 2, True
+        ),
+        (
+            {'language.xml': 'subdir', 'scaled_dot.xml': 'subdir'},
+            [re.compile(r'^.*$')],
+            2, 2, 2, 2, False
+        ),
+        (
+            {'language.xml': '', 'scaled_dot.xml': 'subdir'},
+            [re.compile(r'^.*$')],
+            2, 2, 2, 2, False
+        ),
+        (
+            {'language.xml': '', 'scaled_dot.xml': ''},
+            [],
+            2, 2, 2, 2, False
+        ),
+    ]
+)
+def test_report_directory_layout(  # pylint: disable=R0913, R0914, R0917
+        capsys,
+        tmp_path,
+        layout,
+        include_subdir_patterns,
+        passed,
+        skipped,
+        xfailed,
+        failed,
+        empty_subdirs
+):
+    for report_name, subdir in layout.items():
+        report_path = tmp_path
+        if subdir:
+            report_path = report_path / subdir
+            report_path.mkdir(parents=True, exist_ok=True)
+        report_file = report_path / report_name
+        report_file.write_text(TESTS_WITH_DIFFERENT_STATUSES[report_name], encoding='utf-8')
+
+    if empty_subdirs:
+        empty_subdir_path = tmp_path / 'empty_subdir'
+        empty_subdir_path.mkdir(parents=True, exist_ok=True)
+
+    if include_subdir_patterns:
+        config = triton_utils.Config(
+            action='pass_rate',
+            reports=str(tmp_path),
+            include_subdir_patterns=include_subdir_patterns,
+        )
+    else:
+        config = triton_utils.Config(
+            action='pass_rate',
+            reports=str(tmp_path),
+        )
+
+    out, _ = triton_utils.PassRateActionRunner(config)()
+    _, std_err = capsys.readouterr()
+    pass_rate_dict = extract_pass_rate_dict(out)
+    assert pass_rate_dict['passed'] == passed
+    assert pass_rate_dict['skipped'] == skipped
+    assert pass_rate_dict['xfailed'] == xfailed
+    assert pass_rate_dict['failed'] == failed
+
+    if empty_subdirs:
+        assert 'WARNING: No junit xml files' in std_err
+
+
+def test_tutorial_benchmark_dirs_do_not_warn(capsys, tmp_path):
+    (tmp_path / 'tutorials.xml').write_text(
+        TESTS_WITH_DIFFERENT_STATUSES['language.xml'], encoding='utf-8')
+    for name in ('01-vector-add', '02-fused-softmax', '03a-matrix-multiplication-tensor-descriptor'):
+        d = tmp_path / name
+        d.mkdir()
+        (d / f'{name}-performance.csv').write_text('col1,col2\n1,2\n', encoding='utf-8')
+    broken = tmp_path / 'broken-report'
+    broken.mkdir()
+    (broken / 'warnings.json').write_text('{}', encoding='utf-8')
+    config = triton_utils.Config(action='pass_rate', reports=str(tmp_path))
+    triton_utils.PassRateActionRunner(config)()
+    _, std_err = capsys.readouterr()
+    assert '01-vector-add' not in std_err
+    assert '02-fused-softmax' not in std_err
+    assert '03a-matrix-multiplication-tensor-descriptor' not in std_err
+    assert 'WARNING: No junit xml files' in std_err
+    assert 'broken-report' in std_err
+
+
+def test_tutorial_dir_without_csv_still_warns(capsys, tmp_path):
+    (tmp_path / 'tutorials.xml').write_text(
+        TESTS_WITH_DIFFERENT_STATUSES['language.xml'], encoding='utf-8')
+    d = tmp_path / '03a-matrix-multiplication-tensor-descriptor'
+    d.mkdir()
+    config = triton_utils.Config(action='pass_rate', reports=str(tmp_path))
+    triton_utils.PassRateActionRunner(config)()
+    _, std_err = capsys.readouterr()
+    assert 'WARNING: No junit xml files' in std_err
+    assert '03a-matrix-multiplication-tensor-descriptor' in std_err
+
+
+def test_csv_dirs_without_tutorials_xml_still_warn(capsys, tmp_path):
+    (tmp_path / 'language.xml').write_text(
+        TESTS_WITH_DIFFERENT_STATUSES['language.xml'], encoding='utf-8')
+    d = tmp_path / '01-vector-add'
+    d.mkdir()
+    (d / '01-vector-add-performance.csv').write_text('col1,col2\n1,2\n', encoding='utf-8')
+    config = triton_utils.Config(action='pass_rate', reports=str(tmp_path))
+    triton_utils.PassRateActionRunner(config)()
+    _, std_err = capsys.readouterr()
+    assert 'WARNING: No junit xml files' in std_err
+    assert '01-vector-add' in std_err
+
+
+@pytest.mark.parametrize(
+    ('layout', 'exclude_subdir_patterns', 'include_subdir_patterns', 'passed', 'skipped', 'xfailed', 'failed'),
+    [
+        (
+            {'language.xml': 'subdir', 'scaled_dot.xml': 'subdir2'},
+            [re.compile(r'subdir2')],
+            [re.compile(r'^.*$')],
+            1, 1, 1, 2,
+        ),
+    ]
+)
+def test_report_directory_patterns(  # pylint: disable=R0913, R0917
+        tmp_path,
+        layout,
+        exclude_subdir_patterns,
+        include_subdir_patterns,
+        passed,
+        skipped,
+        xfailed,
+        failed,
+):
+    for report_name, subdir in layout.items():
+        report_path = tmp_path
+        if subdir:
+            report_path = report_path / subdir
+            report_path.mkdir(parents=True, exist_ok=True)
+        report_file = report_path / report_name
+        report_file.write_text(TESTS_WITH_DIFFERENT_STATUSES[report_name], encoding='utf-8')
+
+    config = triton_utils.Config(
+        action='pass_rate',
+        reports=str(tmp_path),
+        exclude_subdir_patterns=exclude_subdir_patterns,
+        include_subdir_patterns=include_subdir_patterns,
+    )
+
+    out, _ = triton_utils.PassRateActionRunner(config)()
+    pass_rate_dict = extract_pass_rate_dict(out)
+    assert pass_rate_dict['passed'] == passed
+    assert pass_rate_dict['skipped'] == skipped
+    assert pass_rate_dict['xfailed'] == xfailed
+    assert pass_rate_dict['failed'] == failed
+
+
+TESTS_WITH_MULTIPLE_RESULTS = {
+    'test-report1/language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="1" failures="1" skipped="2" tests="5" time="86.361" timestamp="2024-04-05T11:03:23.033702" hostname="hostname">
+        <testcase classname="python.test.unit.language.test_core" name="test_reduce_layouts[sum-int32-reduce2d-1-src_layout8-32-128]" time="0.114" />
+        <testcase classname="python.test.unit.language.test_tensor_descriptor" name="test_tensor_descriptor_reduce[1-1024-device-2-uint16-or]" time="0.001">
+            <skipped type="pytest.xfail" message="Multi-CTA not supported" />
+        </testcase>
+        <testcase classname="python.test.unit.language.test_tensor_descriptor" name="test_host_tensor_descriptor_matmul[128-128-16-4-2]" time="0.000">
+            <skipped type="pytest.skip" message="Skipped by pytest-skip">
+                /runner/.../test_tensor_descriptor.py:1708: Skipped by pytest-skip
+            </skipped>
+        </testcase>
+        <testcase classname="python.test.unit.language.test_core" name="test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]" time="0.001">
+            <error message="failed on setup with &quot;worker 'gw14' crashed while running 'test/unit/language/test_core.py::test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]'&quot;">
+                worker 'gw14' crashed while running 'test/unit/language/test_core.py::test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]'
+            </error>
+        </testcase>
+        <testcase classname="python.test.unit.language.test_matmul" name="test_blocked_scale_mxfp[False-4-128-128-256-1024-512-512]" time="86.245">
+            <failure message="AssertionError: Tensor-likes are not close! ...">
+                M = 1024, N = 512, K = 512, BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 256
+                language/test_matmul.py:859: AssertionError
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>
+''', 'test-report2/language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="1" failures="1" skipped="3" tests="5" time="86.361" timestamp="2024-04-05T11:03:23.033702" hostname="hostname">
+        <testcase classname="python.test.unit.language.test_core" name="test_reduce_layouts[sum-int32-reduce2d-1-src_layout8-32-128]" time="0.114">
+            <skipped type="pytest.skip" message="Skipped by pytest-skip">
+                /runner/.../test_tensor_descriptor.py:1708: Skipped by pytest-skip
+            </skipped>
+        </testcase>
+        <testcase classname="python.test.unit.language.test_tensor_descriptor" name="test_tensor_descriptor_reduce[1-1024-device-2-uint16-or]" time="0.001">
+            <skipped type="pytest.xfail" message="Multi-CTA not supported" />
+        </testcase>
+        <testcase classname="python.test.unit.language.test_tensor_descriptor" name="test_host_tensor_descriptor_matmul[128-128-16-4-2]" time="0.000">
+            <skipped type="pytest.skip" message="Skipped by pytest-skip">
+                /runner/.../test_tensor_descriptor.py:1708: Skipped by pytest-skip
+            </skipped>
+        </testcase>
+        <testcase classname="python.test.unit.language.test_core" name="test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]" time="0.001">
+            <error message="failed on setup with &quot;worker 'gw14' crashed while running 'test/unit/language/test_core.py::test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]'&quot;">
+                worker 'gw14' crashed while running 'test/unit/language/test_core.py::test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]'
+            </error>
+        </testcase>
+        <testcase classname="python.test.unit.language.test_matmul" name="test_blocked_scale_mxfp[False-4-128-128-256-1024-512-512]" time="86.245">
+            <failure message="AssertionError: Tensor-likes are not close! ...">
+                M = 1024, N = 512, K = 512, BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 256
+                language/test_matmul.py:859: AssertionError
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>
+'''
+}
+
+
+@pytest.mark.parametrize(
+    ('merge_test_results', 'exclude_subdir_patterns', 'include_subdir_patterns', 'passed', 'skipped', 'xfailed', 'failed', 'warning'),
+    [
+        (
+            False,
+            [re.compile(r'subdir2')],
+            [re.compile(r'^.*$')],
+            1, 3, 2, 4, True,
+        ),
+        (
+            True,
+            [re.compile(r'subdir2')],
+            [re.compile(r'^.*$')],
+            1, 1, 1, 2, False,
+        ),
+    ]
+)
+def test_tests_with_multiple_results(  # pylint: disable=R0913, R0914, R0917
+    capsys,
+    tmp_path,
+    merge_test_results,
+    exclude_subdir_patterns,
+    include_subdir_patterns,
+    passed: int,
+    skipped: int,
+    xfailed: int,
+    failed: int,
+    warning: bool,
+):
+    for report_name, doc_str in TESTS_WITH_MULTIPLE_RESULTS.items():
+        report_name_parts = report_name.split('/')
+        subdir_path = tmp_path / report_name_parts[0]
+        subdir_path.mkdir(parents=True, exist_ok=True)
+        report_file = subdir_path / report_name_parts[1]
+        report_file.write_text(doc_str, encoding='utf-8')
+
+    config = triton_utils.Config(
+        action='pass_rate',
+        merge_test_results=merge_test_results,
+        exclude_subdir_patterns=exclude_subdir_patterns,
+        include_subdir_patterns=include_subdir_patterns,
+        reports=str(tmp_path),
+    )
+
+    out, _ = triton_utils.PassRateActionRunner(config)()
+    std_out, _ = capsys.readouterr()
+    pass_rate_dict = extract_pass_rate_dict(out)
+    assert pass_rate_dict['passed'] == passed
+    assert pass_rate_dict['skipped'] == skipped
+    assert pass_rate_dict['xfailed'] == xfailed
+    assert pass_rate_dict['failed'] == failed
+
+    if warning:
+        assert '[WARNING] Multiple test results for the same test case have been found.' in std_out
+
+
+@pytest.mark.parametrize(
+    ('args', 'config'),
+    [
+        (
+            'pass_rate --reports /path/to/reports',
+            triton_utils.Config(
+                action='pass_rate',
+                reports='/path/to/reports',
+            )
+        ),
+        (
+            'pass_rate --reports /path/to/reports --status skipped',
+            triton_utils.Config(
+                action='pass_rate',
+                reports='/path/to/reports',
+                status_filter=['skipped'],
+            )
+        ),
+        (
+            'pass_rate --reports /path/to/reports --level testsuite',
+            triton_utils.Config(
+                action='pass_rate',
+                reports='/path/to/reports',
+                pass_rate_level='testsuite',
+            )
+        ),
+        (
+            'tests_stats --r /path/to/reports --status skipped',
+            triton_utils.Config(
+                action='tests_stats',
+                reports='/path/to/reports',
+                status_filter=['skipped'],
+            )
+        ),
+        (
+            'stats --r /path/to/reports --status skipped',
+            triton_utils.Config(
+                action='tests_stats',
+                reports='/path/to/reports',
+                status_filter=['skipped'],
+            )
+        ),
+        (
+            'compare --r /path/to/reports --r2 /path/to/reports2',
+            triton_utils.Config(
+                action='compare_reports',
+                reports='/path/to/reports',
+                reports_2='/path/to/reports2'
+            )
+        ),
+    ]
+)
+def test_args(args: str, config: triton_utils.Config):
+    triton_utils.Config.from_args(args)
+    assert triton_utils.Config.from_args(args) == config
+
+
+@pytest.mark.parametrize(
+    ('args', 'results_row','results', 'grouping_level'),
+    [
+        (
+            {'exclude_subdir_patterns': [re.compile(r'subdir2')], 'include_subdir_patterns': [re.compile(r'^.*$')]},
+            'language',
+            {'passed': [1, 0, -1], 'skipped': [1, 2, 1], 'xfailed': [1, 1, 0], 'failed': [2, 2, 0]},
+            'testsuite'
+        ),
+        (
+            {'exclude_subdir_patterns': [re.compile(r'subdir2')], 'include_subdir_patterns': [re.compile(r'^.*$')]},
+            'python/test/unit/language/test_core.py::test_reduce_layouts',
+            {'passed': [1, 0, -1]},
+            'test'
+        ),
+    ]
+)
+def test_compare_reports(  # pylint: disable=R0913, R0914, R0917
+    tmp_path,
+    args: dict[str, Any],
+    results_row,
+    results,
+    grouping_level,
+):
+    for report_name, doc_str in TESTS_WITH_MULTIPLE_RESULTS.items():
+        report_name_parts = report_name.split('/')
+        subdir_path = tmp_path / report_name_parts[0]
+        subdir_path.mkdir(parents=True, exist_ok=True)
+        report_file = subdir_path / report_name_parts[1]
+        report_file.write_text(doc_str, encoding='utf-8')
+
+    config = dataclasses.replace(
+        triton_utils.Config(
+            action='compare_reports',
+            reports=str(tmp_path / 'test-report1'),
+            reports_2=str(tmp_path / 'test-report2'),
+            _report_grouping_level=triton_utils.TestGroupingLevel(grouping_level).value,
+            **args
+        ),
+    )
+
+    comparision = triton_utils.run(config)
+    for key, result in results.items():
+        assert comparision.loc[results_row, (key, 'r1')] == result[0]
+        assert comparision.loc[results_row, (key, 'r2')] == result[1]
+        assert comparision.loc[results_row, (key, 'Δ')] == result[2]
+
+
+TESTS_WITH_FLAKY_RESULTS = {
+    'test-report1/language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="0" failures="1" skipped="0" tests="2" time="86.246" timestamp="2024-04-05T11:03:23.033702" hostname="hostname">
+        <testcase classname="python.test.unit.language.test_core" name="test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]" time="0.001" />
+        <testcase classname="python.test.unit.language.test_matmul" name="test_blocked_scale_mxfp[False-4-128-128-256-1024-512-512]" time="86.245">
+            <failure message="AssertionError: Tensor-likes are not close! ...">
+                M = 1024, N = 512, K = 512, BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 256
+                language/test_matmul.py:859: AssertionError
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>
+''', 'test-report2/language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="1" failures="0" skipped="0" tests="2" time="86.246" timestamp="2024-04-05T11:03:23.033702" hostname="hostname">
+        <testcase classname="python.test.unit.language.test_core" name="test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]" time="0.001">
+            <error message="failed on setup with &quot;worker 'gw14' crashed while running 'test/unit/language/test_core.py::test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]'&quot;">
+                worker 'gw14' crashed while running 'test/unit/language/test_core.py::test_dot[1-64-128-128-2-False-False-none-tf32-float32-float32]'
+            </error>
+        </testcase>
+        <testcase classname="python.test.unit.language.test_matmul" name="test_blocked_scale_mxfp[False-4-128-128-256-1024-512-512]" time="86.245" />
+    </testsuite>
+</testsuites>
+'''
+}
+
+@pytest.mark.parametrize(
+    ('reports', 'is_flaky', 'passed', 'skipped', 'xfailed', 'failed'),
+    [
+        (TESTS_WITH_FLAKY_RESULTS, True, 2, 0, 0, 0,),
+        ({next(iter(TESTS_WITH_FLAKY_RESULTS.items()))[0]: next(iter(TESTS_WITH_FLAKY_RESULTS.items()))[1]}, False, 1, 0, 0, 1,),
+    ]
+)
+def test_flaky_tests_detection(  # pylint: disable=R0913, R0914, R0917
+    tmp_path, capsys, reports, is_flaky, passed, skipped, xfailed, failed,
+):
+    for report_name, doc_str in reports.items():
+        report_name_parts = report_name.split('/')
+        subdir_path = tmp_path / report_name_parts[0]
+        subdir_path.mkdir(parents=True, exist_ok=True)
+        report_file = subdir_path / report_name_parts[1]
+        report_file.write_text(doc_str, encoding='utf-8')
+
+
+    config = triton_utils.Config(
+        action='pass_rate',
+        reports=str(tmp_path),
+        merge_test_results=True,
+    )
+
+    out, _ = triton_utils.PassRateActionRunner(config)()
+
+    warnings_out, _ = capsys.readouterr()
+
+    pass_rate_dict = extract_pass_rate_dict(out)
+    assert pass_rate_dict['passed'] == passed
+    assert pass_rate_dict['skipped'] == skipped
+    assert pass_rate_dict['xfailed'] == xfailed
+    assert pass_rate_dict['failed'] == failed
+
+    assert (is_flaky and '[WARNING] Flaky test detected:' in warnings_out) or not is_flaky
+
+
+TESTS_WITH_NO_CLASSNAME_AND_NAME = {
+    'test-report1/regression.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites name="pytest tests">
+    <testsuite name="pytest" errors="0" failures="0" skipped="325" tests="334" time="74.027" timestamp="2025-12-03T17:18:38.148662+00:00" hostname="hostname">
+        <testcase classname="python.test.regression.test_cast_matmul" name="test_cast_matmul[768-768-1024-32-16-128-bfloat16-bfloat16-float16]" time="0.000">
+            <skipped type="pytest.skip" message="Skipped by pytest-skip">python/test/regression/test_cast_matmul.py:80: Skipped by pytest-skip</skipped>
+        </testcase>
+        <testcase classname="python.test.regression.test_functional_regressions" name="test_inductor_cummax_bool" time="1.788" />
+        <testcase time="0.000" />
+    </testsuite>
+</testsuites>
+'''
+}
+
+def test_test_with_no_classname_and_name(tmp_path, capsys):
+    for report_name, doc_str in TESTS_WITH_NO_CLASSNAME_AND_NAME.items():
+        report_name_parts = report_name.split('/')
+        subdir_path = tmp_path / report_name_parts[0]
+        subdir_path.mkdir(parents=True, exist_ok=True)
+        report_file = subdir_path / report_name_parts[1]
+        report_file.write_text(doc_str, encoding='utf-8')
+    config = triton_utils.Config(
+        action='pass_rate',
+        reports=str(tmp_path),
+        merge_test_results=True,
+    )
+    out, _ = triton_utils.PassRateActionRunner(config)()
+    _, warnings_out = capsys.readouterr()
+    pass_rate_dict = extract_pass_rate_dict(out)
+    assert pass_rate_dict['passed'] == 1
+    assert pass_rate_dict['skipped'] == 1
+    assert pass_rate_dict['xfailed'] == 0
+    assert pass_rate_dict['failed'] == 0
+    assert '[WARNING] Skipping test case with no classname and name' in warnings_out
+
+
+TESTS_WITH_LONG_NAMES = {
+    'language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="0.228" timestamp="2024-04-05T11:03:23.033702" hostname="hostname">
+        <testcase classname="python.test.unit.language.test_core" name="test_reduce_layouts_with_very_long_name_that_exceeds_normal_display_width[sum-int32-reduce2d-1-src_layout8-32-128-additional-params-more-params-even-more-params]" time="0.114" />
+        <testcase classname="python.test.unit.language.test_core" name="test_another_function_with_extremely_long_name_to_test_truncation_behavior[param1-param2-param3-param4-param5-param6-param7-param8-param9-param10]" time="0.114" />
+    </testsuite>
+</testsuites>
+'''
+}
+
+
+@pytest.mark.parametrize('long_names', [False, True])
+def test_long_names_option(tmp_path, capsys, long_names: bool):
+    """Test that --long-names option displays full test names in output."""
+    test_rep_path = tmp_path / 'language.xml'
+    test_rep_path.write_text(TESTS_WITH_LONG_NAMES['language.xml'], encoding='utf-8')
+
+    # Explicitly set pandas display options to ensure deterministic truncation
+    # regardless of pandas version or environment.
+    with pd.option_context('display.width', 200, 'display.max_colwidth', 50):
+        config = triton_utils.Config(
+            action='tests_stats',
+            reports=str(tmp_path),
+            pretty_print=True,
+            long_names=long_names,
+        )
+        triton_utils.run(config)
+    stdout, _ = capsys.readouterr()
+
+    # The actual test name in output is the pytest-friendly name (without variant in brackets)
+    full_name = 'python/test/unit/language/test_core.py::test_reduce_layouts_with_very_long_name_that_exceeds_normal_display_width'
+    truncated_prefix = 'python/test/unit/language/test_core'
+
+    if not long_names:
+        # Without --long-names, the displayed name should be truncated:
+        # a prefix of the name should appear, but not the full name.
+        lines_with_prefix = [line for line in stdout.split('\n') if truncated_prefix in line]
+        assert len(lines_with_prefix) > 0, 'Expected truncated prefix not found in output'
+        # Verify that in all such lines the full name is not present
+        assert not any(full_name in line for line in lines_with_prefix), (
+            'Expected truncated output, but full name was found')
+    else:
+        # With --long-names, the full test name should be visible without truncation
+        assert full_name in stdout, f'Expected full test name "{full_name}" not found in output'
+
+
+@pytest.mark.parametrize('long_names', [False, True])
+def test_long_names_option_compare_reports(tmp_path, capsys, long_names: bool):
+    """Test that --long-names option works with compare_reports action."""
+    # Create two report directories
+    report1_dir = tmp_path / 'report1'
+    report2_dir = tmp_path / 'report2'
+    report1_dir.mkdir()
+    report2_dir.mkdir()
+
+    # Write test reports with long names to both directories
+    (report1_dir / 'language.xml').write_text(TESTS_WITH_LONG_NAMES['language.xml'], encoding='utf-8')
+    (report2_dir / 'language.xml').write_text(TESTS_WITH_LONG_NAMES['language.xml'], encoding='utf-8')
+
+    # Explicitly set pandas display options to ensure deterministic truncation
+    # regardless of pandas version or environment.
+    with pd.option_context('display.width', 200, 'display.max_colwidth', 50):
+        config = triton_utils.Config(
+            action='compare_reports',
+            reports=str(report1_dir),
+            reports_2=str(report2_dir),
+            long_names=long_names,
+        )
+        triton_utils.run(config)
+    stdout, _ = capsys.readouterr()
+
+    # The actual test name in compare output is the pytest-friendly name (without variant in brackets)
+    full_name = 'python/test/unit/language/test_core.py::test_reduce_layouts_with_very_long_name_that_exceeds_normal_display_width'
+    truncated_prefix = 'python/test/unit/language/test_core'
+
+    if not long_names:
+        # Without --long-names, the displayed name should be truncated:
+        # a prefix of the name should appear, but not the full name.
+        lines_with_prefix = [line for line in stdout.split('\n') if truncated_prefix in line]
+        assert len(lines_with_prefix) > 0, 'Expected truncated prefix not found in output'
+        # Verify that in all such lines the full name is not present
+        assert not any(full_name in line for line in lines_with_prefix), (
+            'Expected truncated output, but full name was found')
+    else:
+        # With --long-names, the full test name should be visible without truncation
+        assert full_name in stdout, f'Expected full test name "{full_name}" not found in output'
+
+
+@pytest.mark.parametrize(
+    ('artifact_pattern', 'expected_names'),
+    [
+        (None, ['test-reports-xe2-bmg', 'test-reports-a770-pvc', 'test-reports-mtl']),
+        ('test-reports-xe2-*', ['test-reports-xe2-bmg']),
+        ('test-reports-a770-*', ['test-reports-a770-pvc']),
+        ('*mtl*', ['test-reports-mtl']),
+        ('no-match-*', None),  # Should raise ValueError
+    ]
+)
+def test_artifact_pattern_filter(artifact_pattern, expected_names):
+    artifacts = [
+        triton_utils.GHArtifact(name='test-reports-xe2-bmg', size_in_bytes=100, expired=False,
+                                created_at='2024-01-01', workflow_run_id='123', repo='test/repo'),
+        triton_utils.GHArtifact(name='test-reports-a770-pvc', size_in_bytes=200, expired=False,
+                                created_at='2024-01-01', workflow_run_id='123', repo='test/repo'),
+        triton_utils.GHArtifact(name='test-reports-mtl', size_in_bytes=300, expired=False,
+                                created_at='2024-01-01', workflow_run_id='123', repo='test/repo'),
+        triton_utils.GHArtifact(name='build-wheels', size_in_bytes=400, expired=False,
+                                created_at='2024-01-01', workflow_run_id='123', repo='test/repo'),
+        triton_utils.GHArtifact(name='test-reports-lts', size_in_bytes=500, expired=False,
+                                created_at='2024-01-01', workflow_run_id='123', repo='test/repo'),
+    ]
+
+    processor = triton_utils.GHTestReportProcessor(
+        download_dir=Path('/tmp/test'),
+        repo='test/repo',
+        branch='main',
+        artifact_pattern=artifact_pattern,
+    )
+
+    with patch.object(processor, 'get_artifacts', return_value=artifacts):
+        if expected_names is None:
+            with pytest.raises(ValueError, match='No test report artifacts found'):
+                processor.get_test_report_artifacts()
+        else:
+            result = processor.get_test_report_artifacts()
+            assert [af.name for af in result] == expected_names
+
+
+# -- Compare mode enhancement tests --
+
+# r1 has tests A, B, C; r2 has tests B, C, D — so A is r1-only, D is r2-only, B/C are both
+TESTS_FOR_COMPARE_SCOPE = {
+    'report1/language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="3" time="3.0">
+        <testcase classname="python.test.unit.language.test_core" name="test_a" time="1.0" />
+        <testcase classname="python.test.unit.language.test_core" name="test_b" time="1.5" />
+        <testcase classname="python.test.unit.language.test_matmul" name="test_c" time="0.5" />
+    </testsuite>
+</testsuites>
+''',
+    'report2/language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="0" failures="1" skipped="0" tests="3" time="4.0">
+        <testcase classname="python.test.unit.language.test_core" name="test_b" time="2.0" />
+        <testcase classname="python.test.unit.language.test_matmul" name="test_c" time="1.0" />
+        <testcase classname="python.test.unit.language.test_matmul" name="test_d" time="1.0">
+            <failure message="assert False">assert False</failure>
+        </testcase>
+    </testsuite>
+</testsuites>
+''',
+}
+
+TESTS_FOR_COMPARE_CLASS = {
+    'report1/language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" time="1.0">
+        <testcase classname="python.test.unit.language.test_triton_kernels.TestGraphXPU" name="test_fused_op" time="1.0" />
+    </testsuite>
+</testsuites>
+''',
+    'report2/language.xml':
+    '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+    <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" time="2.0">
+        <testcase classname="python.test.unit.language.test_triton_kernels.TestGraphXPU" name="test_fused_op" time="2.0" />
+    </testsuite>
+</testsuites>
+''',
+}
+
+
+def _setup_compare_reports(tmp_path, test_data):
+    for report_name, doc_str in test_data.items():
+        parts = report_name.split('/')
+        subdir_path = tmp_path / parts[0]
+        subdir_path.mkdir(parents=True, exist_ok=True)
+        (subdir_path / parts[1]).write_text(doc_str, encoding='utf-8')
+    return str(tmp_path / 'report1'), str(tmp_path / 'report2')
+
+
+def test_compare_reports_includes_time(tmp_path):
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_SCOPE)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        _report_grouping_level='testsuite',
+    )
+    result = triton_utils.run(config)
+    assert ('time', 'r1') in result.columns
+    assert ('time', 'r2') in result.columns
+    assert ('time', 'Δ') in result.columns
+
+
+@pytest.mark.parametrize('sort_by', ['passed.r1', 'time.delta', 'failed.r2'])
+def test_compare_sort_by(tmp_path, sort_by):
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_SCOPE)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        sort_by=sort_by,
+        _report_grouping_level='testsuite',
+    )
+    result = triton_utils.run(config)
+    assert result.index[-1] == 'Σ'
+    assert len(result) > 1
+
+
+@pytest.mark.parametrize(
+    ('sort_by', 'expected_error'),
+    [
+        ('invalid', ValueError),
+        ('passed.invalid', ValueError),
+        ('invalid.r1', ValueError),
+        ('passed', ValueError),
+    ]
+)
+def test_compare_sort_by_invalid(tmp_path, sort_by, expected_error):
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_SCOPE)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        sort_by=sort_by,
+        _report_grouping_level='testsuite',
+    )
+    with pytest.raises(expected_error):
+        triton_utils.run(config)
+
+
+# r1: test_a, test_b, test_c; r2: test_b, test_c, test_d
+# At test level: r1-only=1 (test_a), r2-only=1 (test_d), both=2 (test_b, test_c)
+@pytest.mark.parametrize(
+    ('compare_scope', 'expected_test_rows'),
+    [
+        ('r1-only', 1),
+        ('r2-only', 1),
+        ('both', 2),
+        ('any', 4),
+    ]
+)
+def test_compare_scope(tmp_path, compare_scope, expected_test_rows):
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_SCOPE)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        _compare_scope=compare_scope,
+        _report_grouping_level='test',
+    )
+    result = triton_utils.run(config)
+    # Subtract total row and group header rows (empty string values)
+    data_rows = [idx for idx in result.index if idx != 'Σ' and result.loc[idx].ne('').any()]
+    assert len(data_rows) == expected_test_rows
+
+
+def test_compare_pretty_flag_accepted():
+    config = triton_utils.Config.from_args(
+        'compare --r /path/r1 --r2 /path/r2 --pretty'
+    )
+    assert config.pretty_print is True
+
+
+def test_compare_sort_by_arg_accepted():
+    config = triton_utils.Config.from_args(
+        'compare --r /path/r1 --r2 /path/r2 --sort-by passed.r1'
+    )
+    assert config.sort_by == 'passed.r1'
+
+
+def test_compare_scope_arg_accepted():
+    config = triton_utils.Config.from_args(
+        'compare --r /path/r1 --r2 /path/r2 --compare-scope both'
+    )
+    assert config.compare_scope == triton_utils.CompareScope.BOTH
+
+
+@pytest.mark.parametrize(
+    ('omit_flags', 'expected_prefix'),
+    [
+        # Full name: language::python/test/unit/language/test_core.py::test_b
+        ({'omit_testsuite_name': True}, 'python/test/unit/language/test_core.py::test_b'),
+        ({'omit_test_module_name': True}, 'language::test_b'),
+        ({'omit_testsuite_name': True, 'omit_test_module_name': True}, 'test_b'),
+    ]
+)
+def test_compare_omit_name_flags(tmp_path, omit_flags, expected_prefix):
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_SCOPE)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        _report_grouping_level='test',
+        _compare_scope='both',
+        **omit_flags,
+    )
+    result = triton_utils.run(config)
+    data_rows = [idx for idx in result.index if idx != 'Σ' and result.loc[idx].ne('').any()]
+    assert any(expected_prefix in row for row in data_rows)
+
+
+def test_compare_omit_class_name(tmp_path):
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_CLASS)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        _report_grouping_level='test',
+        omit_test_class_name=True,
+    )
+    result = triton_utils.run(config)
+    data_rows = [idx for idx in result.index if idx != 'Σ' and result.loc[idx].ne('').any()]
+    for row in data_rows:
+        assert 'TestGraphXPU' not in row
+
+
+def test_compare_omit_flags_warn_on_testsuite_level(tmp_path, capsys):
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_SCOPE)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        _report_grouping_level='testsuite',
+        omit_testsuite_name=True,
+    )
+    triton_utils.run(config)
+    _, stderr = capsys.readouterr()
+    assert '[WARNING]' in stderr
+    assert 'omit-testsuite-name' in stderr
+
+
+def test_compare_omit_testsuite_and_module_preserves_class(tmp_path):
+    """Verify _minify_name keeps class when both testsuite and module are omitted."""
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_CLASS)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        _report_grouping_level='test',
+        omit_testsuite_name=True,
+        omit_test_module_name=True,
+    )
+    result = triton_utils.run(config)
+    data_rows = [idx for idx in result.index if idx != 'Σ' and result.loc[idx].ne('').any()]
+    assert any('TestGraphXPU' in row for row in data_rows)
+
+
+def test_compare_time_pct_delta_column(tmp_path):
+    """Verify time.%Δ column shows percentage change."""
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_SCOPE)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        _report_grouping_level='testsuite',
+    )
+    result = triton_utils.run(config)
+    assert ('time', '%Δ') in result.columns
+    # language testsuite: r1 time=3.0, r2 time=4.0 → %Δ = 33.33%
+    pct_val = result.loc['language', ('time', '%Δ')]
+    assert '%' in str(pct_val)
+
+
+def test_compare_sort_by_time_pct_delta(tmp_path):
+    """Verify sorting by time.%Δ works."""
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_SCOPE)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        sort_by='time.%delta',
+        _report_grouping_level='testsuite',
+    )
+    result = triton_utils.run(config)
+    assert result.index[-1] == 'Σ'
+
+
+def test_compare_time_precision(tmp_path):
+    """Verify time columns have 2-decimal precision, not rounded to int."""
+    r1, r2 = _setup_compare_reports(tmp_path, TESTS_FOR_COMPARE_SCOPE)
+    config = triton_utils.Config(
+        action='compare_reports',
+        reports=r1,
+        reports_2=r2,
+        _report_grouping_level='testsuite',
+    )
+    result = triton_utils.run(config)
+    # r1 time for language = 3.0, check it's a float not int
+    time_r1 = result.loc['language', ('time', 'r1')]
+    assert isinstance(time_r1, float)
+
+
+# yapf: enable

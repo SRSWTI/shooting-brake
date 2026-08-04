@@ -1,0 +1,693 @@
+from triton.backends.compiler import BaseBackend, GPUTarget, Language
+from triton._C.libtriton import ir, passes, llvm, intel
+from triton.backends.intel.driver import compile_module_from_src
+from triton.backends.intel.track import track
+from triton.backends.intel.extension_utils import query_device_extensions
+from triton import knobs
+from triton.runtime.errors import IntelGPUError, OutOfResources
+
+from dataclasses import dataclass
+import functools
+from typing import Any, Dict, Tuple, Union
+from types import ModuleType
+import hashlib
+import tempfile
+import signal
+import re
+import os
+import subprocess
+import warnings
+from pathlib import Path
+from elftools.elf.elffile import ELFFile
+
+try:  # XPUBackend allows metaclasses injection
+    from .meta import XPUBackendMeta
+except ImportError:
+    XPUBackendMeta = type(BaseBackend)
+
+_VERSION_PATTERN = re.compile(r'(\d+)\.(\d+)\.(\d+)(?:\+(\d+))?')
+
+
+@dataclass
+class XPUOptions:
+    num_warps: int = 4
+    num_ctas: int = 1
+    num_stages: int = 2
+    cluster_dims: tuple = (1, 1, 1)
+    warp_size: int = 32
+    optimize_epilogue: bool = False
+    enable_fp_fusion: bool = True
+    launch_cooperative_grid: bool = False
+    reduce_variable_liveness: bool = True
+    supported_fp8_dtypes: Tuple[str] = ("fp8e5", "fp8e4nv", "fp8e4b15")
+    deprecated_fp8_dot_operand_dtypes: Tuple[str] = ()
+    default_dot_input_precision: str = "tf32"
+    allowed_dot_input_precisions: Tuple[str] = ("tf32", "tf32x3", "ieee", 'bf16x3', 'bf16x6')
+    allow_fp8e4nv: bool = False
+    allow_fp8e4b15: bool = True
+    grf_mode: str = 'default'
+    loop_distribute: bool = knobs.intel.enable_loop_distribution
+    code_sinking: bool = knobs.intel.enable_code_sinking
+    sub_32_dpas: bool = knobs.intel.enable_sub_32_dpas
+    use_barrier: bool = False
+    max_num_imprecise_acc_default: int = 0  # `max_num_imprecise_acc` only applies to fp8 -> fp32 dot on sm_90 for cuda
+    extern_libs: dict = None
+    debug: bool = False
+    backend_name: str = 'intel'
+    sanitize_overflow: bool = True
+    generate_native_code: bool = False
+    arch: str = ""
+    instrumentation_mode: str = ""
+    fpsan_homomorphic_casts: bool = False
+
+    def __post_init__(self):
+        default_libdir = Path(__file__).parent / 'lib'
+        extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
+        if not extern_libs.get('libdevice', None):
+            extern_libs['libdevice'] = knobs.intel.libdevice_path or str(
+                default_libdir / 'libsycl-spir64-unknown-unknown.bc')
+
+        object.__setattr__(self, 'extern_libs', tuple(extern_libs.items()))
+        if self.num_warps <= 0 or (self.num_warps & (self.num_warps - 1)) != 0:
+            raise AssertionError("num_warps must be a power of 2")
+        self.generate_native_code = (knobs.intel.gen_native_code
+                                     or knobs.intel.dump_shader_info) or self.generate_native_code
+
+    def hash(self):
+        key = '_'.join([f'{name}-{val}' for name, val in self.__dict__.items()])
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+# Aligned with max_reg_spill in third_party/intel/backend/driver.c
+MAX_REG_SPILL = 1000
+
+SPILL_SIZE_RE = re.compile(r'spill_size\s*[:=]\s*(\d+)')
+PTSS_OVERFLOW_RE = re.compile(
+    r'total scratch space.*?(\d+)\s*bytes.*?max permitted PTSS\s*(\d+)\s*bytes'
+    r'|scratch space exceeds.*?limit'
+    r'|per.thread scratch space.*?exceed',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def extract_spill_size_from_zebin(file):
+    with open(file, 'rb') as f:
+        elf = ELFFile(f)
+        zeinfo = elf.get_section_by_name(".ze_info")
+        if zeinfo is None:
+            has_text = any(s.name.startswith('.text.') for s in elf.iter_sections())
+            has_symtab = elf.get_section_by_name('.symtab') is not None
+            if not has_text or not has_symtab:
+                # IGC can exit 0 on PTSS overflow yet emit a degenerate zebin.
+                # Observed on LTS2 line; rolling libigc instead
+                # exits non-zero. Raise so the existing 256-GRF retry path
+                # in make_zebin catches it, matching the rolling code path.
+                raise IntelGPUError('Degenerate zebin: missing .text/.symtab. '
+                                    'IGC likely failed (e.g. PTSS overflow) without '
+                                    'reporting a non-zero exit code.')
+            warnings.warn(
+                'Section .ze_info not found in zebin; cannot extract spill_size. '
+                'Auto-GRF mode selection will be skipped for this kernel.',
+                stacklevel=2,
+            )
+            return 0
+        text = zeinfo.data().decode('utf-8')
+        match = SPILL_SIZE_RE.search(text)
+        if match is not None:
+            return int(match.group(1))
+    return 0
+
+
+def min_dot_size(device_props: Union[Dict, GPUTarget]):
+    if isinstance(device_props, GPUTarget):
+        backend = XPUBackend(device_props)
+        device_props = backend.properties
+    else:
+        from triton.runtime import driver
+        backend = XPUBackend(driver.active.get_current_target())
+    return backend.min_dot_size(device_props)
+
+
+class XPUBackend(BaseBackend, metaclass=XPUBackendMeta):
+    arch_to_impl = {}  # Architecture id to backend implementation class mapping
+    binary_ext = "spv"
+    target_arch = "spir64"
+    instrumentation = None
+
+    @staticmethod
+    def supports_target(target: GPUTarget):
+        return target.backend == 'xpu'
+
+    def __new__(cls, target: GPUTarget):
+        if not isinstance(target.arch, dict):
+            raise TypeError("target.arch is not a dict")
+        if cls is not XPUBackend:
+            return super().__new__(cls)
+        arch = target.arch.get("architecture", 0)
+        if (impl := cls.arch_to_impl.get(arch, None)) is None:
+            # Try to find an arch-specific implementation in the .arch.<name> submodule.
+            if not (dev_arch := knobs.intel.device_arch):
+                dirname = os.path.dirname(os.path.realpath(__file__))
+                parser = compile_module_from_src(src=Path(os.path.join(dirname, "arch_parser.c")).read_text(),
+                                                 name="arch_utils")
+                dev_arch = parser.parse_device_arch(target.arch.get('architecture', 0))
+            mod_name = f"{__package__}.arch.{dev_arch}"
+            try:
+                impl = __import__(mod_name, fromlist=["XPUBackendImpl"]).XPUBackendImpl
+            except ImportError:
+                impl = type(f"{mod_name}.XPUBackendImpl", (cls, ), {})
+            impl.device_arch = dev_arch
+            cls.arch_to_impl[arch] = impl
+        return super().__new__(impl)
+
+    def __init__(self, target: GPUTarget) -> None:
+        super().__init__(target)
+        self.properties = self.parse_target(target.arch)
+
+    def get_target_name(self, options) -> str:
+        return f"xpu:{self.device_arch}"
+
+    @classmethod
+    def is_lts(cls, ver) -> bool:
+        if not ver:
+            return True
+        m = _VERSION_PATTERN.match(ver)
+        if not m:
+            return True
+        return tuple(int(x) if x is not None else 0 for x in m.groups()) < (1, 6, 35096, 9)
+
+    def parse_target(self, tgt_prop) -> dict:
+        dev_prop = {}
+        dev_prop['name'] = tgt_prop.get('name', 'xpu')
+        dev_prop['platform_name'] = tgt_prop.get('platform_name', None)
+        dev_prop['vendor'] = tgt_prop.get('vendor', None)
+        dev_prop['version'] = tgt_prop.get('version', None)
+        dev_prop['gpu_eu_count'] = tgt_prop.get('gpu_eu_count', None)
+        dev_prop['gpu_subslice_count'] = tgt_prop.get('gpu_subslice_count', None)
+        dev_prop['max_work_group_size'] = tgt_prop.get('max_work_group_size', None)
+        dev_prop['max_num_sub_groups'] = tgt_prop.get('max_num_sub_groups', None)
+        dev_prop['sub_group_sizes'] = tgt_prop.get('sub_group_sizes', None)
+        dev_prop['has_fp64'] = tgt_prop.get('has_fp64', None)
+        dev_prop['has_subgroup_matrix_multiply_accumulate_bfloat8'] = tgt_prop.get(
+            'has_subgroup_matrix_multiply_accumulate_bfloat8', False)
+        dev_prop['has_subgroup_matrix_multiply_accumulate_tensor_float32'] = tgt_prop.get(
+            'has_subgroup_matrix_multiply_accumulate_tensor_float32', False)
+        dev_prop['has_16bit_atomics'] = tgt_prop.get('has_16bit_atomics', False)
+        dev_prop['has_2d_block_io'] = tgt_prop.get('has_2d_block_io', False)
+        is_lts = self.is_lts(tgt_prop.get('driver_version'))
+        dev_prop['has_bfloat16_arithmetic'] = tgt_prop.get('has_bfloat16_arithmetic', not is_lts)
+        dev_prop['has_bfloat16_conversion'] = tgt_prop.get('has_bfloat16_conversion', False)
+        dev_prop['has_predicated_io'] = tgt_prop.get('has_predicated_io', not is_lts)
+        dev_prop['has_subgroup_matrix_multiply_accumulate'] = tgt_prop.get('has_subgroup_matrix_multiply_accumulate',
+                                                                           False)
+        dev_prop['has_subgroup_scaled_matrix_multiply_accumulate'] = tgt_prop.get(
+            'has_subgroup_scaled_matrix_multiply_accumulate', False)
+        dev_prop['has_f4_conversions'] = tgt_prop.get('has_f4_conversions', False)
+        dev_prop['has_f8_conversions'] = tgt_prop.get('has_f8_conversions', False)
+        dev_prop['has_256b_prefetch'] = tgt_prop.get('has_256b_prefetch', False)
+        # Same Xe3P+ gate as 256B prefetch pending separate driver prop.
+        dev_prop['has_256b_load_store'] = tgt_prop.get('has_256b_prefetch', False)
+        dev_prop['has_rounded_divide_sqrt'] = tgt_prop.get('has_rounded_divide_sqrt', not is_lts)
+        dev_prop['has_sigmoid'] = tgt_prop.get('has_sigmoid', False)
+
+        if '__intel_already_queried_extensions__' not in tgt_prop:
+            # All GPUs with the same device_id have the same extensions, so we just
+            # need to query any GPU device
+            device_id = tgt_prop.get("device_id")
+            extensions = query_device_extensions(device_id)
+            dev_prop.update(extensions)
+            dev_prop['__intel_already_queried_extensions__'] = True
+
+        return dev_prop
+
+    def parse_options(self, opts) -> Any:
+        args = {k: v for k, v in opts.items() if k in XPUOptions.__dataclass_fields__}
+        args["allow_fp8e4nv"] = True
+        if "enable_fp_fusion" not in args:
+            args["enable_fp_fusion"] = knobs.language.default_fp_fusion
+        return XPUOptions(**args)
+
+    @staticmethod
+    def parse_attr(desc):
+        ret = BaseBackend.parse_attr(desc)
+        if "N" in desc:
+            ret += [["tt.padding", 1]]
+        # "S" section: encodes shape and stride values as constexpr.
+        # Format: "S<shape0>,<shape1>,...;<stride0>,<stride1>,..."
+        # Enables isDivisible checks to pass trivially on constants.
+        if "S" in desc:
+            idx = desc.index("S") + 1
+            s_str = desc[idx:]
+            try:
+                parts = s_str.split(";")
+                shapes = [int(x) for x in parts[0].split(",") if x]
+                for i, s in enumerate(shapes):
+                    ret += [[f"tt.shape.{i}", s]]
+                if len(parts) > 1:
+                    strides = [int(x) for x in parts[1].split(",") if x]
+                    for i, s in enumerate(strides):
+                        ret += [[f"tt.stride.{i}", s]]
+            except (ValueError, IndexError):
+                pass
+        return ret
+
+    @staticmethod
+    def get_tensordesc_specialization(arg, **kwargs):
+        # "N" = NaN padding (enables tt.padding attribute).
+        # "S<shapes>;<strides>" = shape and stride values as constexpr.
+        #   Shapes: enables satisfies2DBlockReadAlignment and FuseReshape checks.
+        #   Strides (rank-3+ only): enables FuseReshape stride divisibility.
+        key = ""
+        if getattr(arg, "padding", None) == "nan":
+            key += "N"
+        # Encode all shapes and non-last strides (rank-3+ only) as constants.
+        shapes_str = ",".join(str(s) for s in arg.shape)
+        strides_str = ",".join(str(s) for s in arg.strides[:-1]) if len(arg.strides) >= 3 else ""
+        key += "S" + shapes_str
+        if strides_str:
+            key += ";" + strides_str
+        return key
+
+    def pack_metadata(self, metadata):
+        return metadata
+
+    @staticmethod
+    def min_dot_size(device_props: dict):
+        # (M, N, K)
+        # M: repeatCount. 1,2,4,8
+        # N: executionSize. 16 for PVC, 8 for ATS
+        # K: systolicDepth x opsPerChan. systolicDepth must be 8
+        repeat_count = 1
+        sdepth = 8
+        exec_size = min(device_props["sub_group_sizes"])
+
+        def get_ops_per_channel(lhs_type, rhs_type):
+            l_bitwidth = lhs_type.scalar.primitive_bitwidth
+            r_bitwidth = rhs_type.scalar.primitive_bitwidth
+            max_ops_per_chan = 32 / max(l_bitwidth, r_bitwidth)
+            return min(8, max_ops_per_chan)
+
+        return lambda lhs_type, rhs_type: (repeat_count, exec_size, sdepth * get_ops_per_channel(lhs_type, rhs_type))
+
+    def get_codegen_implementation(self, options):
+        from triton.language.extra.intel import convert_custom_float8
+        codegen_fns = {}
+        codegen_fns["convert_custom_types"] = convert_custom_float8
+        codegen_fns["min_dot_size"] = self.min_dot_size(self.properties)
+        return codegen_fns
+
+    def get_module_map(self) -> Dict[str, ModuleType]:
+        from triton.language.extra.intel import libdevice
+        return {"triton.language.extra.libdevice": libdevice}
+
+    def load_dialects(self, ctx):
+        intel.load_dialects(ctx)
+        if self.instrumentation:
+            self.instrumentation.load_dialects(ctx)
+
+    @staticmethod
+    def validate_options(opt, properties):
+        # Check warp_size and num_threads are within limits.
+        if opt.warp_size not in properties['sub_group_sizes']:
+            raise ValueError(
+                f"warp_size={opt.warp_size} is unsupported for the target (supported values are {properties['sub_group_sizes']})"
+            )
+        if opt.num_warps > properties['max_num_sub_groups']:
+            raise ValueError(
+                f"num_warps={opt.num_warps} is unsupported for the target (limit is {properties['max_num_sub_groups']})"
+            )
+
+    @classmethod
+    def annotate_module(cls, module_opts, properties, opt):
+        # Annotate module with information required by subsequent transformations.
+        module_opts.min_sg_size = min(properties["sub_group_sizes"])
+        module_opts.support_16bit_atomics = properties["has_16bit_atomics"]
+        module_opts.support_sigmoid = properties["has_sigmoid"]
+        module_opts.support_2d_block_io = properties["has_2d_block_io"]
+        module_opts.support_bfloat16_arithmetic = properties["has_bfloat16_arithmetic"]
+        module_opts.support_bfloat16_conversion = properties["has_bfloat16_conversion"]
+        module_opts.support_predicated_io = properties["has_predicated_io"]
+        module_opts.support_subgroup_matrix_multiply_accumulate = properties["has_subgroup_matrix_multiply_accumulate"]
+        module_opts.support_subgroup_scaled_matrix_multiply_accumulate = properties[
+            "has_subgroup_scaled_matrix_multiply_accumulate"]
+        module_opts.support_f4_conversion = properties["has_f4_conversions"]
+        module_opts.support_f8_conversion = properties["has_f8_conversions"]
+        module_opts.support_256b_prefetch = properties["has_256b_prefetch"]
+        module_opts.support_256b_load_store = properties["has_256b_load_store"]
+        module_opts.support_subgroup_matrix_multiply_accumulate_bf8 = properties[
+            "has_subgroup_matrix_multiply_accumulate_bfloat8"]
+        module_opts.support_rounded_divide_sqrt = properties["has_rounded_divide_sqrt"]
+        module_opts.threads_per_warp = opt.warp_size
+        module_opts.sub_32_dpas = opt.sub_32_dpas
+        module_opts.target_arch = cls.target_arch
+
+    @classmethod
+    @track
+    def make_ttir(cls, mod, metadata, opt):
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        passes.common.add_inliner(pm)
+        intel.passes.ttir.add_rewrite_tensor_descriptor_to_pointer(pm)
+        passes.common.add_cse(pm)
+        intel.passes.ttir.add_reassociate_dot_scale(pm, knobs.intel.fast_math)
+        passes.ttir.add_triton_licm(pm)
+        intel.passes.ttir.add_remove_masks(pm)
+        intel.passes.ttir.add_stride_versioning(pm)
+        intel.passes.ttir.add_descriptor_versioning(pm)
+        intel.passes.ttir.add_fuse_reshape(pm)
+        intel.passes.ttir.add_fold_true_cmpi(pm)
+        intel.passes.ttir.add_prepare_if_combining(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.ttir.add_combine(pm)
+        intel.passes.ttir.add_simplify_signed_arithmetic(pm)
+        passes.ttir.add_reorder_broadcast(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_symbol_dce(pm)
+        if opt.loop_distribute:
+            intel.passes.ttgpuir.add_loop_distribute(pm)
+        passes.ttir.add_loop_unroll(pm)
+        pm.run(mod, 'make_ttir')
+
+        driver_version = metadata["target"].arch.get("driver_version")
+        if cls.is_lts(driver_version) and intel.has_precise_divide_sqrt(mod):
+            metadata["build_flags"] = "-cl-fp32-correctly-rounded-divide-sqrt"
+
+        return mod
+
+    @classmethod
+    @track
+    def make_ttgir(cls, mod, metadata, opt, properties):
+        # Annotate module with information required by subsequent transformations.
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        module_opts = intel.passes.ttgpuir.AnnotateModuleOptions()
+        cls.annotate_module(module_opts, properties, opt)
+        module_opts.is_lts = cls.is_lts(metadata["target"].arch.get("driver_version"))
+        module_opts.use_cl_rounded_divide_sqrt = (module_opts.is_lts and intel.has_precise_divide_sqrt(mod))
+        module_opts.is_fast_math = knobs.intel.fast_math
+        intel.passes.ttgpuir.add_triton_annotate_module(pm, module_opts)
+        pm.run(mod, 'annotate_module')
+
+        # Overwrite the warp_size option with the module annotation.
+        opt.warp_size = intel.get_threads_per_warp(mod)
+        cls.validate_options(opt, properties)
+
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        passes.ttir.add_convert_to_ttgpuir(pm, "xpu", opt.num_warps, opt.warp_size, opt.num_ctas)
+        # optimize TTGIR
+        passes.ttgpuir.add_coalesce(pm)
+        if properties["has_256b_load_store"]:
+            intel.passes.ttgpuir.add_widen_load_store_encoding(pm)
+        intel.passes.ttgpuir.add_remove_layout_conversions(pm)
+        # CanonicalizePointers must run BEFORE accelerate_matmul: once DPAS
+        # (dot_op) encodings are applied to the pointer tensors, the pass's
+        # rewrites produce IR that crashes LowerTo2DBlockLoad's AxisInfoAnalysis.
+        # The trailing canonicalizer folds the zero offsets / identity arithmetic
+        # and removes the unrealized_conversion_casts the pass leaves behind.
+        if not knobs.intel.disable_canonicalize_pointers:
+            intel.passes.ttgpuir.add_canonicalize_pointers(pm, True)
+            passes.common.add_canonicalizer(pm)
+
+        intel.passes.ttgpuir.add_accelerate_matmul(pm)
+        intel.passes.ttgpuir.add_stage_large_fma_dots_via_slm(pm)
+        intel.passes.ttgpuir.add_materialize_block_pointer(pm)
+        intel.passes.ttgpuir.add_remove_layout_conversions(pm)
+        intel.passes.ttgpuir.add_fold_fp_to_fp(pm)
+        intel.passes.ttgpuir.add_optimize_dot_operands(pm)
+        intel.passes.ttgpuir.add_hoist_layout_conversions(pm, opt.grf_mode)
+        if os.environ.get("TRITON_INTEL_ANNOTATE_LATENCIES", "0") == "1":
+            passes.ttgpuir.add_assign_latencies(pm, opt.num_stages)
+            passes.ttgpuir.add_schedule_loops(pm)
+        intel.passes.ttgpuir.add_pipeline(pm, opt.num_stages, opt.use_barrier)
+
+        if (opt.reduce_variable_liveness):
+            intel.passes.ttgpuir.add_reduce_variable_liveness(pm)
+
+        # Off by default: code sinking is perf-neutral on measured kernels (it
+        # reliably reduces register spills, but the relieved traffic is not on
+        # the critical path on current HW). Opt in via the env var for A/B work.
+        if opt.code_sinking:
+            intel.passes.ttgpuir.add_code_sinking(pm)
+
+        passes.ttir.add_loop_aware_cse(pm)
+        passes.ttgpuir.add_fuse_nested_loops(pm)
+
+        passes.common.add_canonicalizer(pm)
+        passes.ttir.add_triton_licm(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+
+        passes.ttgpuir.add_optimize_thread_locality(pm)
+        passes.ttgpuir.add_optimize_dot_operands(pm, True)
+        passes.common.add_cse(pm)
+        passes.ttgpuir.add_prefetch(pm)
+        passes.ttgpuir.add_optimize_dot_operands(pm, True)
+        intel.passes.ttgpuir.add_remove_layout_conversions(pm)
+        if not knobs.intel.disable_annotate_cache_control:
+            intel.passes.ttgpuir.add_annotate_cache_control(pm)
+        intel.passes.ttgpuir.add_reduce_data_duplication(pm)
+        passes.ttgpuir.add_reorder_instructions(pm)
+        passes.ttir.add_loop_aware_cse(pm)
+        passes.common.add_symbol_dce(pm)
+        passes.common.add_sccp(pm)
+        passes.common.add_canonicalizer(pm)
+        if knobs.intel.opt_reduction_locality:
+            intel.passes.ttgpuir.add_optimize_reduction_locality(pm)
+        intel.passes.arith.add_arith_emulate_unsupported_floats(pm, ["bf16"], "f32")
+        if opt.instrumentation_mode == "fpsan":
+            passes.ttgpuir.add_fp_sanitizer(pm, opt.fpsan_homomorphic_casts)
+        pm.run(mod, 'make_ttgir')
+        return mod
+
+    def gluon_to_ttgir(self, src, metadata, options):
+        mod = src
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+
+        passes.gluon.add_inliner(pm)
+        passes.gluon.add_resolve_auto_encodings(pm)
+        passes.common.add_sccp(pm)
+        passes.ttir.add_loop_aware_cse(pm)
+        passes.gluon.add_canonicalizer(pm)
+        passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+        if options.instrumentation_mode == "fpsan":
+            passes.ttgpuir.add_fp_sanitizer(pm, options.fpsan_homomorphic_casts)
+
+        pm.run(mod, 'gluon_to_ttgir')
+        metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
+        return mod
+
+    @classmethod
+    def optimize_llvm_mod(cls, llvm_mod, options):
+        intel.set_spv_target_triple(llvm_mod)
+        with track("optimize_module") as tr:
+            intel.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, tr.callback("passes"))
+
+    @classmethod
+    @track
+    def make_llir(cls, src, metadata, options):
+        mod = src
+
+        # Ensure ttig.is_lts is set on the module when the driver is LTS.
+        # This is needed for hand-written TTGIR that bypasses annotate_module.
+        driver_version = metadata["target"].arch.get("driver_version")
+        if cls.is_lts(driver_version):
+            intel.set_is_lts(mod)
+
+        # TritonGPU -> LLVM-IR (MLIR)
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+
+        intel.passes.ttgpuir.add_lower_to_2d_block_load(pm)
+        passes.convert.add_scf_to_cf(pm)
+        passes.gluon.add_inliner(pm)
+        passes.convert.add_index_to_llvmir(pm)
+        intel.passes.ttgpuir.add_allocate_shared_memory(pm)
+        passes.ttgpuir.add_allocate_global_scratch_memory(pm)
+        # instrumentation point here so we can override IRs above (e.g., ttir and ttgir)
+        if cls.instrumentation:
+            cls.instrumentation.patch("ttgpuir_to_llvmir", pm, mod.context)
+        intel.passes.ttgpuir.add_to_llvmir(pm)
+        intel.passes.ttgpuir.add_gen_to_llvm(pm)
+        passes.common.add_canonicalizer(pm)
+        intel.passes.ttgpuir.add_rewrite_stack_ptr(pm)
+        passes.common.add_cse(pm)
+        passes.convert.add_arith_to_llvmir(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_symbol_dce(pm)
+
+        if not knobs.compilation.disable_line_info and not knobs.compilation.dump_ir_extract_di_local_variables:
+            passes.llvmir.add_di_scope(pm)
+
+        if cls.instrumentation:
+            cls.instrumentation.patch("llvmir_to_llvm", pm, mod.context)
+        pm.run(mod, 'make_llir')
+
+        if knobs.compilation.dump_ir_extract_di_local_variables:
+            # comments below on why separate it
+            if not knobs.compilation.disable_line_info:
+                pm = ir.pass_manager(mod.context)
+                pm.enable_debug()
+                passes.llvmir.add_di_scope(pm)
+                pm.run(mod, 'make_llir.disable_line_info')
+
+            # insert dbg intrinsic with several DI Attribute including source
+            # var name and type info note: unknown reason for now, but this
+            # pass and add_di_scope has to be run separately, otherwise if we
+            # put them into previous pipline, it trigger a segmentfault without
+            # any error message; could be due to a bug in mlir or pybind11
+            pm = ir.pass_manager(mod.context)
+            pm.enable_debug()
+            passes.llvmir.add_di_local_variable(pm)
+            pm.run(mod, 'make_llir.dump_ir_extract_di_local_variables')
+
+        # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
+        llvm.init_targets()
+        context = llvm.context()
+        llvm_mod = llvm.to_module(mod, context)
+        intel.set_fast_math(llvm_mod, metadata['enable_fp_fusion'], knobs.intel.fast_math)
+        if options.extern_libs:
+            paths = [path for (name, path) in options.extern_libs]
+            llvm.link_extern_libs(llvm_mod, paths)
+
+        cls.optimize_llvm_mod(llvm_mod, options)
+        intel.post_process_llir(llvm_mod)
+
+        # Get some metadata
+        total_num_warps = src.get_int_attr("ttg.total-num-warps")
+        if total_num_warps is not None:
+            metadata["num_warps"] = total_num_warps
+        metadata["threads_per_warp"] = intel.get_threads_per_warp(src)
+        metadata["shared"] = src.get_int_attr("ttg.shared")
+        metadata["global_scratch_size"] = src.get_int_attr("ttg.global_scratch_memory_size")
+        metadata["global_scratch_align"] = src.get_int_attr("ttg.global_scratch_memory_alignment")
+        metadata["profile_scratch_size"] = src.get_int_attr("ttg.profile_scratch_memory_size") or 0
+        metadata["profile_scratch_align"] = src.get_int_attr("ttg.profile_scratch_memory_alignment") or 1
+        ret = str(llvm_mod)
+        del llvm_mod
+        del context
+        return ret
+
+    @classmethod
+    @track
+    def make_spv(cls, src, metadata, options):
+        driver_version = metadata["target"].arch.get("driver_version")
+        os.environ["INTEL_XPU_BACKEND_IS_LTS"] = "1" if cls.is_lts(driver_version) else "0"
+        spirv, name = intel.translate_to_spirv(src)
+        metadata["name"] = name
+        metadata.setdefault("build_flags", "")
+        if options.grf_mode == '128':
+            metadata["build_flags"] += " -cl-intel-128-GRF-per-thread"
+        elif options.grf_mode == '256':
+            if options.num_warps > 32:
+                raise RuntimeError("grf_mode = 256 cannot be used with num_warps > 32")
+            metadata["build_flags"] += " -cl-intel-256-GRF-per-thread"
+        elif options.grf_mode == '512':
+            if options.num_warps > 32:
+                raise RuntimeError("grf_mode = 512 cannot be used with num_warps > 32")
+            metadata["build_flags"] += " -cl-intel-512-GRF-per-thread"
+        elif options.grf_mode == 'auto':
+            metadata["build_flags"] += " -cl-intel-enable-auto-large-GRF-mode"
+        elif options.grf_mode != 'default':
+            raise RuntimeError(f"Unknown grf_mode: {options.grf_mode}")
+
+        if knobs.intel.disable_igc_opt:
+            metadata["build_flags"] += " -cl-opt-disable"
+        return spirv
+
+    @classmethod
+    @track
+    def make_zebin(cls, src, metadata, options):
+        metadata["binary_ext"] = "zebin"
+
+        shader_dump_opt = ""
+        if knobs.intel.dump_shader_info:
+            # The IGC (Intel Graphic Compiler) only parses the options at first time in JIT-ing the binary per process.
+            # Have to use the `ocloc` to generate the binary in sub-process to work around the limitation.
+            shader_dump_opt = f" -igc_opts ',DumpToCustomDir={metadata['cache_dir']},ShaderDumpEnable=1'"
+
+        metadata["generate_native_code"] = options.generate_native_code
+
+        with track("generate_native_code"), tempfile.TemporaryDirectory() as temp_dir:
+            with tempfile.NamedTemporaryFile(mode='wb', suffix='.spv', dir=temp_dir, delete=False) as fsrc:
+                fsrc.write(src)
+            fbin = fsrc.name + '.o'
+
+            ocloc_cmd = [
+                'ocloc', 'compile', '-file', fsrc.name, '-o', fbin, '-spirv_input', '-device', cls.device_arch,
+                '-options', metadata['build_flags'] + shader_dump_opt
+            ]
+
+            if options.grf_mode == 'default':
+                # Try rebuilding with larger GRF modes (default first, then larger).
+                retry_grf_mode_list = [""]  # default GRF mode by omitting the flag
+                if metadata["target"].arch.get("arch") == 'cri':
+                    retry_grf_mode_list.append("-cl-intel-512-GRF-per-thread")
+                else:
+                    retry_grf_mode_list.append("-cl-intel-256-GRF-per-thread")
+            else:
+                # Non-default GRF mode is already encoded in metadata["build_flags"] (including "auto").
+                retry_grf_mode_list = [""]
+
+            base_build_flags = metadata["build_flags"]
+            for grf_flag in retry_grf_mode_list:
+                metadata["build_flags"] = f"{base_build_flags} {grf_flag}".strip()
+                ocloc_cmd[-1] = metadata["build_flags"] + shader_dump_opt
+                try:
+                    subprocess.check_output(ocloc_cmd, stderr=subprocess.STDOUT, text=True)
+                    if options.grf_mode == "default":
+                        spill_size = extract_spill_size_from_zebin(fbin)
+                        if spill_size <= MAX_REG_SPILL:
+                            break
+                except (subprocess.CalledProcessError, IntelGPUError) as e:
+                    # If GRF mode was not last yet, retry with different GRF mode
+                    # before giving up. This handles cases where the default GRF mode
+                    # doesn't provide enough registers (e.g., scratch space exceeds
+                    # HW PTSS limit). Also covers degenerate zebin (no .text/.symtab)
+                    # detected by extract_spill_size_from_zebin (LTS2 IGC silent
+                    # PTSS overflow).
+                    if grf_flag == retry_grf_mode_list[-1]:
+                        # Only reclassify as OutOfResources when ocloc's stderr explicitly
+                        # reports a PTSS overflow. Other IntelGPUErrors (e.g. degenerate
+                        # zebin from extract_spill_size_from_zebin, ocloc SIGSEGV) keep
+                        # their original error class so the user sees the real cause.
+                        output = getattr(e, 'output', '') or ''
+                        if ptss_match := PTSS_OVERFLOW_RE.search(output):
+                            required = int(ptss_match.group(1)) if ptss_match.group(1) else 0
+                            limit = int(ptss_match.group(2)) if ptss_match.group(2) else 0
+                            raise OutOfResources(required, limit, "per-thread scratch space (PTSS)") from e
+                        if isinstance(e, IntelGPUError):
+                            raise
+                        if e.returncode == 255:
+                            error = 'Internal Triton ZEBIN codegen error'
+                        elif e.returncode == 128 + signal.SIGSEGV:
+                            error = '`ocloc` raised SIGSEGV'
+                        else:
+                            error = f'`ocloc` failed with error code {e.returncode}'
+
+                        raise IntelGPUError(f'{error}\n'
+                                            f'`ocloc` stderr:\n{e.output}\n'
+                                            f'Repro command: {ocloc_cmd}\n') from e
+
+            with open(fbin, 'rb') as f:
+                zebin = f.read()
+        return zebin
+
+    def add_stages(self, stages, options, language):
+        if language == Language.TRITON:
+            stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
+            stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options, self.properties)
+        elif language == Language.GLUON:
+            stages["ttgir"] = lambda src, metadata: self.gluon_to_ttgir(src, metadata, options)
+        stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
+        stages["spv"] = lambda src, metadata: self.make_spv(src, metadata, options)
+        if options.generate_native_code:
+            stages["zebin"] = lambda src, metadata: self.make_zebin(src, metadata, options)
+        if knobs.runtime.add_stages_inspection_hook is not None:
+            knobs.runtime.add_stages_inspection_hook(self, stages, options, language, None)
+
+    @functools.lru_cache()
+    def hash(self):
+        return f'SPIR-V 1.5-{self.properties}'

@@ -1,0 +1,1535 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import os
+from typing import Optional
+
+import pytest
+import torch
+
+from tests.utils import format_tc
+from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+
+NUM_HEADS = [(8, 2)]
+HEAD_SIZES = [64, 128, 256, 512]
+BLOCK_SIZES = [16, 64, 512]
+DTYPES = [torch.half, torch.bfloat16]
+QDTYPES = [None]
+NUM_BLOCKS = [2048]
+SOFT_CAPS = [None]
+SLIDING_WINDOWS = [(-1, 127), (127, -1), (64, 64), (-1, -1)]
+SINK = [False, True]
+CASUAL = [False, True]
+PAGED = [False, True]
+FP8KV = [torch.float8_e4m3fn, None]
+# Cross-layer tests model the offloading KV connector's uniform cache layout,
+# where each layer view has a larger physical page stride.
+NUM_LAYERS = [2, 16]
+
+
+def ref_paged_attn(query: torch.Tensor,
+                   key_cache: torch.Tensor,
+                   value_cache: torch.Tensor,
+                   query_lens: list[int],
+                   kv_lens: list[int],
+                   block_tables: torch.Tensor,
+                   scale: float,
+                   window_size_left: Optional[int] = None,
+                   window_size_right: Optional[int] = None,
+                   soft_cap: Optional[float] = None,
+                   is_paged: Optional[bool] = True,
+                   casual: Optional[bool] = False,
+                   sink: Optional[torch.Tensor] = None,
+                   q_descale: Optional[torch.Tensor] = None,
+                   k_descale: Optional[torch.Tensor] = None,
+                   v_descale: Optional[torch.Tensor] = None,
+                   is_fp8kv: bool = False,
+                   is_fp8_query: bool = False,
+                   dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+    num_seqs = len(query_lens)
+    block_tables = block_tables.cpu().numpy()
+    if is_paged:
+        _, block_size, num_kv_heads, head_size = key_cache.shape
+        v_head_size = value_cache.shape[-1]
+    else:
+        _, num_kv_heads, head_size = key_cache.shape
+        v_head_size = value_cache.shape[-1]
+
+    if is_fp8_query:
+        query = (query.to(torch.float32) * q_descale).to(dtype)
+
+    outputs: list[torch.Tensor] = []
+    start_idx = 0
+    start_idx_kv = 0
+    for i in range(num_seqs):
+        query_len = query_lens[i]
+        kv_len = kv_lens[i]
+        q = query[start_idx:start_idx + query_len] * scale
+
+        if is_paged:
+            num_kv_blocks = (kv_len + block_size - 1) // block_size
+            block_indices = block_tables[i, :num_kv_blocks]
+
+            k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
+            k = k[:kv_len]
+            v = value_cache[block_indices].view(-1, num_kv_heads, v_head_size)
+            v = v[:kv_len]
+        else:
+            k = key_cache[start_idx_kv:start_idx_kv + kv_len]
+            v = value_cache[start_idx_kv:start_idx_kv + kv_len]
+
+        if q.shape[1] != k.shape[1]:
+            k = torch.repeat_interleave(k, q.shape[1] // k.shape[1],
+                                        dim=1).contiguous()
+            v = torch.repeat_interleave(v, q.shape[1] // v.shape[1],
+                                        dim=1).contiguous()
+
+        if is_fp8kv:
+            k = (k.to(torch.float32) * k_descale).to(dtype)
+            v = (v.to(torch.float32) * v_descale).to(dtype)
+        attn = torch.einsum("qhd,khd->hqk", q, k).float()
+        empty_mask = torch.ones(query_len, kv_len)
+        mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
+        if window_size_right > 0 or window_size_left > 0:
+            if window_size_right < 0:
+                window_size_right = max(kv_lens)
+            if window_size_left < 0:
+                window_size_left = max(kv_lens)
+
+            mask_right = torch.triu(empty_mask,
+                                    diagonal=kv_len - query_len +
+                                    window_size_right + 1).bool()
+            mask_left = torch.triu(empty_mask,
+                                   diagonal=kv_len - query_len -
+                                   window_size_left).bool().logical_not()
+            mask_local = mask_right | mask_left
+            attn.masked_fill_(mask_local, float("-inf"))
+        if soft_cap is not None:
+            attn = soft_cap * torch.tanh(attn / soft_cap)
+        if casual:
+            attn.masked_fill_(mask, float("-inf"))
+        if sink is not None:
+            sink_expanded = sink.view(sink.size()[0], 1,
+                                      1).expand(attn.size()[0],
+                                                attn.size()[1], 1)
+            attn = torch.cat([attn, sink_expanded], dim=-1)
+        attn = torch.softmax(attn, dim=-1).to(v.dtype)
+        if sink is not None:
+            attn = attn[..., :-1]
+        out = torch.einsum("hqk,khd->qhd", attn, v)
+
+        outputs.append(out)
+        start_idx += query_len
+        start_idx_kv += kv_len
+
+    return torch.cat(outputs, dim=0)
+
+
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "test_varlen_with_paged_kv": {
+        "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
+        "head_size": [64, 128],
+        "num_heads": [(8, 2)],
+        "num_blocks": [64],
+        "window_size": [(-1, -1), (127, 127)],
+        "is_paged": [True],
+        "stride_pad": [0, 32]
+    },
+    "test_varlen_with_interleaved_paged_kv": {
+        "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
+        "head_size": [64, 128],
+        "num_heads": [(8, 2)],
+        "num_blocks": [64],
+        "window_size": [(-1, -1), (127, 127)],
+    },
+    "test_decode_with_paged_kv": {
+        "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
+        "num_heads": [(8, 2)],
+        "head_size": [64, 128],
+        "num_blocks": [64],
+        "window_size": [(-1, -1), (127, -1)],
+    },
+    "test_decode_with_paged_kv_mla": {
+        "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
+        "num_heads": [(8, 1)],
+        "head_size_kv": [(192, 128)],
+        "num_blocks": [2048],
+    },
+    "test_varlen_with_cross_layer_paged_kv": {
+        "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
+        "head_size": [64, 128],
+        "num_heads": [(8, 2)],
+        "num_blocks": [64],
+        "window_size": [(-1, -1), (127, 127)],
+        "num_layers": [2],
+    },
+    "test_varlen_paged_kv_large_surface_height": {
+        "dtype": [torch.bfloat16],
+        "is_casual": [False],
+    },
+    "test_decode_paged_kv_large_surface_height": {
+        "dtype": [torch.bfloat16],
+    },
+    "test_decode_with_cross_layer_paged_kv": {
+        "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
+        "num_heads": [(8, 2)],
+        "head_size": [64, 128],
+        "num_blocks": [64],
+        "window_size": [(-1, -1), (127, -1)],
+        "num_layers": [2],
+    }
+}
+
+
+@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("soft_cap", SOFT_CAPS)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("fa_version", [2])
+@pytest.mark.parametrize("q_dtype", QDTYPES, ids=format_tc)
+@pytest.mark.parametrize("is_sink", SINK)
+@pytest.mark.parametrize("is_casual", CASUAL)
+@pytest.mark.parametrize("is_paged", PAGED)
+@pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
+@pytest.mark.parametrize("stride_pad", [0, 32])
+@torch.inference_mode()
+def test_varlen_with_paged_kv(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    window_size: tuple[int, int],
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: Optional[float],
+    num_blocks: int,
+    fa_version: int,
+    q_dtype: Optional[torch.dtype],
+    is_sink: bool,
+    is_casual: bool,
+    is_paged: bool,
+    fp8_dtype: Optional[torch.dtype],
+    stride_pad: int,
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    if block_size == 128 and num_blocks == 32768 and head_size >= 192:
+        pytest.skip("skip test cases that may run out of Memory.")
+    if stride_pad > 0 and fp8_dtype is not None:
+        pytest.skip("non-contiguous Q/K/V with FP8 KV cache not tested")
+    if stride_pad > 0 and q_dtype is not None:
+        pytest.skip("non-contiguous Q/K/V with quantized query not tested")
+    # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
+    #     pytest.skip("Flash attention with quantized inputs is only "
+    #                 "supported on version 3 with bfloat16 base type")
+    torch.manual_seed(4242)
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    if stride_pad > 0:
+        padded_head = head_size + stride_pad
+        query_padded = torch.randn(sum(query_lens),
+                                   num_query_heads,
+                                   padded_head,
+                                   dtype=dtype)
+        query_padded[:, :, :head_size] = query
+        query = query_padded[:, :, :head_size]
+        assert not query.is_contiguous()
+        assert query.stride(-1) == 1
+    if is_paged:
+        key_cache = torch.randn(num_blocks,
+                                block_size,
+                                num_kv_heads,
+                                head_size,
+                                dtype=dtype)
+    else:
+        key_cache = torch.randn(sum(kv_lens),
+                                num_query_heads,
+                                head_size,
+                                dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    if stride_pad > 0 and not is_paged:
+        padded_head = head_size + stride_pad
+        k_padded = torch.randn(*key_cache.shape[:-1],
+                                padded_head,
+                                dtype=dtype)
+        k_padded[..., :head_size] = key_cache
+        key_cache = k_padded[..., :head_size]
+        v_padded = torch.randn(*value_cache.shape[:-1],
+                                padded_head,
+                                dtype=dtype)
+        v_padded[..., :head_size] = value_cache
+        value_cache = v_padded[..., :head_size]
+        assert not key_cache.is_contiguous()
+        assert not value_cache.is_contiguous()
+        assert key_cache.stride(-1) == 1
+        assert value_cache.stride(-1) == 1
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    cu_kv_lens = torch.tensor([0] + kv_lens,
+                              dtype=torch.int32).cumsum(dim=0,
+                                                        dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+    sink = None
+    if is_sink:
+        sink = torch.randn(num_query_heads, dtype=dtype)
+
+    maybe_quantized_query = query
+    maybe_quantized_key_cache = key_cache
+    maybe_quantized_value_cache = value_cache
+    q_descale = None  #noqa: F841
+    k_descale = None  #noqa: F841
+    v_descale = None  #noqa: F841
+    scale_shape = (num_seqs, num_kv_heads)
+    is_fp8_query = q_dtype is not None
+    if is_fp8_query:
+        q_descale = (torch.abs(query).max() / 200).to(torch.float32)
+        maybe_quantized_query = (query / q_descale).to(q_dtype)
+    is_fp8kv = fp8_dtype is not None
+    if is_fp8kv:
+        k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
+        v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
+        maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
+        maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
+
+    if is_paged:
+        output = flash_attn_varlen_func(maybe_quantized_query,
+                                        maybe_quantized_key_cache,
+                                        maybe_quantized_value_cache,
+                                        max_query_len,
+                                        cu_query_lens,
+                                        max_kv_len,
+                                        seqused_k=seq_k,
+                                        q_descale=q_descale.expand(scale_shape)
+                                        if q_descale is not None else None,
+                                        k_descale=k_descale.expand(scale_shape)
+                                        if k_descale is not None else None,
+                                        v_descale=v_descale.expand(scale_shape)
+                                        if v_descale is not None else None,
+                                        softmax_scale=scale,
+                                        causal=is_casual,
+                                        block_table=block_tables,
+                                        window_size=window_size,
+                                        s_aux=sink)
+    else:
+        output = flash_attn_varlen_func(maybe_quantized_query,
+                                        maybe_quantized_key_cache,
+                                        maybe_quantized_value_cache,
+                                        max_query_len,
+                                        cu_query_lens,
+                                        max_kv_len,
+                                        cu_seqlens_k=cu_kv_lens,
+                                        q_descale=q_descale.expand(scale_shape)
+                                        if q_descale is not None else None,
+                                        k_descale=k_descale.expand(scale_shape)
+                                        if k_descale is not None else None,
+                                        v_descale=v_descale.expand(scale_shape)
+                                        if v_descale is not None else None,
+                                        softmax_scale=scale,
+                                        causal=is_casual,
+                                        block_table=None,
+                                        window_size=window_size,
+                                        s_aux=sink)
+
+    ref_output = ref_paged_attn(
+        query=query.contiguous(),
+        key_cache=maybe_quantized_key_cache.contiguous(),
+        value_cache=maybe_quantized_value_cache.contiguous(),
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        casual=is_casual,
+        is_paged=is_paged,
+        sink=sink,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        window_size_left=window_size[0],
+        window_size_right=window_size[1],
+        is_fp8kv=is_fp8kv,
+        is_fp8_query=is_fp8_query,
+        dtype=dtype)
+    atol, rtol = 2e-2, 1e-2
+    if q_dtype is not None:
+        atol, rtol = 1.5e-1, 1.5e-1
+    if window_size[0] != -1 or window_size[1] != -1:
+        atol, rtol = 1.5e-2, 1.5e-2
+    if fp8_dtype is not None:
+        atol, rtol = 1.5e-2, 1.5e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("is_sink", SINK)
+@pytest.mark.parametrize("is_casual", CASUAL)
+@torch.inference_mode()
+def test_varlen_with_interleaved_paged_kv(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    window_size: tuple[int, int],
+    dtype: torch.dtype,
+    block_size: int,
+    num_blocks: int,
+    is_sink: bool,
+    is_casual: bool,
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    if block_size == 128 and num_blocks == 32768 and head_size >= 192:
+        pytest.skip("skip test cases that may run out of Memory.")
+
+    torch.manual_seed(42)
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+
+    combined_kv = torch.randn(num_blocks,
+                              2 * block_size,
+                              num_kv_heads,
+                              head_size,
+                              dtype=dtype)
+    key_cache = combined_kv[:, :block_size, :, :]
+    value_cache = combined_kv[:, block_size:, :, :]
+
+    assert key_cache.shape == value_cache.shape
+    assert key_cache.stride(0) == 2 * block_size * num_kv_heads * head_size
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+    sink = None
+    if is_sink:
+        sink = torch.randn(num_query_heads, dtype=dtype)
+
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=is_casual,
+                                    block_table=block_tables,
+                                    window_size=window_size,
+                                    s_aux=sink)
+
+    key_cache_ref = key_cache.contiguous()
+    value_cache_ref = value_cache.contiguous()
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache_ref,
+                                value_cache=value_cache_ref,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=is_casual,
+                                is_paged=True,
+                                sink=sink,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1])
+
+    atol, rtol = 1e-2, 1e-2
+    if window_size[0] != -1 or window_size[1] != -1 or dtype == torch.bfloat16:
+        atol, rtol = 1.5e-2, 1.5e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize("seq_lens",
+                         [[(1, 523), (1, 37), (1, 2011)], [(1, 13000)]])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("soft_cap", SOFT_CAPS)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("fa_version", [2])
+@pytest.mark.parametrize("q_dtype", QDTYPES, ids=format_tc)
+@pytest.mark.parametrize("is_sink", SINK)
+@pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
+@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
+@torch.inference_mode()
+def test_decode_with_paged_kv(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: Optional[float],
+    num_blocks: int,
+    fa_version: int,
+    q_dtype: Optional[torch.dtype],
+    is_sink: bool,
+    fp8_dtype: Optional[torch.dtype],
+    window_size: tuple[int, int],
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    # # FIXME: remove skip
+    # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
+    #     pytest.skip("Flash attention with quantized inputs is only "
+    #                 "supported on version 3 with bfloat16 base type")
+    # NOTE: head_size=512 + block_size>=128 was previously skipped because the
+    # kv_tile=_128 decode policy + head_size=512 ShapePV exceeded SLM. The
+    # _128 policy is no longer dispatched; all multiples of 64 use the
+    # kv_tile=_64 policy (see paged_decode_utils.hpp::dispatch_by_page_size),
+    # so SLM usage is independent of block_size for block_size>=64. The
+    # head_size=512 case has been verified to pass for all BLOCK_SIZES.
+    if num_heads == (16, 1) and head_size == 256:
+        pytest.skip("skip test cases that may run out of SLM.")
+    if block_size == 128 and num_blocks == 32768 and head_size >= 192:
+        pytest.skip("skip test cases that may run out of Memory.")
+    if is_sink and window_size != (-1, -1):
+        pytest.skip("sink not supported with sliding window")
+    if (window_size[0] != -1 or window_size[1] != -1) and (
+            os.getenv("SKIP_HANG_KERNEL") == "1"):
+        pytest.skip("skip local attn to avoid runtime hang on CI.")
+    torch.manual_seed(42)
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+    sink = None
+    if is_sink:
+        sink = torch.randn(num_query_heads, dtype=dtype)
+
+    maybe_quantized_query = query
+    maybe_quantized_key_cache = key_cache
+    maybe_quantized_value_cache = value_cache
+    q_descale = None  #noqa: F841
+    k_descale = None  #noqa: F841
+    v_descale = None  #noqa: F841
+    scale_shape = (num_seqs, num_kv_heads)
+    if q_dtype is not None:
+        # QKV are drawn from N(0, 1): no need for a fp8 scaling factor
+        maybe_quantized_query = query.to(q_dtype)
+        maybe_quantized_key_cache = key_cache.to(q_dtype)
+        maybe_quantized_value_cache = value_cache.to(q_dtype)
+
+        scale_shape = (num_seqs, num_kv_heads)
+        q_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
+        k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
+        v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
+    is_fp8kv = False
+    if fp8_dtype is not None:
+        is_fp8kv = True
+        k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
+        v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
+        maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
+        maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
+
+    output = flash_attn_varlen_func(maybe_quantized_query,
+                                    maybe_quantized_key_cache,
+                                    maybe_quantized_value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=False,
+                                    block_table=block_tables,
+                                    k_descale=k_descale.expand(scale_shape)
+                                    if k_descale is not None else None,
+                                    v_descale=v_descale.expand(scale_shape)
+                                    if v_descale is not None else None,
+                                    window_size=window_size,
+                                    s_aux=sink)
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=maybe_quantized_key_cache,
+                                value_cache=maybe_quantized_value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                sink=sink,
+                                k_descale=k_descale,
+                                v_descale=v_descale,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1],
+                                is_fp8kv=is_fp8kv,
+                                dtype=dtype)
+    atol, rtol = 1e-2, 1e-2
+    if q_dtype is not None:
+        atol, rtol = 1.5e-1, 1.5e-1
+    if fp8_dtype is not None:
+        atol, rtol = 1.5e-2, 1.5e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+# Large GQA / MQA ratios (num_heads_q / num_heads_kv > 16). The decode kernel
+# tiles the packed GQA head-group across the grid's Q dimension, so ratios that
+# exceed the qgroup tile size (8/16) are supported. Falcon-7B uses MQA with
+# 71 query heads and a single KV head.
+@pytest.mark.parametrize("seq_lens", [[(1, 523), (1, 37), (1, 211)],
+                                      [(1, 13000)]])
+@pytest.mark.parametrize("num_heads", [(71, 1), (16, 1), (17, 1)])
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@torch.inference_mode()
+def test_decode_large_gqa_ratio(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    block_size: int,
+    causal: bool,
+    num_blocks: int,
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(42)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    num_seqs = len(seq_lens)
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=causal,
+                                    block_table=block_tables,
+                                    window_size=(-1, -1))
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=causal,
+                                is_paged=True,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+    atol, rtol = 1.5e-2, 1.5e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize("seq_lens",
+                         [[(1, 523), (1, 37), (1, 2011)], [(1, 13000)]])
+@pytest.mark.parametrize("num_heads", [(8, 2)])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("num_blocks", [2048])
+@pytest.mark.parametrize(
+    "noncontig_mode",
+    ["strided_rows", "permuted_heads", "sliced_buffer"],
+)
+@torch.inference_mode()
+def test_decode_with_paged_kv_noncontiguous_q(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    block_size: int,
+    num_blocks: int,
+    noncontig_mode: str,
+) -> None:
+    """Paged decode with a non-contiguous query tensor.
+
+    The kernel previously assumed Q was fully contiguous (it builds
+    Q's strides via cute::make_cute_packed_stride). Only stride(-1)==1
+    was checked at the API boundary, so callers passing non-contiguous Q
+    views (slice with stride>1, permuted/transposed, slice of a wider
+    buffer) silently read wrong memory. This test exercises the three
+    common non-contiguous shapes and asserts kernel parity with the
+    reference implementation.
+    """
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(42)
+
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+    total_q = sum(query_lens)
+
+    if noncontig_mode == "strided_rows":
+        # Build a 2x-tall query buffer and take every other row. Resulting
+        # stride(0) = 2 * num_query_heads * head_size, stride(-1) = 1.
+        if total_q == 1:
+            pytest.skip(
+                "strided_rows requires >1 query tokens to be non-contiguous")
+        big_q = torch.randn(total_q * 2,
+                            num_query_heads,
+                            head_size,
+                            dtype=dtype)
+        query_noncontig = big_q[::2]
+    elif noncontig_mode == "permuted_heads":
+        # Allocate as [total_q, head_size, num_query_heads] and permute the
+        # last two dims. Logical shape is [total_q, num_query_heads,
+        # head_size] but stride(1) == 1 and stride(-1) == head_size... so we
+        # additionally make the last dim contiguous via a contiguous head_dim
+        # by allocating [total_q, num_query_heads, head_size] then permuting
+        # heads via an index_select-style stride trick.
+        big_q = torch.randn(total_q,
+                            num_query_heads * 2,
+                            head_size,
+                            dtype=dtype)
+        # take every other head; stride(1) = 2 * head_size, stride(-1) = 1
+        query_noncontig = big_q[:, ::2, :]
+    else:
+        # sliced_buffer: query is a slice of a wider head_size buffer
+        big_q = torch.randn(total_q,
+                            num_query_heads,
+                            head_size * 2,
+                            dtype=dtype)
+        query_noncontig = big_q[..., :head_size]
+        # stride(-1) is still 1, but stride(1) = 2*head_size (non-packed)
+    assert not query_noncontig.is_contiguous(), (
+        "test setup error: query must be non-contiguous")
+    assert query_noncontig.stride(-1) == 1
+    assert query_noncontig.shape == (total_q, num_query_heads, head_size)
+
+    # Reference uses a contiguous copy with identical values.
+    query_ref = query_noncontig.contiguous()
+
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    output = flash_attn_varlen_func(query_noncontig,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=False,
+                                    block_table=block_tables,
+                                    window_size=(-1, -1))
+
+    ref_output = ref_paged_attn(query=query_ref,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+    atol, rtol = 1e-2, 1e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+def ref_softmax_lse(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    query_lens: list[int],
+    kv_lens: list[int],
+    scale: float,
+    casual: bool,
+) -> torch.Tensor:
+    """Compute the reference log-sum-exp of the scaled pre-softmax scores.
+
+    Matches the LSE produced by the xe_2 chunk_prefill kernel:
+        lse[q, h] = log( sum_k exp(scale * (Q[q, h] . K[k, h])) )
+    with optional causal masking. Kernel restricts LSE to
+    Paged=False, Local=False, Sink=False, so this ref mirrors the same.
+    Returns a tensor of shape [num_query_heads, sum(query_lens)] in float32.
+    """
+    num_query_heads = query.shape[1]
+    lse_list: list[torch.Tensor] = []
+    start_q = 0
+    start_kv = 0
+    for query_len, kv_len in zip(query_lens, kv_lens):
+        q = query[start_q:start_q + query_len].float()
+        k = key_cache[start_kv:start_kv + kv_len].float()
+        # GQA: broadcast K heads to Q heads if needed
+        if q.shape[1] != k.shape[1]:
+            k = torch.repeat_interleave(k, q.shape[1] // k.shape[1], dim=1)
+        # [heads, query_len, kv_len]
+        attn = torch.einsum("qhd,khd->hqk", q, k) * scale
+        if casual:
+            mask = torch.triu(
+                torch.ones(query_len, kv_len, device=attn.device),
+                diagonal=kv_len - query_len + 1,
+            ).bool()
+            attn.masked_fill_(mask, float("-inf"))
+        # logsumexp over kv dim -> [heads, query_len]
+        lse = torch.logsumexp(attn, dim=-1)
+        assert lse.shape == (num_query_heads, query_len)
+        lse_list.append(lse)
+        start_q += query_len
+        start_kv += kv_len
+    return torch.cat(lse_list, dim=1)
+
+
+# softmax_lse return is only supported when:
+#   is_paged == False, window_size == (-1,-1) (i.e. !is_local), is_sink == False
+# Causal is orthogonal. Keep the param grid small since the outer loop count
+# multiplies with these.
+#
+# Note on seq_lens: the cases mix single-token (decode-style) sequences with
+# multi-token prefill sequences that span more than one query row per tile.
+# The kernel's LSE write recovers each work-item's true query-row coordinate
+# from the softmax fragment layout, so every q-row of every tile must be
+# populated (no zero rows). This exercises the full SoftmaxLSE=true template
+# path (dispatch, epilogue, write-out) and validates the log-sum-exp math.
+@pytest.mark.parametrize("seq_lens", [
+    [(1, 1328), (1, 18), (1, 463), (1, 37)],
+    [(17, 1328), (1, 18), (130, 463), (5, 37)],
+    [(256, 256), (200, 463)],
+])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [128, 192])
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("is_casual", CASUAL)
+@pytest.mark.parametrize("fa_version", [2])
+@torch.inference_mode()
+def test_varlen_with_softmax_lse(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    is_casual: bool,
+    fa_version: int,
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(4242)
+
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    # Non-paged layout: key_cache uses num_query_heads (pre-GQA broadcast
+    # done by caller in the non-paged path), matching test_varlen_with_paged_kv.
+    key_cache = torch.randn(sum(kv_lens),
+                            num_query_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    cu_kv_lens = torch.tensor([0] + kv_lens,
+                              dtype=torch.int32).cumsum(dim=0,
+                                                        dtype=torch.int32)
+
+    out, softmax_lse = flash_attn_varlen_func(query,
+                                              key_cache,
+                                              value_cache,
+                                              max_query_len,
+                                              cu_query_lens,
+                                              max_kv_len,
+                                              cu_seqlens_k=cu_kv_lens,
+                                              softmax_scale=scale,
+                                              causal=is_casual,
+                                              block_table=None,
+                                              window_size=(-1, -1),
+                                              return_softmax_lse=True)
+
+    # Output shape matches ref, and LSE shape is [num_heads_q, total_seqlen_q]
+    total_q = sum(query_lens)
+    assert softmax_lse.shape == (num_query_heads, total_q), softmax_lse.shape
+    assert softmax_lse.dtype == torch.float32
+
+    # Reference output (reuses the existing helper).
+    ref_output = ref_paged_attn(
+        query=query.contiguous(),
+        key_cache=key_cache.contiguous(),
+        value_cache=value_cache.contiguous(),
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=torch.zeros((len(seq_lens), 1), dtype=torch.int32),
+        scale=scale,
+        casual=is_casual,
+        is_paged=False,
+        sink=None,
+        window_size_left=-1,
+        window_size_right=-1,
+        dtype=dtype,
+    )
+    ref_lse = ref_softmax_lse(
+        query=query.contiguous(),
+        key_cache=key_cache.contiguous(),
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        scale=scale,
+        casual=is_casual,
+    )
+
+    atol, rtol = 2e-2, 1e-2
+    torch.testing.assert_close(out, ref_output, atol=atol, rtol=rtol)
+    # LSE is float32 and computed in log space — compare with a modest
+    # tolerance that covers bf16 Q/K accumulation noise.
+    torch.testing.assert_close(softmax_lse.float(),
+                               ref_lse.float(),
+                               atol=5e-2,
+                               rtol=5e-2)
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("window_size", [(-1, -1), (127, 127)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
+@pytest.mark.parametrize("num_layers", NUM_LAYERS)
+@pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
+@torch.inference_mode()
+def test_varlen_with_cross_layer_paged_kv(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    dtype: torch.dtype,
+    num_layers: int,
+    window_size: tuple[int, int],
+    fp8_dtype: Optional[torch.dtype],
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(4242)
+    num_blocks = NUM_BLOCKS[0]
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+
+    combined_kv_cache = torch.randn(num_blocks,
+                                    num_layers,
+                                    2,
+                                    block_size,
+                                    num_kv_heads,
+                                    head_size,
+                                    dtype=dtype)
+    key_cache = combined_kv_cache[:, 0, 0, :, :, :]
+    value_cache = combined_kv_cache[:, 0, 1, :, :, :]
+    assert key_cache.shape == value_cache.shape
+    assert key_cache.stride(0) == num_layers * 2 * block_size * \
+       num_kv_heads * head_size
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    maybe_quantized_query = query
+    maybe_quantized_key_cache = key_cache
+    maybe_quantized_value_cache = value_cache
+    k_descale = None  #noqa: F841
+    v_descale = None  #noqa: F841
+    scale_shape = (num_seqs, num_kv_heads)
+    is_fp8kv = fp8_dtype is not None
+    if is_fp8kv:
+        k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
+        v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
+        maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
+        maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
+
+    output = flash_attn_varlen_func(maybe_quantized_query,
+                                    maybe_quantized_key_cache,
+                                    maybe_quantized_value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    k_descale=k_descale.expand(scale_shape)
+                                    if k_descale is not None else None,
+                                    v_descale=v_descale.expand(scale_shape)
+                                    if v_descale is not None else None,
+                                    softmax_scale=scale,
+                                    causal=False,
+                                    block_table=block_tables,
+                                    window_size=window_size,
+                                    s_aux=None)
+
+    ref_output = ref_paged_attn(
+        query=query.contiguous(),
+        key_cache=maybe_quantized_key_cache.contiguous(),
+        value_cache=maybe_quantized_value_cache.contiguous(),
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        casual=False,
+        is_paged=True,
+        sink=None,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        window_size_left=window_size[0],
+        window_size_right=window_size[1],
+        is_fp8kv=is_fp8kv,
+        is_fp8_query=False,
+        dtype=dtype)
+    atol, rtol = 2e-2, 1e-2
+    if window_size[0] != -1 or window_size[1] != -1:
+        atol, rtol = 1.5e-2, 1.5e-2
+    if fp8_dtype is not None:
+        atol, rtol = 1.5e-2, 1.5e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+# Regression for the Intel Xe 2D block-load surface-height overflow.
+# The paged-KV mainloop folds the physical block index into the 2D surface
+# height (Y). That field is only 24-bit (max 2**24 = 16,777,216 rows), so when
+# `block_idx * page_stride_rows` exceeds it the address wraps and high blocks
+# silently read zeros -> wrong attention. This is only reachable with a large
+# `block_size` (2048) combined with a large physical page stride (e.g. the
+# offloading KV connector's cross-layer cache), which the other paged-KV tests
+# do not cover (they use block_size in {16, 64, 512}). We deliberately map each
+# sequence's blocks to the TOP of the block pool so that the highest referenced
+# block produces a Y offset above 2**24.
+def _run_large_surface_height_case(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    num_layers: int,
+    dtype: torch.dtype,
+    is_casual: bool,
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(4242)
+
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    blocks_needed = sum((kv_len + block_size - 1) // block_size
+                        for kv_len in kv_lens)
+
+    # Physical page stride (in KV rows) between two consecutive blocks in the
+    # tall 2D K/V surface. The cross-layer interleaved cache inflates it by
+    # `num_layers * 2` (2 = interleaved key/value).
+    page_stride_rows = num_layers * 2 * block_size
+    # Choose the pool so the top block's Y offset exceeds the 24-bit limit while
+    # keeping the allocation reasonable.
+    surface_limit = 1 << 24
+    num_blocks = surface_limit // page_stride_rows + 128
+    assert (num_blocks - 1) * page_stride_rows > surface_limit
+    assert num_blocks >= blocks_needed
+
+    # Skip if the device cannot comfortably hold the cache. Besides the pool
+    # itself, ref_paged_attn calls .contiguous() on the two strided K/V slices,
+    # each materializing a dense copy of every block.
+    bytes_per_elem = torch.tensor([], dtype=dtype).element_size()
+    pool_bytes = (num_blocks * page_stride_rows * num_kv_heads * head_size *
+                  bytes_per_elem)
+    dense_kv_bytes = 2 * (num_blocks * block_size * num_kv_heads * head_size *
+                          bytes_per_elem)
+    needed_bytes = pool_bytes + dense_kv_bytes
+    total_mem = torch.xpu.get_device_properties(0).total_memory
+    if needed_bytes > 0.6 * total_mem:
+        pytest.skip(f"needs ~{needed_bytes / 2**30:.1f} GiB, "
+                    f"device has {total_mem / 2**30:.1f} GiB")
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+
+    combined_kv_cache = torch.randn(num_blocks,
+                                    num_layers,
+                                    2,
+                                    block_size,
+                                    num_kv_heads,
+                                    head_size,
+                                    dtype=dtype)
+    key_cache = combined_kv_cache[:, 0, 0, :, :, :]
+    value_cache = combined_kv_cache[:, 0, 1, :, :, :]
+    assert key_cache.shape == value_cache.shape
+    assert key_cache.stride(0) == page_stride_rows * num_kv_heads * head_size
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    # Map every sequence's logical blocks to distinct physical blocks taken from
+    # the TOP of the pool, guaranteeing the highest physical index (and thus a
+    # Y offset above 2**24) is actually read.
+    block_tables = torch.zeros((num_seqs, max_num_blocks_per_seq),
+                               dtype=torch.int32)
+    next_block = num_blocks - 1
+    for i in range(num_seqs):
+        n = (kv_lens[i] + block_size - 1) // block_size
+        for j in range(n):
+            block_tables[i, j] = next_block
+            next_block -= 1
+
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=is_casual,
+                                    block_table=block_tables,
+                                    window_size=(-1, -1),
+                                    s_aux=None)
+
+    ref_output = ref_paged_attn(
+        query=query.contiguous(),
+        key_cache=key_cache.contiguous(),
+        value_cache=value_cache.contiguous(),
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        casual=is_casual,
+        is_paged=True,
+        window_size_left=-1,
+        window_size_right=-1,
+        dtype=dtype)
+    atol, rtol = 2e-2, 1e-2
+    max_diff = torch.max(torch.abs(output.float() - ref_output.float()))
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol,
+                               msg=f"max abs diff: {max_diff}")
+    torch.xpu.empty_cache()
+
+
+# Prefill path: mixed query lengths exercise the FMHA mainloop.
+@pytest.mark.parametrize("seq_lens", [[(1, 2048), (3, 4096), (5, 2000)]])
+@pytest.mark.parametrize("num_heads", [(8, 2)])
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("block_size", [2048])
+@pytest.mark.parametrize("num_layers", [2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half], ids=format_tc)
+@pytest.mark.parametrize("is_casual", [False, True])
+@torch.inference_mode()
+def test_varlen_paged_kv_large_surface_height(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    num_layers: int,
+    dtype: torch.dtype,
+    is_casual: bool,
+) -> None:
+    _run_large_surface_height_case(seq_lens, num_heads, head_size, block_size,
+                                   num_layers, dtype, is_casual)
+
+
+# Decode counterpart: query_len == 1 per sequence exercises the decode mainloop.
+@pytest.mark.parametrize("seq_lens", [[(1, 2048), (1, 4096), (1, 2000)]])
+@pytest.mark.parametrize("num_heads", [(8, 2)])
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("block_size", [2048])
+@pytest.mark.parametrize("num_layers", [2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half], ids=format_tc)
+@torch.inference_mode()
+def test_decode_paged_kv_large_surface_height(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    num_layers: int,
+    dtype: torch.dtype,
+) -> None:
+    query_lens = [x[0] for x in seq_lens]
+    assert all(q == 1 for q in query_lens), \
+        "decode path requires query_len == 1"
+    _run_large_surface_height_case(seq_lens, num_heads, head_size, block_size,
+                                   num_layers, dtype, is_casual=False)
+
+
+@pytest.mark.parametrize("seq_lens", [[(1, 523), (1, 37), (1, 2011)]])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
+@pytest.mark.parametrize("num_layers", NUM_LAYERS)
+@pytest.mark.parametrize("window_size", [(-1, -1), (127, -1)])
+@pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
+@torch.inference_mode()
+def test_decode_with_cross_layer_paged_kv(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    dtype: torch.dtype,
+    num_layers: int,
+    window_size: tuple[int, int],
+    fp8_dtype: Optional[torch.dtype],
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(42)
+    num_blocks = NUM_BLOCKS[0]
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    combined_kv_cache = torch.randn(num_blocks,
+                                    num_layers,
+                                    2,
+                                    block_size,
+                                    num_kv_heads,
+                                    head_size,
+                                    dtype=dtype)
+    key_cache = combined_kv_cache[:, 0, 0, :, :, :]
+    value_cache = combined_kv_cache[:, 0, 1, :, :, :]
+    assert key_cache.shape == value_cache.shape
+    assert key_cache.stride(0) == num_layers * 2 * block_size * \
+       num_kv_heads * head_size
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+    maybe_quantized_query = query
+    maybe_quantized_key_cache = key_cache
+    maybe_quantized_value_cache = value_cache
+    k_descale = None  #noqa: F841
+    v_descale = None  #noqa: F841
+    scale_shape = (num_seqs, num_kv_heads)
+    is_fp8kv = False
+    if fp8_dtype is not None:
+        is_fp8kv = True
+        k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
+        v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
+        maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
+        maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
+
+    output = flash_attn_varlen_func(maybe_quantized_query,
+                                    maybe_quantized_key_cache,
+                                    maybe_quantized_value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=False,
+                                    block_table=block_tables,
+                                    k_descale=k_descale.expand(scale_shape)
+                                    if k_descale is not None else None,
+                                    v_descale=v_descale.expand(scale_shape)
+                                    if v_descale is not None else None,
+                                    window_size=window_size,
+                                    s_aux=None)
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=maybe_quantized_key_cache.contiguous(),
+                                value_cache=maybe_quantized_value_cache.contiguous(),
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                sink=None,
+                                k_descale=k_descale,
+                                v_descale=v_descale,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1],
+                                is_fp8kv=is_fp8kv,
+                                dtype=dtype)
+    atol, rtol = 1e-2, 1e-2
+    if fp8_dtype is not None:
+        atol, rtol = 1.5e-2, 1.5e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+# Speculative-decoding fast path: a uniform, small, causal query length per
+# sequence (q_len = num_speculative_tokens + 1) must be routed to the split-K
+# decode kernel and still match the causal reference exactly.
+@pytest.mark.parametrize("q_len", [2, 3, 4])
+@pytest.mark.parametrize("seq_lens", [[(1328, ), (18, ), (463, )],
+                                      [(1025, ), (523, ), (37, ), (200, )]])
+@pytest.mark.parametrize("num_heads", [(8, 2), (16, 1)])
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("block_size", [16, 32, 64])
+@pytest.mark.parametrize("window_size", [(-1, -1), (256, 0)])
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("is_sink", [False, True])
+@pytest.mark.parametrize("num_blocks", [4096])
+@torch.inference_mode()
+def test_spec_decode_uniform_qlen(
+    q_len: int,
+    seq_lens: list[tuple[int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    window_size: tuple[int, int],
+    dtype: torch.dtype,
+    is_sink: bool,
+    num_blocks: int,
+) -> None:
+    import vllm_xpu_kernels.flash_attn_interface as fai
+
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(4242)
+
+    num_seqs = len(seq_lens)
+    query_lens = [q_len] * num_seqs
+    kv_lens = [x[0] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks, (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+    sink = torch.randn(num_query_heads, dtype=dtype) if is_sink else None
+
+    # Confirm the spec-decode fast path is actually taken.
+    orig_spec = fai._spec_decode_varlen_fwd
+    used = {"flag": False, "q_len": 0}
+
+    def _traced(*args, **kwargs):
+        used["flag"] = True
+        used["q_len"] = args[0].shape[0] // (args[4].numel() - 1)
+        return orig_spec(*args, **kwargs)
+
+    fai._spec_decode_varlen_fwd = _traced
+    try:
+        output = flash_attn_varlen_func(query,
+                                        key_cache,
+                                        value_cache,
+                                        q_len,
+                                        cu_query_lens,
+                                        max_kv_len,
+                                        seqused_k=seq_k,
+                                        softmax_scale=scale,
+                                        causal=True,
+                                        block_table=block_tables,
+                                        window_size=list(window_size),
+                                        s_aux=sink)
+    finally:
+        fai._spec_decode_varlen_fwd = orig_spec
+
+    assert used["flag"] and used["q_len"] == q_len, \
+        "speculative-decode fast path was not taken"
+
+    ref_output = ref_paged_attn(query=query.contiguous(),
+                                key_cache=key_cache.contiguous(),
+                                value_cache=value_cache.contiguous(),
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=True,
+                                is_paged=True,
+                                sink=sink,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1],
+                                dtype=dtype)
+    atol, rtol = 2e-2, 1e-2
+    if window_size[0] != -1 or window_size[1] != -1:
+        atol, rtol = 1.5e-2, 1.5e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()

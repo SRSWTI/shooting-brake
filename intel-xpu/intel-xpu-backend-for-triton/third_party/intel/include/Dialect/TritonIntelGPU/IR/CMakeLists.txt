@@ -1,0 +1,13 @@
+set(LLVM_TARGET_DEFINITIONS TritonIntelGPUOps.td)
+mlir_tablegen(Dialect.h.inc -gen-dialect-decls -dialect=ttig)
+mlir_tablegen(Dialect.cpp.inc -gen-dialect-defs -dialect=ttig)
+mlir_tablegen(Ops.h.inc -gen-op-decls)
+mlir_tablegen(Ops.cpp.inc -gen-op-defs)
+add_public_tablegen_target(TritonIntelGPUTableGen)
+
+set(LLVM_TARGET_DEFINITIONS TritonIntelGPUAttrDefs.td)
+mlir_tablegen(TritonIntelGPUAttrDefs.h.inc -gen-attrdef-decls --attrdefs-dialect=ttig)
+mlir_tablegen(TritonIntelGPUAttrDefs.cpp.inc -gen-attrdef-defs --attrdefs-dialect=ttig)
+mlir_tablegen(TritonIntelGPUEnums.h.inc -gen-enum-decls)
+mlir_tablegen(TritonIntelGPUEnums.cpp.inc -gen-enum-defs)
+add_public_tablegen_target(TritonIntelGPUAttrDefsIncGen)

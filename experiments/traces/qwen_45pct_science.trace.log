@@ -1,0 +1,254 @@
+# qwen36 captured trace: science
+# STDERR
+== qwen36 Phase-2 engine | cache=256/layer bits=4 pilot=0 wide=1 hot=0 smooth=0.30 conf=0.92 ==
+[tok] loaded 248044 pieces (max id 248043) from /home/shooting-brake007/.cache/huggingface/hub/models--Kreuzzelg--qwen36-35b-a3b-colibri-i4-gs64/snapshots/c619aa594ad1e70af82168fb6b4878427896e21c/tokenizer.json
+[enc] prompt tokens: 95 | generating 512 new tokens
+[enc] EOS stopping disabled for fixed-length trace
+[meta] loaded: q_heads=16 kv_heads=2 head_dim=256 q_head_dim=512 k_head_dim=256 v_head_dim=256 o_in=4096 rotary_dim=64 n_experts=256 topk=8 inter=512 shared_inter=512 n_group=1 topk_group=1 attn_output_gate=1 n_active=10
+[meta] DeltaNet: vheads=32 kheads=16 kdim=128 vdim=128 convk=4 conv_dim=8192
+resident weights loaded in 4.9s | RSS after load: 9.25 GB
+[CUDA] device 0: NVIDIA GeForce RTX 5090, 33.7 GB VRAM, sm_120
+[qwen-cuda] dense/state/scratch reserved 2.74 GB, KV capacity 8192
+[dense-i8] 292 matrices quantized in 0.8 s, 7.2 GB f32 freed
+[qtier] dev 0: 27.9 GB remaining, final expert budget 26.9 GB (~16310 experts)
+[qtier] HEAT_FILE geladen: /tmp/qwen_45pct_science_captured.bin
+[b70_moe] Intel(R) Arc(TM) Pro B70 Graphics: K-major SLM ESIMD, 4600 slots, gs=64, 7.16 GiB
+[b70_tier] active: capacity 4600 compact B70 slots
+[qtier] ownership target: CUDA 5640 (55.1%) | B70 4600 (44.9%)
+[qtier] VRAM-Experten-Tier aktiv: 1 Device(s), 1.69 MB/Experte
+[gpu] MoE experts -> CUDA VRAM tier
+[qwen36] int4 packed weights detected — unpacking to int8 in slot
+[qtier] Warmstart (parallel): alle 10240 Experten im RAM (int8 nur für Nicht-Residente), 10240 im VRAM — 11.1 s
+Generated (512 new tokens):
+Text : [b70_moe] issue-to-take avg 99.7 us (100 calls)
+[b70_moe] issue-to-take avg 75.2 us (200 calls)
+[b70_moe] issue-to-take avg 66.7 us (300 calls)
+[b70_moe] issue-to-take avg 61.8 us (400 calls)
+[b70_moe] issue-to-take avg 58.9 us (500 calls)
+[b70_moe] issue-to-take avg 56.6 us (600 calls)
+[b70_moe] issue-to-take avg 55.0 us (700 calls)
+[b70_moe] issue-to-take avg 53.9 us (800 calls)
+[b70_moe] issue-to-take avg 53.0 us (900 calls)
+[b70_moe] issue-to-take avg 52.3 us (1000 calls)
+[b70_moe] issue-to-take avg 51.7 us (1100 calls)
+[b70_moe] issue-to-take avg 51.3 us (1200 calls)
+[b70_moe] issue-to-take avg 51.0 us (1300 calls)
+[b70_moe] issue-to-take avg 50.6 us (1400 calls)
+[b70_moe] issue-to-take avg 50.3 us (1500 calls)
+[b70_moe] issue-to-take avg 50.1 us (1600 calls)
+[b70_moe] issue-to-take avg 50.0 us (1700 calls)
+[b70_moe] issue-to-take avg 50.0 us (1800 calls)
+[b70_moe] issue-to-take avg 50.0 us (1900 calls)
+[b70_moe] issue-to-take avg 50.2 us (2000 calls)
+[b70_moe] issue-to-take avg 50.6 us (2100 calls)
+[b70_moe] issue-to-take avg 50.6 us (2200 calls)
+[b70_moe] issue-to-take avg 50.5 us (2300 calls)
+[b70_moe] issue-to-take avg 50.7 us (2400 calls)
+[b70_moe] issue-to-take avg 50.8 us (2500 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 50.9 us (2600 calls)
+[b70_moe] issue-to-take avg 50.9 us (2700 calls)
+[b70_moe] issue-to-take avg 50.8 us (2800 calls)
+[b70_moe] issue-to-take avg 50.7 us (2900 calls)
+[b70_moe] issue-to-take avg 50.9 us (3000 calls)
+[b70_moe] issue-to-take avg 51.0 us (3100 calls)
+[b70_moe] issue-to-take avg 51.1 us (3200 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 51.1 us (3300 calls)
+[b70_moe] issue-to-take avg 51.1 us (3400 calls)
+[b70_moe] issue-to-take avg 51.2 us (3500 calls)
+[b70_moe] issue-to-take avg 51.1 us (3600 calls)
+[b70_moe] issue-to-take avg 51.0 us (3700 calls)
+[b70_moe] issue-to-take avg 51.0 us (3800 calls)
+[b70_moe] issue-to-take avg 51.0 us (3900 calls)
+[b70_moe] issue-to-take avg 51.0 us (4000 calls)
+[b70_moe] issue-to-take avg 51.0 us (4100 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 50.9 us (4200 calls)
+[b70_moe] issue-to-take avg 50.9 us (4300 calls)
+[b70_moe] issue-to-take avg 50.9 us (4400 calls)
+[b70_moe] issue-to-take avg 51.0 us (4500 calls)
+[b70_moe] issue-to-take avg 51.1 us (4600 calls)
+[b70_moe] issue-to-take avg 51.1 us (4700 calls)
+[b70_moe] issue-to-take avg 51.1 us (4800 calls)
+[b70_moe] issue-to-take avg 51.1 us (4900 calls)
+[b70_moe] issue-to-take avg 51.2 us (5000 calls)
+[b70_moe] issue-to-take avg 51.1 us (5100 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 51.2 us (5200 calls)
+[b70_moe] issue-to-take avg 51.2 us (5300 calls)
+[b70_moe] issue-to-take avg 51.1 us (5400 calls)
+[b70_moe] issue-to-take avg 51.1 us (5500 calls)
+[b70_moe] issue-to-take avg 51.2 us (5600 calls)
+[b70_moe] issue-to-take avg 51.2 us (5700 calls)
+[b70_moe] issue-to-take avg 51.2 us (5800 calls)
+[b70_moe] issue-to-take avg 51.2 us (5900 calls)
+[b70_moe] issue-to-take avg 51.3 us (6000 calls)
+[b70_moe] issue-to-take avg 51.3 us (6100 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 51.3 us (6200 calls)
+[b70_moe] issue-to-take avg 51.3 us (6300 calls)
+[b70_moe] issue-to-take avg 51.3 us (6400 calls)
+[b70_moe] issue-to-take avg 51.3 us (6500 calls)
+[b70_moe] issue-to-take avg 51.4 us (6600 calls)
+[b70_moe] issue-to-take avg 51.3 us (6700 calls)
+[b70_moe] issue-to-take avg 51.3 us (6800 calls)
+[b70_moe] issue-to-take avg 51.3 us (6900 calls)
+[b70_moe] issue-to-take avg 51.4 us (7000 calls)
+[b70_moe] issue-to-take avg 51.4 us (7100 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 51.5 us (7200 calls)
+[b70_moe] issue-to-take avg 51.5 us (7300 calls)
+[b70_moe] issue-to-take avg 51.5 us (7400 calls)
+[b70_moe] issue-to-take avg 51.5 us (7500 calls)
+[b70_moe] issue-to-take avg 51.5 us (7600 calls)
+[b70_moe] issue-to-take avg 51.6 us (7700 calls)
+[b70_moe] issue-to-take avg 51.5 us (7800 calls)
+[b70_moe] issue-to-take avg 51.5 us (7900 calls)
+[b70_moe] issue-to-take avg 51.5 us (8000 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 51.6 us (8100 calls)
+[b70_moe] issue-to-take avg 51.6 us (8200 calls)
+[b70_moe] issue-to-take avg 51.7 us (8300 calls)
+[b70_moe] issue-to-take avg 51.7 us (8400 calls)
+[b70_moe] issue-to-take avg 51.7 us (8500 calls)
+[b70_moe] issue-to-take avg 51.8 us (8600 calls)
+[b70_moe] issue-to-take avg 51.8 us (8700 calls)
+[b70_moe] issue-to-take avg 51.8 us (8800 calls)
+[b70_moe] issue-to-take avg 51.8 us (8900 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 51.7 us (9000 calls)
+[b70_moe] issue-to-take avg 51.8 us (9100 calls)
+[b70_moe] issue-to-take avg 51.8 us (9200 calls)
+[b70_moe] issue-to-take avg 51.9 us (9300 calls)
+[b70_moe] issue-to-take avg 52.0 us (9400 calls)
+[b70_moe] issue-to-take avg 51.9 us (9500 calls)
+[b70_moe] issue-to-take avg 52.0 us (9600 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 52.1 us (9700 calls)
+[b70_moe] issue-to-take avg 52.2 us (9800 calls)
+[b70_moe] issue-to-take avg 52.3 us (9900 calls)
+[b70_moe] issue-to-take avg 52.3 us (10000 calls)
+[b70_moe] issue-to-take avg 52.4 us (10100 calls)
+[b70_moe] issue-to-take avg 52.4 us (10200 calls)
+[b70_moe] issue-to-take avg 52.4 us (10300 calls)
+[b70_moe] issue-to-take avg 52.4 us (10400 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 52.4 us (10500 calls)
+[b70_moe] issue-to-take avg 52.4 us (10600 calls)
+[b70_moe] issue-to-take avg 52.4 us (10700 calls)
+[b70_moe] issue-to-take avg 52.4 us (10800 calls)
+[b70_moe] issue-to-take avg 52.4 us (10900 calls)
+[b70_moe] issue-to-take avg 52.4 us (11000 calls)
+[b70_moe] issue-to-take avg 52.4 us (11100 calls)
+[b70_moe] issue-to-take avg 52.4 us (11200 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 52.5 us (11300 calls)
+[b70_moe] issue-to-take avg 52.5 us (11400 calls)
+[b70_moe] issue-to-take avg 52.5 us (11500 calls)
+[b70_moe] issue-to-take avg 52.5 us (11600 calls)
+[b70_moe] issue-to-take avg 52.5 us (11700 calls)
+[b70_moe] issue-to-take avg 52.5 us (11800 calls)
+[b70_moe] issue-to-take avg 52.5 us (11900 calls)
+[b70_moe] issue-to-take avg 52.5 us (12000 calls)
+[b70_moe] issue-to-take avg 52.5 us (12100 calls)
+[b70_moe] issue-to-take avg 52.5 us (12200 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 52.5 us (12300 calls)
+[b70_moe] issue-to-take avg 52.5 us (12400 calls)
+[b70_moe] issue-to-take avg 52.5 us (12500 calls)
+[b70_moe] issue-to-take avg 52.5 us (12600 calls)
+[b70_moe] issue-to-take avg 52.5 us (12700 calls)
+[b70_moe] issue-to-take avg 52.5 us (12800 calls)
+[b70_moe] issue-to-take avg 52.4 us (12900 calls)
+[b70_moe] issue-to-take avg 52.4 us (13000 calls)
+[b70_moe] issue-to-take avg 52.4 us (13100 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 52.4 us (13200 calls)
+[b70_moe] issue-to-take avg 52.5 us (13300 calls)
+[b70_moe] issue-to-take avg 52.5 us (13400 calls)
+[b70_moe] issue-to-take avg 52.5 us (13500 calls)
+[b70_moe] issue-to-take avg 52.5 us (13600 calls)
+[b70_moe] issue-to-take avg 52.5 us (13700 calls)
+[b70_moe] issue-to-take avg 52.5 us (13800 calls)
+[b70_moe] issue-to-take avg 52.5 us (13900 calls)
+[b70_moe] issue-to-take avg 52.6 us (14000 calls)
+[b70_moe] issue-to-take avg 52.6 us (14100 calls)
+[b70_moe] issue-to-take avg 52.6 us (14200 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 52.6 us (14300 calls)
+[b70_moe] issue-to-take avg 52.6 us (14400 calls)
+[b70_moe] issue-to-take avg 52.7 us (14500 calls)
+[b70_moe] issue-to-take avg 52.7 us (14600 calls)
+[b70_moe] issue-to-take avg 52.7 us (14700 calls)
+[b70_moe] issue-to-take avg 52.7 us (14800 calls)
+[b70_moe] issue-to-take avg 52.8 us (14900 calls)
+[b70_moe] issue-to-take avg 52.8 us (15000 calls)
+[b70_moe] issue-to-take avg 52.8 us (15100 calls)
+[b70_moe] issue-to-take avg 52.8 us (15200 calls)
+[b70_moe] issue-to-take avg 52.9 us (15300 calls)
+[timers] Fenster: moe 0 ms/token (letzte 32)
+[b70_moe] issue-to-take avg 52.9 us (15400 calls)
+[b70_moe] issue-to-take avg 52.9 us (15500 calls)
+[b70_moe] issue-to-take avg 52.9 us (15600 calls)
+[b70_moe] issue-to-take avg 52.9 us (15700 calls)
+[b70_moe] issue-to-take avg 52.9 us (15800 calls)
+[b70_moe] issue-to-take avg 52.9 us (15900 calls)
+[b70_moe] issue-to-take avg 52.9 us (16000 calls)
+[b70_moe] issue-to-take avg 53.0 us (16100 calls)
+[b70_moe] issue-to-take avg 53.0 us (16200 calls)
+[b70_moe] issue-to-take avg 53.1 us (16300 calls)
+
+TTFT: 2.16 s (time to first token)
+[timers] decode: 511 tokens  (shared/router sind Teilmengen von moe_total)
+[timers]   deltanet         0.0 ms      0.00 ms/token
+[timers]   attention        0.0 ms      0.00 ms/token
+[timers]   moe_total        0.0 ms      0.00 ms/token
+[timers]   (shared)         0.0 ms      0.00 ms/token
+[timers]   (router)         0.0 ms      0.00 ms/token
+[timers]   lm_head          0.0 ms      0.00 ms/token
+[timers]   SUMME            0.0 ms      0.00 ms/token
+[timers]   step() gesamt: 54.7 ms/token (Rest ausserhalb der Phasen: 54.7)
+[timers] prefill: 95 tokens  dn=0 attn=0 moe=0(sh=0 rt=0) head=0 ms
+[qtier] resident 5640/10240 Experten | uploads 5640 | actual CPU fallback 0 (0 recovery) | B70 routes 31074 | q_skips 0
+[qtier]   dev 0: hits 162846 | 17272 Tensoren, 11.59 GB VRAM belegt (Budget 26.94 GB)
+[qtier] route share: CUDA 84.0% | B70 16.0% | CPU 0.0% | LFRU-Swaps 0
+[b70_tier] 4600/4600 compact slots claimed (44.9% of 10240 experts), 0 dispatched last call
+
+PEAK RSS: 22.35 GB
+Expert cache hit rate: 95.0% (hit=193920 miss=10240)
+Speed: 17.00 tok/s (30.1s for 512 tokens)
+[qtier] HEAT_FILE gespeichert: /tmp/qwen_45pct_science_captured.bin
+[b70_moe] final dispatch avg 53.1 us (16319 calls)
+[b70_moe] shutdown
+
+# STDOUT
+
+
+
+Here's a thinking thinking sequence
+
+1.  **Deconstruct the user's request:**
+    *   Topic: Rigorous scientific review of evidence for plate tectonics.
+    *   Required coverage: Seafloor spreading, symmetric magnetic striping, earthquake/volcano distributions, ocean-floor age, paleomagnetism, fossil/rock correlations, modern GPS measurements, mantle convection, subduction-zone observations.
+    *   Specific requirements: Explain one major limitation of Wegener's early theory, distinguish evidence from mechanism, address historical objections, conclude by showing how independent observations form one testable model.
+
+2.  **Structure the review:**
+    *   A scientific review needs a logical flow. I should structure it like a mini-review paper or a comprehensive textbook chapter.
+    *   *Proposed Structure:*
+        *   Title: Rigorous and descriptive.
+        *   Abstract/Introduction: Define plate tectonics, mention the transition from continental drift, and state the thesis (convergence of independent lines of evidence).
+        *   Historical Context & Wegener's Limitation: Address the specific requirement about Wegener.
+        *   Evidence Categories: Group the required topics logically.
+        *   *Grouping Idea:*
+        *   *Geometric/Geographic Evidence:* Fossils, rocks, paleomagnetism.
+        *   *Oceanic Evidence:* Seafloor spreading, magnetic striping, age, subduction.
+        *   *Kinematic/Modern Evidence:* Earthquakes, volcanoes, GPS.
+        *   *Dynamic/Mechanistic Evidence:* Mantle convection.
+        *   *Distinction:* Evidence vs. Mechanism.
+        *   *Historical Objections:* Address these.
+        *   *Synthesis/Conclusion:* Independent observations forming a testable model.
+
+3.  **Draft content - Section by Section (Mental or rough text generation):**
+    *   *Wegener's Limitation:* The user asked for *one* major limitation. The most famous is the "driving mechanism." Wegener proposed tidal forces and centrifugal force, which were calculated to be orders of magnitude too weak. This is the best choice.
+    *   *Evidence vs. Mechanism:* I need to explicitly make this distinction. Evidence is *that* plates move; mechanism is *why* they move. Paleomagnetism, fossils, etc., are evidence

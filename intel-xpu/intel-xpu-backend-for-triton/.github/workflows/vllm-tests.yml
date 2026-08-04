@@ -1,0 +1,53 @@
+name: vLLM tests
+run-name: ${{ inputs.run_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: Runner label, keep empty for default
+        type: string
+        default: ""
+      vllm_pin:
+        description: vLLM pin (commit hash), keep empty for default
+        type: string
+        default: ""
+      vllm_xpu_kernels_pin:
+        description: vLLM XPU kernels pin (commit hash), keep empty for default
+        type: string
+        default: ""
+      skip_list:
+        description: Skip list
+        type: string
+        default: ""
+      run_name:
+        description: Custom run name
+        type: string
+        default: "vLLM tests"
+      ignore_errors:
+        description: Ignore test errors
+        type: boolean
+        default: false
+      use_pyenv_python:
+        description: Use Python built with pyenv
+        type: boolean
+        default: true
+      use_branch_wheel:
+        description: Use prebuilt vLLM XPU kernels wheel from the current branch (must have a successful nightly build)
+        type: boolean
+        default: false
+
+permissions: read-all
+
+jobs:
+  vllm-tests:
+    uses: ./.github/workflows/vllm-tests-reusable.yml
+    with:
+      runner_label: ${{ inputs.runner_label }}
+      vllm_pin: ${{ inputs.vllm_pin }}
+      vllm_xpu_kernels_pin: ${{ inputs.vllm_xpu_kernels_pin }}
+      skip_list: ${{ inputs.skip_list }}
+      ignore_errors: ${{ inputs.ignore_errors }}
+      use_pyenv_python: ${{ inputs.use_pyenv_python }}
+      use_branch_wheel: ${{ inputs.use_branch_wheel }}
+    secrets: inherit

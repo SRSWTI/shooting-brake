@@ -1,0 +1,6 @@
+add_subdirectory(Dialect)
+add_subdirectory(GPUToTritonGEN)
+add_subdirectory(TritonAnnotateModule)
+add_subdirectory(TritonGENToLLVM)
+add_subdirectory(TritonGENToSPIRV)
+add_subdirectory(TritonIntelGPUToLLVM)

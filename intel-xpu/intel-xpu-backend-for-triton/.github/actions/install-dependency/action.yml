@@ -1,0 +1,141 @@
+name: install-dependency
+description: Build and install a dependency python package from git repo
+inputs:
+  package:
+    description: Package name
+    required: true
+  repository:
+    description: Repository name with owner
+    required: true
+  ref:
+    description: Commit id or branch name in package repository
+    default: ""
+  try-tag-prefix:
+    description: Try to use a tag with this prefix if commit/branch specified in `ref` doesn't exist
+    default: ""
+  extra-cache-key:
+    description: Cache key suffix
+    default: ""
+  workspace:
+    description: Workspace directory
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - name: Get package commit id
+      id: commit-id
+      uses: ./.github/actions/get-commit-id
+      with:
+        repository: ${{ inputs.repository }}
+        branch: ${{ inputs.ref }}
+        try-tag-prefix: ${{ inputs.try-tag-prefix }}
+
+    - name: Identify Python version
+      shell: bash
+      run: |
+        if [[ -f .venv/Scripts/activate ]]; then
+          source .venv/Scripts/activate
+        fi
+        if [[ -z "$PYTHON_VERSION" ]]; then
+          PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info[0]}.{ sys.version_info[1]}")')"
+          echo "PYTHON_VERSION=$PYTHON_VERSION" >> "$GITHUB_ENV"
+        fi
+
+    - name: Generate cache key
+      shell: bash
+      run: |
+        DEPENDENCY_CACHE_KEY="${{ inputs.package }}-$PYTHON_VERSION-$(echo ${{ steps.commit-id.outputs.commit_id }} ${{ inputs.extra-cache-key }} | sha256sum - | cut -d\  -f1)"
+        echo "DEPENDENCY_CACHE_KEY=$DEPENDENCY_CACHE_KEY" | tee -a "$GITHUB_ENV"
+        if [[ "${{ inputs.workspace }}" ]]; then
+          echo "PACKAGE_PATH=${{ inputs.workspace }}/${{ inputs.package }}" | tee -a "$GITHUB_ENV"
+        else
+          echo "PACKAGE_PATH=${{ inputs.package }}" | tee -a "$GITHUB_ENV"
+        fi
+
+    - name: Try to load package from a cache
+      id: cache-load
+      uses: ./.github/actions/load
+      with:
+        path: ${{ env.PACKAGE_PATH }}
+        key: ${{ env.DEPENDENCY_CACHE_KEY }}
+
+    - name: Clone package repo
+      if: steps.cache-load.outputs.status == 'miss'
+      uses: actions/checkout@v5
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ steps.commit-id.outputs.commit_id }}
+        submodules: recursive
+        path: ${{ inputs.package }}
+
+    - name: Move package repo to the workspace
+      if: inputs.workspace != '' && steps.cache-load.outputs.status == 'miss'
+      shell: bash
+      run: |
+        rm -rf ${{ env.PACKAGE_PATH }}
+        mv -T ${{ inputs.package }} ${{ env.PACKAGE_PATH }}
+
+    - name: Build package wheels (Linux)
+      if: runner.os == 'Linux' && steps.cache-load.outputs.status == 'miss'
+      shell: bash
+      run: |
+        source /opt/intel/oneapi/setvars.sh
+
+        cd ${{ env.PACKAGE_PATH }}
+        if [[ -f setup.py ]]; then
+          python setup.py bdist_wheel
+        elif [[ -f pyproject.toml ]]; then
+          pip install build
+          python -m build
+        else
+          echo Error: setup.py and pyproject.toml not found
+          exit 1
+        fi
+
+    - name: Build package wheels (Windows)
+      if: runner.os == 'Windows' && steps.cache-load.outputs.status == 'miss'
+      shell: pwsh
+      run: |
+        .venv\Scripts\activate.ps1
+        Invoke-BatchFile "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
+
+        bash -c "
+        cd ${{ env.PACKAGE_PATH }}
+        if [[ -f setup.py ]]; then
+          python setup.py bdist_wheel
+        elif [[ -f pyproject.toml ]]; then
+          pip install build
+          python -m build
+        else
+          echo Error: setup.py and pyproject.toml not found
+          exit 1
+        fi
+        "
+
+    - name: Install package wheels (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        source /opt/intel/oneapi/setvars.sh
+
+        pip install ${{ env.PACKAGE_PATH }}/dist/*.whl
+        python -c "import ${{ inputs.package }}; print(${{ inputs.package }}.__version__)"
+
+    - name: Install package wheels (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        .venv\Scripts\activate.ps1
+        Invoke-BatchFile "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
+
+        bash -c "
+        pip install ${{ env.PACKAGE_PATH }}/dist/*.whl
+        python -c 'import ${{ inputs.package }}; print(${{ inputs.package }}.__version__)'
+        "
+
+    - name: Save package to a cache
+      if: ${{ steps.cache-load.outputs.status == 'miss' }}
+      uses: ./.github/actions/save
+      with:
+        path: ${{ steps.cache-load.outputs.path }}
+        dest: ${{ steps.cache-load.outputs.dest }}

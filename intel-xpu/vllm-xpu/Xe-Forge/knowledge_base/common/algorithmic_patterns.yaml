@@ -1,0 +1,69 @@
+# Algorithmic Patterns — generic (applies to Triton, SYCL, and all XPU kernels)
+# Stage: algorithmic
+#
+# These patterns cover algorithmic-level optimizations that are independent
+# of the underlying kernel DSL (Triton, SYCL, etc.).
+#
+# Triton-specific algorithmic patterns are in knowledge_base/triton/xpu/algorithmic_patterns.yaml
+
+patterns:
+- id: weight_statistic_precomputation
+  name: Precompute weight-derived statistics once in __init__, not every forward()
+  stage: algorithmic
+  description: 'When a kernel computes a statistic of a frozen weight tensor on every
+
+    forward() call (column sums, row norms, packed transposes, etc.) and
+
+    that statistic depends only on the weight (not the input), it should
+
+    be computed once in __init__ and cached. Recomputing it every call
+
+    wastes bandwidth proportional to the weight size.
+
+
+    This is the model-level analogue of cacheable_intermediate.
+
+    '
+  pattern_before: "def forward(self, x):\n    # Recomputes w_colsum = W.sum(dim=0) every call\n    # W is [N, K] = [8192,\
+    \ 8192] → reads 134MB of W every forward()\n    w_colsum = compute_colsum(self.weight)   # O(N*K) every call\n    return\
+    \ dot_with_colsum(x, w_colsum)\n"
+  pattern_after: "def __init__(self, ...):\n    super().__init__()\n    self.weight = nn.Parameter(...)\n    self._w_colsum:\
+    \ Optional[torch.Tensor] = None\n    self._w_colsum_version = -1\n\ndef _ensure_colsum(self):\n    cur_ver = int(self.weight._version)\n\
+    \    if self._w_colsum is None or self._w_colsum_version != cur_ver:\n        self._w_colsum = compute_colsum(self.weight.data)\n\
+    \        self._w_colsum_version = cur_ver\n\ndef forward(self, x):\n    self._ensure_colsum()\n    # W never read in hot\
+    \ path — only x and w_colsum (~16KB)\n    return dot_with_colsum(x, self._w_colsum)\n"
+  expected_speedup: Up to 83x for W=[8192,8192], batch=100 (eliminates 134MB W read)
+  applies_to:
+  - gemm_reduction
+  - sum_scaling
+  - any kernel with weight_statistic
+- id: sum_matmul_reorder
+  name: Reorder sum(A@B, dim) as A @ B.sum(dim) to reduce total FLOPs
+  stage: algorithmic
+  description: "When computing sum(A @ B, dim=1) where A=[M,K] and B=[K,N]:\n  - Naive: compute full [M,N] product then sum\
+    \ rows → O(M*N*K + M*N)\n  - Optimal: precompute b_colsum = B.sum(dim=0) [K], then A @ b_colsum → O(N*K + M*K)\n\nThis\
+    \ reduces FLOPs from M*N*K to (N+M)*K — for M=N=K=8192 that's 8192x fewer ops.\nValid by distributivity of matrix multiplication\
+    \ over addition.\n"
+  pattern_before: '# Naive: full GEMM then reduce
+
+    out = (x @ W.T)          # [M, N] — O(M*N*K) FLOPs
+
+    out = out.sum(dim=1)     # [M]   — O(M*N) FLOPs
+
+    out = out * scale
+
+    '
+  pattern_after: '# Optimal: reduce W first, then single dot per row
+
+    w_colsum = W.sum(dim=0)  # [K]   — O(N*K) FLOPs, cache in __init__
+
+    out = x @ w_colsum       # [M]   — O(M*K) FLOPs
+
+    out = out * scale
+
+    '
+  expected_speedup: 'O(M*N*K) → O((N+M)*K): ~N/2 = 4096x fewer FLOPs for square matrices'
+  applies_to:
+  - gemm_row_reduction
+  - linear_sum
+  - matmul_reduce

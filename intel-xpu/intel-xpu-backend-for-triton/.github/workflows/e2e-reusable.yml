@@ -1,0 +1,316 @@
+name: E2E reusable workflow
+
+on:
+  workflow_call:
+    secrets:
+      HUGGING_FACE_HUB_TOKEN:
+        required: true
+    inputs:
+      pytorch_ref:
+        description: PyTorch ref, keep empty for default
+        type: string
+        default: ""
+      suite:
+        description: Test suite
+        type: string
+        default: all
+      mode:
+        description: Inference, inference-with-freezing, or training
+        type: string
+        default: all
+      test_mode:
+        description: accuracy or performance
+        type: string
+        default: accuracy
+      dtype:
+        description: Data type
+        type: string
+        default: all
+      models:
+        description: Run all models or a subset
+        type: string
+        default: all
+      check_all_subset_models:
+        description: In "subset" mode, check all subset models
+        type: boolean
+        default: false
+      only_one_model:
+        description: Run only this one model
+        type: string
+        default: ""
+      runner_label:
+        description: Runner label, keep empty for default
+        type: string
+        default: ""
+      TORCH_COMPILE_DEBUG:
+        description: TORCH_COMPILE_DEBUG
+        type: string
+        default: ""
+
+permissions: read-all
+
+env:
+  TRITON_DISABLE_LINE_INFO: 1
+  PYTHON_VERSION: "3.10"
+  BENCHMARK_REPO: pytorch/benchmark
+
+jobs:
+  run_tests:
+    name: Test ${{ inputs.suite }} ${{ inputs.dtype }} ${{ inputs.mode }} ${{ inputs.test_mode }}
+    runs-on: ${{ fromJSON((inputs.runner_label == '' || startsWith(inputs.runner_label, 'max')) && format('["linux", "rolling", "{0}"]', inputs.runner_label || 'max1550') || format('["linux", "{0}"]', inputs.runner_label)) }}
+    timeout-minutes: 720
+    defaults:
+      run:
+        shell: bash -noprofile --norc -eo pipefail -c "source /opt/intel/oneapi/setvars.sh > /dev/null; source {0}"
+    steps:
+      - name: Print inputs
+        run: |
+          cat <<EOF
+          ${{ toJSON(inputs) }}
+          EOF
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Load pip cache
+        id: pip-cache
+        uses: ./.github/actions/load
+        with:
+          path: $HOME/.cache/pip
+          # pip cache per commit id just to minimize network traffic
+          key: pip-$PYTHON_VERSION-$GITHUB_SHA
+
+      - name: Install Python
+        uses: ./.github/actions/setup-python
+        with:
+          python_version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python build dependencies
+        run: |
+          # cmake 3.22.1 does not work with the recent torchaudio: https://github.com/intel/intel-xpu-backend-for-triton/issues/2079
+          # cmake<4.0.0 is required as a workaround for CMake Error at third_party/double-conversion/CMakeLists.txt:1 (cmake_minimum_required)
+          pip install 'cmake<4.0.0' build
+
+      - name: Setup PyTorch
+        id: setup-pytorch
+        uses: ./.github/actions/setup-pytorch
+        with:
+          ref: ${{ inputs.pytorch_ref }}
+
+      - name: Identify pinned versions
+        run: |
+          cd pytorch
+          echo "BENCHMARK_COMMIT_ID=$(<.ci/docker/ci_commit_pins/torchbench.txt)" | tee -a "$GITHUB_ENV"
+          echo "TORCHVISION_COMMIT_ID=$(<.github/ci_commit_pins/vision.txt)" | tee -a "$GITHUB_ENV"
+          echo "TORCHAUDIO_COMMIT_ID=$(<.github/ci_commit_pins/audio.txt)" | tee -a "$GITHUB_ENV"
+          echo "TIMM_COMMIT_ID=$(<.ci/docker/ci_commit_pins/timm.txt)" | tee -a "$GITHUB_ENV"
+
+      - name: Generate Triton cache key
+        id: triton-key
+        run: |
+          COMPOSITE_KEY=$(echo $PYTHON_VERSION $PYTORCH_VERSION $GITHUB_SHA | sha256sum - | cut -d\  -f1)
+          echo "key=triton-$COMPOSITE_KEY" >> $GITHUB_OUTPUT
+
+      - name: Load Triton wheels from a cache
+        id: triton-cache
+        uses: ./.github/actions/load
+        with:
+          path: dist
+          key: ${{ steps.triton-key.outputs.key }}
+
+      - name: Build Triton wheels
+        if: ${{ steps.triton-cache.outputs.status == 'miss' }}
+        uses: ./.github/actions/setup-triton
+        with:
+          command: DEBUG=1 python -m build --wheel --no-isolation
+
+      - name: Install Triton
+        run: |
+          pip install dist/*.whl
+
+      - name: Save Triton wheels to a cache
+        if: ${{ steps.triton-cache.outputs.status == 'miss' }}
+        uses: ./.github/actions/save
+        with:
+          path: ${{ steps.triton-cache.outputs.path }}
+          dest: ${{ steps.triton-cache.outputs.dest }}
+
+      - name: Install python test dependencies
+        run: |
+          pip install pyyaml 'pandas<3.0' scipy psutil
+
+      - name: Install transformers package
+        if: ${{ inputs.suite == 'huggingface' }}
+        run: |
+          cd pytorch
+          pip install -r .ci/docker/ci_commit_pins/huggingface-requirements.txt
+          pip install accelerate
+
+      - name: Install torchvision package
+        if: ${{ inputs.suite == 'timm_models' || inputs.suite == 'torchbench' }}
+        uses: ./.github/actions/install-dependency
+        with:
+          package: torchvision
+          repository: pytorch/vision
+          ref: ${{ env.TORCHVISION_COMMIT_ID }}
+          extra-cache-key: ${{ steps.setup-pytorch.outputs.pytorch_cache_key }}
+
+      - name: Install torchaudio package
+        if: ${{ inputs.suite == 'torchbench' }}
+        uses: ./.github/actions/install-dependency
+        with:
+          package: torchaudio
+          repository: pytorch/audio
+          ref: ${{ env.TORCHAUDIO_COMMIT_ID }}
+          extra-cache-key: ${{ steps.setup-pytorch.outputs.pytorch_cache_key }}
+
+      - name: Install timm package
+        if: ${{ inputs.suite == 'timm_models' || inputs.suite == 'torchbench' }}
+        uses: ./.github/actions/install-dependency
+        with:
+          package: timm
+          repository: huggingface/pytorch-image-models
+          ref: ${{ env.TIMM_COMMIT_ID }}
+          extra-cache-key: ${{ steps.setup-pytorch.outputs.pytorch_cache_key }}
+
+      - name: Clone pytorch benchmark
+        if: ${{ inputs.suite == 'torchbench' }}
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.BENCHMARK_REPO }}
+          ref: ${{ env.BENCHMARK_COMMIT_ID }}
+          submodules: recursive
+          path: benchmark
+
+      - name: Install pytorch benchmark
+        if: ${{ inputs.suite == 'torchbench' }}
+        run: |
+          cd benchmark
+          sed -i 's/^ *pynvml.*//' requirements.txt
+          pip install -r requirements.txt
+          # for dlrm
+          pip install pyre-extensions
+          curl -fsSL https://raw.githubusercontent.com/facebookresearch/dlrm/refs/heads/torchrec-dlrm/requirements.txt |xargs pip install
+          pip uninstall -y fbgemm_gpu_nightly-cpu
+          # for soft_actor_critic, temp fix
+          pip install git+https://github.com/nocoding03/gym@fix-np
+
+          if [[ "${{ inputs.only_one_model }}" ]]; then
+            python install.py "${{ inputs.only_one_model }}"
+          else
+            # install all models
+            python install.py --continue_on_fail
+          fi
+          pip install -e .
+
+      - name: Sync model list from torch-xpu-ops
+        run: |
+          PYTORCH_XPU_OPS_REF="$(curl -s https://raw.githubusercontent.com/pytorch/pytorch/$(<.github/pins/pytorch.txt)/third_party/xpu.txt)"
+          git clone https://github.com/intel/torch-xpu-ops.git
+          cd torch-xpu-ops
+          git checkout $PYTORCH_XPU_OPS_REF
+          cd ..
+          sudo apt-get update
+          sudo apt-get install -y rsync
+          rsync -avz ./torch-xpu-ops/.ci/benchmarks/ ./pytorch/benchmarks/dynamo/
+
+      - name: Report environment details
+        timeout-minutes: 1
+        run: |
+          mkdir -p inductor_log
+          TIMESTAMP=$(date '+%Y%m%d%H%M%S')
+          echo "TIMESTAMP=$TIMESTAMP" >> "${GITHUB_ENV}"
+
+          source ./scripts/capture-hw-details.sh --quiet
+
+          cat <<EOF | tee inductor_log/.env
+          TIMESTAMP=$TIMESTAMP
+          JOB_NAME=${{ join(inputs.*, '-') }}
+          GITHUB_RUN_ID=$GITHUB_RUN_ID
+          GITHUB_RUN_NUMBER=$GITHUB_RUN_NUMBER
+          GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT
+          E2E_MODE=${{ inputs.mode }}
+          E2E_TEST_MODE=${{ inputs.test_mode }}
+          E2E_SUITE=${{ inputs.suite }}
+          E2E_DTYPE=${{ inputs.dtype }}
+          PYTHON_VERSION=$PYTHON_VERSION
+          PYTORCH_REPO=$PYTORCH_REPO
+          PYTORCH_COMMIT_ID=$PYTORCH_COMMIT_ID
+          PYTORCH_VERSION=$PYTORCH_VERSION
+          LLVM_REPO=llvm/llvm-project
+          LLVM_COMMIT_ID=$LLVM_COMMIT_ID
+          BENCHMARK_REPO=$BENCHMARK_REPO
+          BENCHMARK_COMMIT_ID=$BENCHMARK_COMMIT_ID
+          TRITON_REPO=$GITHUB_REPOSITORY
+          TRITON_COMMIT_ID=$GITHUB_SHA
+          TORCHVISION_COMMIT_ID=$TORCHVISION_COMMIT_ID
+          TORCHAUDIO_COMMIT_ID=$TORCHAUDIO_COMMIT_ID
+          TIMM_COMMIT_ID=$TIMM_COMMIT_ID
+          LIBIGC1_VERSION=$LIBIGC1_VERSION
+          LEVEL_ZERO_VERSION=$LEVEL_ZERO_VERSION
+          GPU_DEVICE=$GPU_DEVICE
+          AGAMA_VERSION=$AGAMA_VERSION
+          COMPILER_VERSION=$COMPILER_VERSION
+          OS=${{ runner.os }}
+          EOF
+
+      - name: Run e2e ${{ inputs.test_mode }} tests
+        env:
+          HUGGING_FACE_HUB_TOKEN: ${{ secrets.HUGGING_FACE_HUB_TOKEN }}
+        run: |
+          cd pytorch
+
+          # Some models are still not compatible with numpy>2.0
+          pip install 'numpy==1.26.4'
+
+          export WORKSPACE=$GITHUB_WORKSPACE
+
+          if [[ "${{ inputs.TORCH_COMPILE_DEBUG }}" = "1" ]] ; then
+            export TORCH_COMPILE_DEBUG="1"
+            # torch will save debug logs to $TORCH_COMPILE_DEBUG_DIR/torch_compile_debug
+            export TORCH_COMPILE_DEBUG_DIR=$GITHUB_WORKSPACE
+          fi
+
+          # if "only_one_model" is set, then test this model
+          # if "models" == "subset", then test the models from .github/models/{accuracy,performance}/{suite}.txt
+          # otherwise test all models.
+
+          if [[ "${{ inputs.only_one_model }}" ]]; then
+            bash -e $GITHUB_WORKSPACE/scripts/inductor_xpu_test.sh ${{ inputs.suite }} ${{ inputs.dtype }} ${{ inputs.mode }} ${{ inputs.test_mode }} xpu 0 static 1 0 ${{ inputs.only_one_model }}
+          elif [[ "${{ inputs.models }}" == "subset" ]]; then
+            models_subset_file="$GITHUB_WORKSPACE/.github/models/${{ inputs.test_mode }}/${{ inputs.suite }}.txt"
+            while read model; do
+              bash -e $GITHUB_WORKSPACE/scripts/inductor_xpu_test.sh ${{ inputs.suite }} ${{ inputs.dtype }} ${{ inputs.mode }} ${{ inputs.test_mode }} xpu 0 static 1 0 $model
+            done < $models_subset_file
+            if [[ "${{ inputs.check_all_subset_models }}" == true ]]; then
+              python $GITHUB_WORKSPACE/scripts/check_inductor_report.py --models-file="$models_subset_file" \
+                --suite=${{ inputs.suite }} \
+                --dtype=${{ inputs.dtype }} \
+                --mode=${{ inputs.mode }} \
+                --test_mode=${{ inputs.test_mode }} \
+                --device=xpu \
+                --inductor-log-dir="${GITHUB_WORKSPACE}/inductor_log"
+            fi
+          else
+            bash -e $GITHUB_WORKSPACE/scripts/inductor_xpu_test.sh ${{ inputs.suite }} ${{ inputs.dtype }} ${{ inputs.mode }} ${{ inputs.test_mode }} xpu 0 static 1 0
+          fi
+
+      - name: Copy reports
+        run: |
+          if [[ -d torch_compile_debug ]]; then
+            cp -rT torch_compile_debug inductor_log
+          fi
+
+      - name: Upload test logs
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-${{ inputs.suite }}-${{ inputs.dtype }}-${{ inputs.mode }}-${{ inputs.test_mode }}
+          path: inductor_log
+          include-hidden-files: true
+
+      - name: Save pip cache
+        if: ${{ steps.pip-cache.outputs.status == 'miss' }}
+        uses: ./.github/actions/save
+        with:
+          path: ${{ steps.pip-cache.outputs.path }}
+          dest: ${{ steps.pip-cache.outputs.dest }}

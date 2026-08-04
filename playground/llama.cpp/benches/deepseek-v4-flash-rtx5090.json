@@ -1,0 +1,122 @@
+{
+  "recorded_at": "2026-08-03",
+  "build": {
+    "llama_cpp_version": 10243,
+    "commit": "2cac0cba4",
+    "compiler": "GNU 15.2.0",
+    "cuda_architecture": "120a"
+  },
+  "hardware": {
+    "cpu": "Intel Core Ultra 9 285K",
+    "cpu_threads_used": 24,
+    "host_memory_gib": 61,
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "gpu_memory_mib": 32607,
+    "driver": "595.84",
+    "cuda_driver": "13.2"
+  },
+  "model": {
+    "source": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "source_revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+    "gguf_path": "/home/shooting-brake007/models/deepseek-v4-flash/DeepSeek-V4-Flash-0731-MXFP4.gguf",
+    "gguf_size_bytes": 156378345056,
+    "gguf_file_type": "MOSTLY_MXFP4_MOE",
+    "tensor_count": 1328,
+    "expert_count": 256,
+    "experts_used_per_token": 6,
+    "expert_layers": 43
+  },
+  "common_server_parameters": {
+    "gpu_layers": "all",
+    "threads": 24,
+    "threads_batch": 24,
+    "context_size": 2048,
+    "batch_size": 512,
+    "ubatch_size": 512,
+    "parallel": 1,
+    "load_mode": "mmap",
+    "warmup": false
+  },
+  "probe": {
+    "prompt": "Reply exactly: DeepSeek V4 is running.",
+    "temperature": 0,
+    "max_tokens": 64,
+    "response_content": "DeepSeek V4 is running.",
+    "completion_tokens": 48
+  },
+  "runs": [
+    {
+      "name": "all_experts_cpu",
+      "cpu_moe_option": "-cmoe",
+      "gpu_expert_layers": 0,
+      "observed_total_gpu_memory_mib": 9854,
+      "cached_prompt_tokens": 11,
+      "evaluated_prompt_tokens": 4,
+      "prompt_ms": 914.381,
+      "prompt_tokens_per_second": 4.37454409048307,
+      "generation_ms": 25613.136,
+      "generation_tokens_per_second": 1.8740383840541823
+    },
+    {
+      "name": "five_expert_layers_gpu_cold_prompt",
+      "cpu_moe_option": "-ncmoe 38",
+      "gpu_expert_layers": 5,
+      "observed_total_gpu_memory_gib": 25.56,
+      "cached_prompt_tokens": 0,
+      "evaluated_prompt_tokens": 15,
+      "prompt_ms": 5727.824,
+      "prompt_tokens_per_second": 2.618795549583926,
+      "generation_ms": 17131.613,
+      "generation_tokens_per_second": 2.8018377487280386
+    },
+    {
+      "name": "five_expert_layers_gpu_cached_prompt",
+      "cpu_moe_option": "-ncmoe 38",
+      "gpu_expert_layers": 5,
+      "observed_total_gpu_memory_gib": 25.56,
+      "cached_prompt_tokens": 11,
+      "evaluated_prompt_tokens": 4,
+      "prompt_ms": 361.358,
+      "prompt_tokens_per_second": 11.06935504402836,
+      "generation_ms": 11477.301,
+      "generation_tokens_per_second": 4.182167915610124
+    },
+    {
+      "name": "six_expert_layers_gpu_cold_prompt",
+      "cpu_moe_option": "-ncmoe 37",
+      "gpu_expert_layers": 6,
+      "observed_total_gpu_memory_mib": 29438,
+      "cached_prompt_tokens": 0,
+      "evaluated_prompt_tokens": 15,
+      "prompt_ms": 5719.287,
+      "prompt_tokens_per_second": 2.622704543415989,
+      "generation_ms": 20880.91,
+      "generation_tokens_per_second": 2.298750389710027
+    },
+    {
+      "name": "six_expert_layers_gpu_cached_prompt",
+      "cpu_moe_option": "-ncmoe 37",
+      "gpu_expert_layers": 6,
+      "observed_total_gpu_memory_mib": 29438,
+      "cached_prompt_tokens": 11,
+      "evaluated_prompt_tokens": 4,
+      "prompt_ms": 789.543,
+      "prompt_tokens_per_second": 5.066221852388027,
+      "generation_ms": 18178.566,
+      "generation_tokens_per_second": 2.6404723012805302
+    }
+  ],
+  "selection": {
+    "recommended_cpu_moe_option": "-ncmoe 38",
+    "recommended_gpu_expert_layers": 5,
+    "reason": "Five GPU expert layers were faster than six in both cold-prompt and cached-prompt probes while retaining about 6.3 GiB of VRAM headroom.",
+    "cached_generation_speedup_vs_all_cpu_percent": 123.16447937035548,
+    "five_layer_cold_generation_speedup_vs_six_layer_percent": 21.88524691153644,
+    "five_layer_cached_generation_speedup_vs_six_layer_percent": 58.38521836370935
+  },
+  "notes": [
+    "Results are single observed probes, not multi-repetition statistical benchmarks.",
+    "The model exceeds combined host RAM and VRAM, so remaining CPU experts are mmap-backed and performance depends on filesystem cache state.",
+    "The server was stopped after measurement."
+  ]
+}

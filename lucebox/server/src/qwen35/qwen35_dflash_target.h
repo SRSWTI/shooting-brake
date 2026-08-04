@@ -1,0 +1,109 @@
+// Qwen35DFlashTarget — DFlashTarget implementation for qwen35 hybrid models.
+//
+// Wraps the existing qwen35 target infrastructure (TargetWeights, TargetCache,
+// StepGraph, DraftFeatureMirror) behind the generic DFlashTarget interface.
+// This adapter enables the generic spec-decode loop to drive qwen35 verification.
+
+#pragma once
+
+#include "common/dflash_target.h"
+#include "internal.h"         // TargetWeights, TargetCache, DraftWeights
+#include "step_graph.h"
+#include "graph_builders.h"
+#include "kvflash_pager.h"
+
+#include "ggml.h"
+#include "ggml-backend.h"
+
+#include <vector>
+
+namespace dflash::common {
+
+class Qwen35DFlashTarget : public DFlashTarget {
+public:
+    // Non-owning references — caller must ensure lifetime.
+    Qwen35DFlashTarget(TargetWeights & w,
+                       TargetCache & cache,
+                       ggml_backend_t backend,
+                       StepGraph & sg,
+                       int kq_stride_pad,
+                       int fa_window);
+
+    ~Qwen35DFlashTarget() override;
+
+    // ── DFlashTarget interface ──────────────────────────────────────
+
+    bool verify_batch(const std::vector<int32_t> & tokens,
+                      int base_pos,
+                      int & last_tok,
+                      std::vector<int32_t> * all_argmax = nullptr,
+                      bool capture_ssm_intermediates = false) override;
+
+    bool read_verify_logits(int n_tokens, std::vector<float> & out) override;
+
+    bool snapshot_kv() override;
+    bool restore_kv() override;
+    bool supports_fast_rollback() const override;
+    bool rollback_to(int base_pos, int commit_n) override;
+
+    bool supports_tree_verify() const override;
+    bool verify_tree(int committed,
+                     const DDTree & tree,
+                     const std::vector<int32_t> & flat_tokens,
+                     int n_alloc,
+                     std::vector<int32_t> & posterior_out,
+                     std::vector<float> * logits_out = nullptr) override;
+    bool rollback_to_tree(int committed,
+                          const DDTree & tree,
+                          const std::vector<int> & accepted_dfs) override;
+
+    bool is_eos(int token) const override;
+
+    bool embed_tokens(const int32_t * tokens, int n,
+                      float * out) const override;
+
+    bool project_hidden_to_tokens(const float * hidden,
+                                  int n_tokens,
+                                  std::vector<int32_t> & tokens_out) override;
+
+    bool project_hidden_to_topk(const float * hidden,
+                                int n_tokens,
+                                int K,
+                                float temperature,
+                                std::vector<float> & top_log_probs,
+                                std::vector<int32_t> & top_token_ids) override;
+
+    int hidden_size() const override { return w_.n_embd; }
+    int mask_token_id() const override;
+    const std::vector<int> & capture_layer_ids() const override;
+
+    // kvflash mode: verify writes are slot-mapped via the pager and the
+    // attention mask carries slot validity (resident committed positions
+    // only) plus causal structure among the verify tokens. Rejected draft
+    // tokens need no explicit rollback: their slots are excluded by the
+    // pos < base_pos validity rule on the next verify and get rewritten.
+    // Forces fa_window = 0 (logical windowing is meaningless in slot space).
+    void set_kvflash_pager(KvFlashPager * pager) { pager_ = pager; }
+
+    // Enable fast-rollback mode: verify will capture per-step SSM intermediates
+    // so rollback_to() can restore recurrent state without replay.
+    void set_fast_rollback(bool enabled) { fast_rollback_ = enabled; }
+
+private:
+    TargetWeights & w_;
+    TargetCache & cache_;
+    ggml_backend_t backend_;
+    StepGraph & sg_;
+    int kq_stride_pad_;
+    int fa_window_;
+    KvFlashPager * pager_ = nullptr;
+    bool fast_rollback_ = false;
+
+    // Cached vector form of capture layer IDs (built once in constructor).
+    std::vector<int> capture_ids_;
+
+    // LM-head projection graph (lazily built).
+    StepGraph proj_sg_;
+};
+
+}  // namespace dflash::common

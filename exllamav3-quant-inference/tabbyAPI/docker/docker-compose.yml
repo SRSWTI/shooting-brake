@@ -1,0 +1,29 @@
+services:
+  tabbyapi:
+    # Uncomment this to build a docker image from source
+    #build:
+    #  context: ..
+    #  dockerfile: ./docker/Dockerfile
+    #  # For CUDA 13.x builds, use ./docker/Dockerfile.cu13
+
+    # Comment this to build a docker image from source
+    image: ghcr.io/theroyallab/tabbyapi:latest
+    gpus: all
+    ports:
+      - "5000:5000"
+    shm_size: "8g"
+    ulimits:
+      memlock: -1
+      nofile: 1048576
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    environment:
+      - NAME=TabbyAPI
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./models:/app/models                                # Change me
+      # - /path/to/config.yml:/app/config.yml               # Change me
+      # - /path/to/api_tokens.yml:/app/api_tokens.yml       # Change me

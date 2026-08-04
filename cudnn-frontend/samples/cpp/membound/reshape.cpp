@@ -1,0 +1,68 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <catch2/catch_test_macros.hpp>
+#include "../utils/helpers.h"
+
+#include <cudnn_frontend.h>
+
+// Lexicographic (logical) reshape: same linear memory order as row-major traversal of the
+// input shape is reinterpreted as row-major traversal of the output shape. Here (3,4,5) -> (6,10),
+// 60 elements each. Mode ReshapeMode_t::LOGICAL selects the backend lexicographic reshape path
+// (cuDNN 9.22+); attributes still describe the target layout on Y.
+TEST_CASE("Membound reshape (3,4,5) to (6,10) lexicographic / LOGICAL mode",
+          "[membound][reshape][graph][lexicographic]") {
+    namespace fe = cudnn_frontend;
+
+#if CUDART_VERSION < 13010
+    SKIP("Test requires cuda toolkit 13.1 or above");
+    return;
+#endif
+
+    if (!is_blackwell_computing_arch()) {
+        SKIP("TensorIR MemBound engine is only supported on Blackwell (data center Blackwell)");
+    }
+
+#if (CUDNN_VERSION < 92200)
+    SKIP("Membound graph samples require cuDNN 9.22.0 or newer (compiled CUDNN_VERSION >= 92200).");
+#endif
+    if (cudnn_frontend::detail::get_backend_version() < 92200) {
+        SKIP("Membound graph samples require cuDNN backend 9.22.0 or newer at runtime.");
+    }
+
+    fe::graph::Graph graph{};
+    graph.set_io_data_type(fe::DataType_t::FLOAT).set_compute_data_type(fe::DataType_t::FLOAT);
+
+    auto X = graph.tensor(fe::graph::Tensor_attributes()
+                              .set_name("X")
+                              .set_dim({3, 4, 5})
+                              .set_stride({20, 1, 4})
+                              .set_data_type(fe::DataType_t::FLOAT));
+
+    auto reshape_attrs =
+        fe::graph::Reshape_attributes().set_name("lex_reshape").set_reshape_mode(fe::ReshapeMode_t::LOGICAL);
+
+    auto Y = graph.reshape(X, reshape_attrs);
+    Y->set_dim({6, 10}).set_stride({10, 1}).set_output(true).set_data_type(fe::DataType_t::FLOAT);
+
+    REQUIRE(graph.validate().is_good());
+
+    auto handle_ptr = create_cudnn_handle();
+    auto handle     = *handle_ptr;
+
+    REQUIRE(graph.build_operation_graph(handle).is_good());
+    REQUIRE(graph.create_execution_plans({fe::HeurMode_t::A}).is_good());
+    REQUIRE(graph.build_plans(fe::BuildPlanPolicy_t::HEURISTICS_CHOICE).is_good());
+
+    Surface<float> X_gpu(3 * 4 * 5);
+    Surface<float> Y_gpu(6 * 10);
+    std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> variant_pack = {{X, X_gpu.devPtr},
+                                                                                             {Y, Y_gpu.devPtr}};
+    int64_t workspace_size                                                                = 0;
+    REQUIRE(graph.get_workspace_size(workspace_size).is_good());
+    Surface<int8_t> workspace(workspace_size);
+
+    REQUIRE(graph.execute(handle, variant_pack, workspace.devPtr).is_good());
+}

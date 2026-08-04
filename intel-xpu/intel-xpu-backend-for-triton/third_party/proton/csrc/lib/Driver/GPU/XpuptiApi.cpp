@@ -1,0 +1,53 @@
+#include "Driver/GPU/XpuptiApi.h"
+#include "Device.h"
+#include "Driver/Dispatch.h"
+
+namespace proton {
+
+namespace xpupti {
+
+struct ExternLibXpupti : public ExternLibBase {
+  using RetType = pti_result;
+#if defined(_WIN32)
+  static constexpr const char *name = "pti_view-0.dll";
+#else
+  static constexpr const char *name = "libpti_view.so";
+#endif
+  static constexpr const char *defaultDir = "";
+  static constexpr const char *pathEnv = "TRITON_XPUPTI_LIB_PATH";
+  static constexpr RetType success = PTI_SUCCESS;
+  static void *lib;
+};
+
+void *ExternLibXpupti::lib = nullptr;
+
+// For inspiration see CuptiApi.cpp
+
+DEFINE_DISPATCH(ExternLibXpupti, viewEnable, ptiViewEnable, pti_view_kind)
+
+DEFINE_DISPATCH(ExternLibXpupti, viewDisable, ptiViewDisable, pti_view_kind)
+
+DEFINE_DISPATCH(ExternLibXpupti, viewFlushAll, ptiFlushAllViews)
+
+DEFINE_DISPATCH(ExternLibXpupti, subscribe, ptiCallbackSubscribe,
+                pti_callback_subscriber_handle *, pti_callback_function, void *)
+
+DEFINE_DISPATCH(ExternLibXpupti, unsubscribe, ptiCallbackUnsubscribe,
+                pti_callback_subscriber_handle);
+
+DEFINE_DISPATCH(ExternLibXpupti, enableDomain, ptiCallbackEnableDomain,
+                pti_callback_subscriber_handle, pti_callback_domain, uint32_t,
+                uint32_t);
+
+DEFINE_DISPATCH(ExternLibXpupti, disableDomain, ptiCallbackDisableDomain,
+                pti_callback_subscriber_handle, pti_callback_domain);
+
+DEFINE_DISPATCH(ExternLibXpupti, viewGetNextRecord, ptiViewGetNextRecord,
+                uint8_t *, size_t, pti_view_record_base **)
+
+DEFINE_DISPATCH(ExternLibXpupti, viewSetCallbacks, ptiViewSetCallbacks,
+                pti_fptr_buffer_requested, pti_fptr_buffer_completed)
+
+} // namespace xpupti
+
+} // namespace proton

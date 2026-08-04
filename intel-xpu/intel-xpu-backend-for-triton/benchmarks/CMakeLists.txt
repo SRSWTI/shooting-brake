@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
+set(CMAKE_CXX_STANDARD 20)
+
+project(TritonBenchmark)
+
+if(NOT WIN32)
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+endif()
+
+find_package(Python3 REQUIRED COMPONENTS Development.Module)
+find_package(Torch REQUIRED)
+find_library(TORCH_PYTHON_LIBRARY torch_python PATH "${TORCH_INSTALL_PREFIX}/lib")
+find_package(SyclTlaLibrary REQUIRED)
+find_package(oneDNNLibrary REQUIRED)
+
+# add the SYCL-TLA kernel.
+add_subdirectory(sycl_tla_kernel)
+
+# add the oneDNN kernel.
+add_subdirectory(onednn_kernel)

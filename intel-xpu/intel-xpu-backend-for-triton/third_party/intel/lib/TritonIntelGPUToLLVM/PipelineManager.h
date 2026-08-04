@@ -1,0 +1,275 @@
+//===- PipelineManager.h - TritonIntelGPU pipeline manager ------*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// This file defines a pipeline manager for the TritonIntelGPU -> LLVM pass.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef TRITONINTELGPUTOLLVM_PIPELINEMANAGER_H
+#define TRITONINTELGPUTOLLVM_PIPELINEMANAGER_H
+
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/GPUToLLVMSPV/GPUToLLVMSPVPass.h"
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
+#include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
+#include "mlir/IR/PatternMatch.h"
+
+#include "intel/include/Analysis/StrideInfo.h"
+#include "intel/include/Dialect/TritonIntelGPU/IR/Utils.h"
+#include "intel/include/GPUToTritonGEN/GPUToTritonGENPass.h"
+#include "intel/include/TritonGENToLLVM/TritonGENToLLVMPass.h"
+#include "intel/include/TritonGENToSPIRV/TritonGENToSPIRVPass.h"
+#include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
+#include "triton/Conversion/TritonGPUToLLVM/TargetInfoBase.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+
+#include "PatternTritonGPUOpToLLVM.h"
+
+namespace mlir {
+
+FailureOr<LLVM::LLVMFuncOp>
+convertFuncOpToLLVMFuncOp(FunctionOpInterface funcOp,
+                          ConversionPatternRewriter &rewriter,
+                          const LLVMTypeConverter &converter,
+                          SymbolTableCollection *symbolTables = nullptr);
+}
+
+namespace mlir::triton::intel {
+
+/// FuncOp legalization pattern that converts MemRef arguments to pointers to
+/// MemRef descriptors (LLVM struct data types) containing all the MemRef type
+/// information.
+struct FuncOpConversion : public ConvertOpToLLVMPattern<triton::FuncOp> {
+  FuncOpConversion(LLVMTypeConverter &converter, int numWarps,
+                   const TargetInfoBase &targetInfo, PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo),
+        numWarps(numWarps) {}
+
+  /// Only retain those attributes that are not constructed by
+  /// `LLVMFuncOp::build`. If `filterArgAttrs` is set, also filter out argument
+  /// attributes.
+  static void filterFuncAttributes(triton::FuncOp op, bool filterArgAttrs,
+                                   SmallVectorImpl<NamedAttribute> &result) {
+
+    for (const auto &attr : op->getAttrs()) {
+      if (attr.getName() == SymbolTable::getSymbolAttrName() ||
+          attr.getName() == op.getFunctionTypeAttrName() ||
+          attr.getName() == "std.varargs" ||
+          (filterArgAttrs && attr.getName() == op.getArgAttrsAttrName()))
+        continue;
+      result.push_back(attr);
+    }
+  }
+  /// Calling convention for the scratch buffer on shared and global:
+  ///
+  /// - Shared memory:
+  ///   * Kernel functions:
+  ///       Use the address of `global_smem` as the scratch stack.
+  ///   * Non-kernel functions:
+  ///       Uses the second last param as the shared scratch stack.
+  ///
+  /// - Global scratch memory:
+  ///   * Both kernel and non-kernel functions:
+  ///       Use the last but one param as the global scratch stack.
+  ///
+  /// - Profile scratch memory:
+  ///   * Both kernel and non-kernel functions:
+  ///       Use the last param as the profile scratch stack.
+  triton::FuncOp amendFuncOp(triton::FuncOp funcOp,
+                             ConversionPatternRewriter &rewriter,
+                             const TargetInfoBase &targetInfo) const {
+    // Push back two new arguments that indicate the current pointer to shared
+    // memory and global scratch memory.
+    Location loc = funcOp.getLoc();
+    MLIRContext *ctx = funcOp->getContext();
+    auto sharedPtrTy =
+        LLVM::LLVMPointerType::get(ctx, targetInfo.getSharedAddressSpace());
+    Type globalPtrTy = LLVM::LLVMPointerType::get(ctx, 1);
+    Type profilePtrTy = LLVM::LLVMPointerType::get(ctx, 1);
+
+    // 1. Modify the function type to add the new arguments.
+    FunctionType funcTy = funcOp.getFunctionType();
+    auto amendedInputTy = llvm::to_vector<4>(funcTy.getInputs());
+    bool isKernel = LLVM::isKernel(funcOp);
+    if (!isKernel)
+      amendedInputTy.push_back(sharedPtrTy);
+
+    amendedInputTy.push_back(globalPtrTy);
+    amendedInputTy.push_back(profilePtrTy);
+    auto amendedFuncTy =
+        FunctionType::get(ctx, amendedInputTy, funcTy.getResults());
+    // 2. Modify the argument attributes to add the new argument.
+    SmallVector<NamedAttribute> amendedAttrs;
+    filterFuncAttributes(funcOp, /*filterArgAttrs=*/true, amendedAttrs);
+    if (auto argAttrs = funcOp.getAllArgAttrs()) {
+      SmallVector<mlir::Attribute> amendedArgAttrs(argAttrs.begin(),
+                                                   argAttrs.end());
+      while (amendedArgAttrs.size() < amendedInputTy.size())
+        amendedArgAttrs.emplace_back(DictionaryAttr::get(ctx));
+
+      amendedAttrs.push_back(
+          rewriter.getNamedAttr(funcOp.getArgAttrsAttrName(),
+                                rewriter.getArrayAttr(amendedArgAttrs)));
+    }
+
+    // 3. Add the new arguments to the region
+    auto amendedFuncOp =
+        triton::FuncOp::create(rewriter, funcOp.getLoc(), funcOp.getName(),
+                               amendedFuncTy, amendedAttrs);
+    Region &region = funcOp.getBody();
+    if (!isKernel)
+      region.addArgument(sharedPtrTy, loc);
+
+    region.addArgument(globalPtrTy, loc);
+    region.addArgument(profilePtrTy, loc);
+    rewriter.inlineRegionBefore(region, amendedFuncOp.getBody(),
+                                amendedFuncOp.end());
+    return amendedFuncOp;
+  }
+
+  LogicalResult
+  matchAndRewrite(triton::FuncOp funcOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Prevent LLVM's inliner to inline this function
+    auto amendedFuncOp = amendFuncOp(funcOp, rewriter, targetInfo);
+
+    FailureOr<LLVM::LLVMFuncOp> maybeNewFuncOp =
+        mlir::convertFuncOpToLLVMFuncOp(amendedFuncOp, rewriter,
+                                        *getTypeConverter());
+    if (failed(maybeNewFuncOp)) {
+      return failure();
+    }
+
+    LLVM::LLVMFuncOp newFuncOp = *maybeNewFuncOp;
+    handleArgPtrDatatype(funcOp, newFuncOp);
+
+    MLIRContext *ctx = funcOp->getContext();
+    auto mod = funcOp->getParentOfType<ModuleOp>();
+    int threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
+    if (LLVM::isKernel(funcOp)) {
+      newFuncOp.setCConv(LLVM::CConv::SPIR_KERNEL);
+      newFuncOp.setLinkage(LLVM::Linkage::External);
+    } else {
+      newFuncOp.setCConv(LLVM::CConv::SPIR_FUNC);
+    }
+
+    constexpr size_t numDims = 3;
+    std::array<int, numDims> localSize{threadsPerWarp * numWarps, 1, 1};
+    newFuncOp.setReqdWorkGroupSize(localSize);
+    newFuncOp.setIntelReqdSubGroupSize(threadsPerWarp);
+
+    if (!LLVM::isKernel(funcOp)) {
+      newFuncOp.setPassthroughAttr(
+          ArrayAttr::get(ctx, rewriter.getStringAttr("noinline")));
+      newFuncOp.setLinkage(LLVM::Linkage::Internal);
+    }
+
+    // required by AxisInfoAnalysis
+    rewriter.eraseOp(funcOp);
+    rewriter.eraseOp(amendedFuncOp);
+    return success();
+  }
+
+private:
+  int numWarps{0};
+  const TargetInfoBase &targetInfo;
+};
+
+/// Manages TritonIntelGPU --> LLVM the conversion pipeline.
+/// Currently the conversion pipeline depends on whether the kernel contains
+/// block pointers or not.
+class TritonGPUToLLVMPipelineManager {
+public:
+  TritonGPUToLLVMPipelineManager(ModuleOp &mod, MLIRContext *ctx)
+      : mod(mod), ctx(ctx) {}
+
+  /// Populate the conversion pipeline for function operations.
+  void populateFunctionConversionPatterns(
+      RewritePatternSet &funcPatterns,
+      TritonIntelGPUToLLVMTypeConverter &typeConverter, int numWarps,
+      const TargetInfoBase &targetInfo) const {
+    funcPatterns.add<FuncOpConversion>(typeConverter, numWarps, targetInfo,
+                                       /*benefit=*/1);
+    mlir::cf::populateControlFlowToLLVMConversionPatterns(typeConverter,
+                                                          funcPatterns);
+  }
+
+  /// Populate the conversion pipeline for various operations.
+  void
+  populateConversionPatterns(RewritePatternSet &patterns,
+                             ModuleAxisInfoAnalysis &axisInfoAnalysis,
+                             ModuleStrideAnalysis &strideAnalysis,
+                             TritonIntelGPUToLLVMTypeConverter &typeConverter,
+                             TargetInfo &targetInfo, int benefit) const {
+    using namespace mlir;
+    using namespace mlir::triton;
+
+    intel::populateConvertLayoutOpToLLVMPatterns(typeConverter, targetInfo,
+                                                 patterns, benefit);
+    intel::populateDotOpToLLVMPatterns(typeConverter, patterns, benefit);
+    intel::populateElementwiseOpToLLVMPatterns(
+        typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
+    intel::populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo,
+                                             patterns, axisInfoAnalysis,
+                                             strideAnalysis, benefit);
+    intel::populateReduceOpToLLVMPatterns(typeConverter, patterns, targetInfo,
+                                          benefit);
+    mlir::triton::populateScanOpToLLVMPatterns(typeConverter, patterns,
+                                               targetInfo, benefit);
+    mlir::triton::populateGatherOpToLLVMPatterns(typeConverter, patterns,
+                                                 targetInfo, benefit);
+    mlir::triton::populateViewOpToLLVMPatterns(typeConverter, patterns,
+                                               benefit);
+
+    intel::populateTensorDescOpsToLLVMPatterns(typeConverter, patterns,
+                                               benefit);
+    intel::populateHistogramOpToLLVMPatterns(typeConverter, patterns,
+                                             targetInfo, benefit);
+    intel::populatePrintOpToLLVMPattern(typeConverter, patterns, targetInfo,
+                                        benefit);
+    mlir::ub::populateUBToLLVMConversionPatterns(typeConverter, patterns);
+    populateAssertOpToLLVMPattern(typeConverter, patterns, targetInfo, benefit);
+    intel::populateMemoryOpToLLVMPattern(typeConverter, targetInfo, patterns,
+                                         benefit);
+    mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo,
+                                                 patterns, benefit);
+    intel::populateControlFlowOpToLLVMPattern(typeConverter, patterns,
+                                              targetInfo, benefit);
+    mlir::triton::populateMakeRangeOpToLLVMPattern(typeConverter, targetInfo,
+                                                   patterns, benefit);
+    intel::populateFp4ToFpToLLVMPatterns(typeConverter, patterns, benefit);
+
+    intel::populateSPMDOpToLLVMPattern(typeConverter, patterns, targetInfo,
+                                       benefit);
+    mlir::triton::populateSPMDOpToLLVMPattern(typeConverter, patterns,
+                                              targetInfo, benefit);
+    // TODO(thomas): this should probably be done in a separate step to not
+    // interfere with our own lowering of arith ops. Add arith/math's patterns
+    // to help convert scalar expression to LLVM.
+    arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
+    populateMathToLLVMConversionPatterns(typeConverter, patterns);
+    intel::populateWarpIdOpToLLVMPattern(typeConverter, patterns, benefit);
+    triton::populateGPUToTritonGENConversionPatterns(typeConverter, patterns);
+    cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
+    populateGpuToLLVMSPVConversionPatterns(typeConverter, patterns);
+    populateSPIRVToLLVMConversionPatterns(typeConverter, patterns,
+                                          spirv::ClientAPI::OpenCL);
+    mlir::triton::populateFpSanToLLVMPatterns(typeConverter, patterns);
+  }
+
+private:
+  ModuleOp &mod;
+  MLIRContext *ctx;
+};
+
+} // namespace mlir::triton::intel
+
+#endif // TRITONINTELGPUTOLLVM_PIPELINEMANAGER_H

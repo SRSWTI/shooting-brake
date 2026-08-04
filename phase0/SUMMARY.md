@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-04
 **Status:** ✅ COMPLETE
-**Gate:** All Phase-0 items frozen. Phases 0, 1, and 2 are complete; Phase 3 is next.
+**Gate:** All Phase-0 items frozen. Phase 0, Phase 1, Phase 2, and Phase 3 are complete; Phase 4 is next.
 
 ## Deliverables
 
@@ -87,4 +87,4 @@ The 13× improvement reflects vLLM's optimized serving stack, CUTLASS NVFP4 kern
 - [x] CUDA baseline reproducible → **PASS** (consistent across 3 runs)
 - [x] Provider protocol delivered → **PASS** (frozen Phase-0 logical schema v1; the executable Phase-2 wire ABI is the clean protocol-v2 cutover required by exact fixed-layout semantics)
 
-**Phase 0 remains complete. Phases 1 and 2 are also complete; proceed to Phase 3 (the independent provider mathematics matrix).**
+**Phase 0 remains complete. Phases 1, 2, and 3 are also complete. Phase 3 evidence is generated and authenticated by `phase3/generate_reference.py`, frozen in `phase3/reference_fixture.bin`, and exercised by `phase3/provider_math_test`; proceed to Phase 4 (the Qwen-scoped upstream-vLLM out-of-tree adapter).**

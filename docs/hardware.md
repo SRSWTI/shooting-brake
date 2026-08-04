@@ -94,7 +94,7 @@ FREE
 
 Pinned staging is the required baseline, not proof of adequate performance. Ordinary pipes, JSON, protobuf, and gRPC are not token-path transports. Direct peer transport may replace pinned staging only after equivalent ordering, lifecycle, failure, output-agreement, and tail-latency evidence on this exact stack.
 
-## Colibri reference evidence
+## Observed non-production evidence
 
 The native worker in `colibri-variants/colibri-qwen36/c/b70_moe_sycl.cpp` has already demonstrated, for the proven Colibri GS64 path:
 
@@ -109,6 +109,8 @@ The native worker in `colibri-variants/colibri-qwen36/c/b70_moe_sycl.cpp` has al
 - controlled hybrid throughput close to the corresponding all-CUDA Colibri expert configuration.
 
 Observed Colibri one-token B70 issue/take was roughly 56–100 µs per active MoE layer. This remains transport/reference evidence only. Phase 1 separately qualified the full-bank QuixiCore-XPU provider core across `M=1`, decode batches, and `M=128` prefill with fixed buffers. Phase 2 then measured the real process ring: warmed publication-to-observation p50 was 245.640, 292.517, 581.815, and 1,896.458 µs for sequential one-route `M=1`, `M=8`, `M=32`, and `M=128` requests, with unfiltered long-tail p99 reported in [`progress.md`](progress.md#phase-2-process-ring-evidence). Neither evidence proves upstream-vLLM integration, CUDA/B70 overlap, graph behavior, production throughput, or production tail latency.
+
+Phase 3 adds physical-B70 **correctness**, not production-performance, evidence. The standalone provider process passed the independent oracle over the protocol-v2 ring for `M=1..128`, compact canonical remapping, zero-remote no-publication, exact process identity/status/allocation accounting, and sequence-bound split/fused failure publication. This proves that the B70 wire partial agrees with the frozen primary-NVFP4 fixture before CUDA scatter. It does not measure or prove CUDA scatter/join, CUDA/B70 overlap, upstream-vLLM behavior, concurrency, throughput, production p99, or topology adequacy; the Phase-2 timing values above remain Phase-2 transport measurements.
 
 The B70's 608 GB/s specification is an upstream claim. For an ideal 18 MiB W4 expert it implies a roughly 31 µs weight-read lower bound, but that omits scales, dequantization, launch, intermediates, imbalance, transport, and join. It must not be reported as measured latency.
 

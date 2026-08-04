@@ -10,7 +10,7 @@ This plan reflects the inspected workspace as of 2026-08-04:
 - `QuixiCore-XPU/` is the selected primary B70 provider kernel source: a MIT-licensed native SYCL library with a framework-neutral raw-pointer C++ ABI, purpose-built NVFP4 routed-MoE kernels that accept preselected routes, and measured 46.5 µs at M=1 decode on the B70 (correctness gate passed). llm-scaler's ESIMD MoE kernels remain a qualified secondary INT4 fallback and kernel-design reference. Both can run behind a stable Shooting Brake provider API using oneAPI and SYCL, with optional PyTorch XPU and `intel-xpu/vllm-xpu/vllm-xpu-kernels/` bindings.
 - The already-proven implementation in `colibri-variants/colibri-qwen36/` remains the transport, correctness, placement, and failure-semantics reference—not the production model host.
 
-**Current milestone status:** Phase 0, Phase 1, and Phase 2 are complete. Phase 0 evidence is recorded in [`phase0/SUMMARY.md`](phase0/SUMMARY.md), [`phase0/freeze.yaml`](phase0/freeze.yaml), and [`phase0/capability_manifest.yaml`](phase0/capability_manifest.yaml). Phase 1 evidence is recorded in [`docs/progress.md`](docs/progress.md#phase-1-persistent-provider-evidence) and implemented by `phase1/b70_provider.{hpp,cpp}`, `phase1/b70_provider_main.cpp`, `phase1/b70_provider_tests.cpp`, and `phase1/validate_reference.py`. Phase 2 evidence is recorded in [`docs/progress.md`](docs/progress.md#phase-2-process-ring-evidence) and implemented by the protocol/ring, transport probe, isolated B70 ring provider, and integration tests under `phase2/`. Phase 3—the independent provider mathematics matrix—is the active next phase.
+**Current milestone status:** Phase 0, Phase 1, Phase 2, and Phase 3 are complete. Phase 0 evidence is recorded in [`phase0/SUMMARY.md`](phase0/SUMMARY.md), [`phase0/freeze.yaml`](phase0/freeze.yaml), and [`phase0/capability_manifest.yaml`](phase0/capability_manifest.yaml). Phase 1 evidence is recorded in [`docs/progress.md`](docs/progress.md#phase-1-persistent-provider-evidence) and implemented by `phase1/b70_provider.{hpp,cpp}`, `phase1/b70_provider_main.cpp`, `phase1/b70_provider_tests.cpp`, and `phase1/validate_reference.py`. Phase 2 evidence is recorded in [`docs/progress.md`](docs/progress.md#phase-2-process-ring-evidence) and implemented by the protocol/ring, transport probe, isolated B70 ring provider, and integration tests under `phase2/`. Phase 3 evidence is generated and authenticated by `phase3/generate_reference.py`, frozen in `phase3/reference_fixture.bin`, and exercised on the physical B70 by `phase3/provider_math_test`. Phase 4—the Qwen-scoped upstream-vLLM out-of-tree adapter—is next.
 
 ```text
 upstream vLLM 0.26+ CUDA model runner on RTX 5090
@@ -93,7 +93,7 @@ The production-first decision is therefore:
 3. Reuse QuixiCore-XPU's NVFP4 MoE fused/split decode and grouped prefill kernels as the primary B70 compute; keep llm-scaler's ESIMD INT4 kernels as a qualified secondary fallback for shapes or quality regimes where NVFP4 is insufficient.
 4. Extract or fork kernels only if profiling proves material wrapper overhead that cannot be addressed within the existing ABIs.
 
-We do not need to rediscover cross-vendor communication or rewrite the Intel kernels. The batched provider boundary is now implemented and directly qualified; the remaining engineering starts with the Phase-3 provider mathematics matrix, then inserts the boundary into vLLM's modular routed-expert lifecycle in Phase 4 and later phases. QuixiCore-XPU was built, correctness-validated, and benchmarked on the B70 in this workspace (2026-08-04): its `nvfp4_moe` split kernel measured 46.5 µs at M=1 and passed all direct kernel correctness gates.
+We do not need to rediscover cross-vendor communication, independently re-derive the provider wire mathematics, or rewrite the Intel kernels. The batched provider boundary and its B70 wire partial are now implemented and directly qualified; the remaining engineering starts by inserting that boundary into vLLM's modular routed-expert lifecycle in Phase 4. QuixiCore-XPU was built, correctness-validated, and benchmarked on the B70 in this workspace (2026-08-04): its `nvfp4_moe` split kernel measured 46.5 µs at M=1 and passed all direct kernel correctness gates.
 
 ---
 
@@ -859,9 +859,13 @@ A layer with no B70-owned route is not a provider-mathematics case: adapter/ring
 
 Validate both CUDA and B70 expert artifacts against the same higher-precision source checkpoint before validating their summed result.
 
-**Gate:** agreed FP16/INT4 tolerance passes for every supported shape; unsupported shapes fail explicitly.
+**Gate:** the frozen BF16-source-to-NVFP4 artifact-quality thresholds and the fixed provider-wire numerical budget pass for every supported shape; unsupported shapes fail explicitly.
+
+**Status: COMPLETE — independent provider-mathematics gate passed on the physical B70 on 2026-08-04.** `phase3/generate_reference.py` authenticates the full expert-bank SHA-256 and the frozen NVFP4 shard manifest, byte-audits sampled bank records against the NVFP4 artifact, computes independent float64 BF16-source and NVFP4 expert outputs for layers 0 and 31 and experts 0, 1, 7, 63, 127, 191, 254, and 255 across eight deterministic FP16 inputs, and freezes and validates `phase3/reference_fixture.bin`. `phase3/provider_math_test` passed zero-remote no-publication; the `M=1..128` one-remote-route sweep; all-remote duplicate, non-sorted, boundary, and \(2^{-12}\)-weight `M=4`; mixed sparse and interleaved ownership with local-route invariance; process-ring identity, status, and allocation accounting; split- and fused-path sequence-bound injected failures; unsupported `M=0` and `M=129`; trusted bank, placement, and weight-bootstrap negatives; and compact resident list `255,0,7,63,127,191,254,1` with canonical-to-local remapping. This proves the B70 wire partial before CUDA scatter and artifact/source agreement. It does not claim upstream-vLLM integration, CUDA scatter/join, layer/logit/generation parity, concurrency or throughput, or production acceptance.
 
 ### Phase 4 — Add the upstream-vLLM out-of-tree adapter
+
+**Status: NEXT.**
 
 Implement Qwen-scoped:
 

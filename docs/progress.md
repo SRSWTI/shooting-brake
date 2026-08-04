@@ -4,7 +4,7 @@ Last updated: 2026-08-04
 
 ## Status at a glance
 
-The project has **proven a Colibri-based CUDA+B70 reference path**. It has **not implemented or qualified the production upstream-vLLM integration described in [`../plan.md`](../plan.md)**.
+The project has **proven a Colibri-based CUDA+B70 reference path** and completed the production-oriented Phase 0 through Phase 3 gates. It has **not implemented or qualified the upstream-vLLM adapter, CUDA scatter/join, or end-to-end production integration described in [`../plan.md`](../plan.md)**.
 
 | Area | Status | Meaning |
 |---|---|---|
@@ -13,6 +13,7 @@ The project has **proven a Colibri-based CUDA+B70 reference path**. It has **not
 | Upstream vLLM 0.26+ CUDA state owner | Planned, not integrated | The inspected checkout and injection seams are known; no production `HybridMoERunner` path is complete. |
 | Isolated persistent QuixiCore-XPU B70 provider | **Phase 1 implemented and direct-provider gate passed** | Explicit B70 selection, full 8,192-expert NVFP4 bank load, fixed USM buffers, protocol-v1 capability, issue/take, health/shutdown, split/fused policy, generation/sequence rejection, and direct correctness/allocation-stability tests pass. |
 | Versioned batched pinned-memory request ring | **Phase 2 implemented and direct ring gate passed** | The protocol-v2 eight-slot shared ring, process-isolated B70 service, canonical route payloads, lifecycle/failure semantics, two-million-request wraparound stress, real-B70 numerical validation, and warmed latency percentiles pass. This is a direct provider/ring gate, not upstream-vLLM integration. |
+| Independent provider-wire mathematics | **Phase 3 complete; physical-B70 gate passed** | Frozen BF16-source/NVFP4 fixture provenance, byte-audited bank records, compact canonical-ID remapping, weighted `[M_remote, hidden]` results, route/status identity, zero-publication, failure, and boundary cases passed before CUDA scatter. |
 | Qwen-scoped out-of-tree adapter | Planned, not implemented | Canonical vLLM routing, local/remote partition, weighted-partial join, and eager parity remain to be built. |
 | Phase 0–10 production qualification | Not complete | No phase gate should be inferred from the Colibri evidence. |
 
@@ -265,6 +266,71 @@ The long-tail outliers are retained rather than filtered. This benchmark closes 
 
 Historical oneMKL/Python workers remain investigative artifacts and are not the planned provider.
 
+## Phase 3 independent provider-wire mathematics evidence
+
+Phase 3 closes the independent B70 process-wire mathematics gate. It proves that the returned compact `[M_remote, hidden]` payload is the routing-weighted sum of exactly the staged B70-owned routes **before CUDA scatter**.
+
+### Implementation and frozen artifacts
+
+- `phase3/generate_reference.py` — independent little-endian fixture generator and validator. It authenticates the entire 14,495,580,220-byte expert bank at SHA-256 `0ce6377ba3c9848da42b6063574ea884052d2e0f5e605d86d1684a1e5826e8db`, authenticates the canonical NVFP4 shard manifest at SHA-256 `320fad67387d36509947a691fa269d5a55dfb08f0cd7da6434868a6861bff2fa`, and validates the frozen source/NVFP4 snapshot contracts.
+- `phase3/reference_fixture.bin` plus `reference_fixture.{hpp,cpp}` — frozen schema/identity/finite/uniqueness-validated fixture at SHA-256 `3ebac16d0f09907cee4718ac1054d21939e420eabaf76ebe79c75fa5d0132606`.
+- `phase3/math_cases.{hpp,cpp}` — canonical ownership materialization, independent NVFP4 weighted-partial oracle, per-element accumulation budget, local-route invariance check, and source/NVFP4 artifact metrics.
+- `phase3/provider_math_test.cpp` and `phase3/Makefile` — authoritative real process-ring harness, compact provider launch, trusted-bootstrap negatives, split/fused fault injection, and direct unsupported-shape checks.
+
+The generator byte-audits the sampled packed E2M1 weights, raw E4M3FN block-scale bytes, and FP32 global-scale fields in the expert bank against the frozen NVFP4 artifact. It then computes both the BF16-source expert and independently decoded NVFP4 expert in float64 for layers `0` and `31`, canonical experts `0,1,7,63,127,191,254,255`, and eight distinct deterministic FP16 inputs. The source tensor index records 71,903,645,408 bytes; the NVFP4 tensor index records 26,473,821,704 bytes.
+
+### Source-to-NVFP4 quality evidence
+
+The frozen matrix covers 16 layer/expert pairs and all eight inputs. Every metric must be finite with nonzero source and NVFP4 norms.
+
+| Metric | Observed | Frozen boundary |
+|---|---:|---:|
+| Worst per-expert relative RMSE | `0.1683012879458` | `<= 0.18` |
+| Minimum per-expert cosine | `0.985919468279` | `>= 0.98` |
+| Aggregate relative RMSE | `0.1579548618065` | `<= 0.18` |
+| Aggregate cosine | `0.987528585785` | `>= 0.98` |
+
+Provider output is compared elementwise with the independent NVFP4 weighted oracle using
+
+$$
+10^{-6}\sum |w| + \left(10^{-2}+\gamma_{2r}\right)
+  \sum |w_e\,\operatorname{Expert}_e(x)|,
+$$
+
+where \(r\) is the number of remote routes in the staged row and \(\gamma_{2r}\) is the standard float32 accumulation factor. Non-finite provider output fails immediately.
+
+### Physical-B70 provider-wire matrix
+
+The recorded physical-B70 execution covered:
+
+- zero-remote materialization with no ring-slot publication and zero provider dispatch;
+- every `M=1..128` with one remote route per staged row;
+- all-remote `M=4` with duplicate and non-sorted IDs, repeated expert `7`, boundary experts `0/255`, and an exactly \(2^{-12}\) routing weight whose contribution is sensitivity-checked;
+- mixed `M=10` ownership with four sparse staged rows (`0,2,5,9`), interleaved local/remote routes, and byte-identical remote materialization plus identical provider results when only local routes change;
+- canonical-to-compact remapping through resident order `255,0,7,63,127,191,254,1`;
+- exact request/completion generation, sequence, nonce, placement/weight SHA-256, row/route extents, route status, token status, dispatch count, and allocation-baseline accounting;
+- sequence-bound `after_kernel_before_copyout` failures for both split and fused paths, with execution-failed/core-device status, no exposed payload, no contributed statuses, and unchanged poison output;
+- direct rejection of unsupported `M=0` and `M=129` without changing dispatch, allocation, or pending state;
+- full expert-bank SHA-256 binding plus trusted placement-generation and weight-generation bootstrap negatives.
+
+`phase3/provider_math_test` passed on the physical Intel Arc Pro B70. Its exact terminal success record was:
+
+```text
+Phase-3 provider mathematics PASS
+```
+
+### Boundary and non-claims
+
+This evidence proves the isolated QuixiCore-XPU NVFP4 provider's process-ring partial and artifact/source agreement. It does **not** prove:
+
+- upstream-vLLM integration or the Qwen-scoped adapter;
+- CUDA scatter into `[M, hidden]`, the CUDA add/join, or summed CUDA+B70 execution;
+- per-layer, final-logit, or generated-token parity;
+- concurrent request behavior, continuous batching, grouped prefill, throughput, latency targets, or CUDA/B70 overlap;
+- Phase 4 or any later gate, end-to-end readiness, or production acceptance.
+
+QuixiCore-XPU remains the selected primary B70 provider source, llm-scaler remains the qualified secondary INT4 fallback, and Colibri remains reference-only evidence.
+
 ## Phase 0–10 production status
 
 | Phase | Status | Work still required |
@@ -272,7 +338,7 @@ Historical oneMKL/Python workers remain investigative artifacts and are not the 
 | 0 — Freeze baselines and compatibility contracts | **Complete** | Exact runtime/hardware/checkpoint identities, fixed correctness and workload inputs, CUDA/B70 artifact SHA-256 fingerprints, the accepted all-CUDA vLLM graph-mode baseline, provider protocol, and capability manifest are recorded. Eager equivalence is intentionally deferred to the Phase-4 adapter-parity gate. |
 | 1 — Isolated QuixiCore-XPU B70 provider | **Complete; direct gate passed** | Full-bank load, explicit B70 selection, fixed buffers, protocol-v1 capability, provider-core load/issue/take/health/shutdown, split/fused policy, `M=1`, `M=2..32`, duplicate top-8, `M=128` prefill, fail-closed validation, and allocation stability passed on the actual B70. The isolated executable supplies startup load and control; the Phase-2 ring supplies process-facing route payload transport. llm-scaler remains a separately qualified secondary fallback. |
 | 2 — Batched pinned-memory protocol | **Complete; direct ring gate passed** | Protocol-v2 fixed-layout ABI, eight disjoint slots, canonical route/row payloads, release/acquire state transitions, bounded admission, cancellation/deadline quarantine, stale generation/PID rejection, process restart semantics, protocol stress, real-B70 numerical execution, allocation stability, and p50/p95/p99 stage measurements passed. |
-| 3 — Independent provider mathematics | **Not complete** | Validate weighted `[M_remote, hidden]` wire results and row maps over the full route/shape/failure matrix, verify CUDA scatter into `[M, hidden]`, and validate CUDA/B70 artifacts against one higher-precision source model. |
+| 3 — Independent provider mathematics | **Complete; physical-B70 provider-wire gate passed** | The authenticated BF16-source/NVFP4 fixture, byte-audited artifact records, weighted compact partial, `M=1..128` and semantic route matrix, compact remapping, identity/status/allocation accounting, failure poisoning, bootstrap negatives, and unsupported boundaries passed before CUDA scatter. This does not complete the CUDA join or upstream-vLLM adapter. |
 | 4 — Upstream-vLLM adapter | **Not implemented** | Add Qwen-scoped `HybridMoERunner`, `HybridRoutedExperts`, and provider client; prove all-CUDA adapter parity before remote routes. |
 | 5 — Compact expert ownership | **Not implemented in vLLM** | Load immutable CUDA/B70 compact banks from a validated placement manifest; prove exactly one normal owner and no inference-time weight movement. |
 | 6 — Eager hybrid execution | **Not implemented** | Partition canonical vLLM routes, overlap local CUDA and remote B70 execution, copy/add the remote partial before final reduction, and validate layer/logit/generation agreement. |
@@ -285,9 +351,8 @@ No row is marked complete merely because an analogous behavior works in Colibri.
 
 ## Next concrete deliverables
 
-Work proceeds in the Phase 0–10 order from [`../plan.md`](../plan.md). Phases 0, 1, and 2 are complete. The next deliverables are:
+Work proceeds in the Phase 0–10 order from [`../plan.md`](../plan.md). Phases 0, 1, 2, and 3 are complete. The immediate deliverable is:
 
-1. **Phase 3 provider oracle matrix:** batched weighted-partial comparisons for mixed ownership, duplicate/non-sorted experts, repeated experts across tokens, boundary IDs, near-zero weights, already-staged rows whose valid remote subset becomes empty, invalid generations, and failures.
-2. **Phase 4 all-CUDA adapter parity:** Qwen-scoped out-of-tree `HybridMoERunner` / `HybridRoutedExperts` installed in upstream vLLM, with stock-equivalent all-CUDA behavior before any B70 route is enabled.
+1. **Phase 4 all-CUDA adapter parity:** install the Qwen-scoped out-of-tree `HybridMoERunner`, `HybridRoutedExperts`, and provider client in upstream vLLM, keep every routed expert CUDA-local, and prove stock-equivalent routing, routed/shared outputs, logits, tokens, completion, cancellation, unsupported-path behavior, and performance before enabling B70 ownership.
 
-Only after these remaining gates pass should eager hybrid execution, continuous batching/prefill, piecewise graphs, operational recovery, and the Phase 10 production benchmark be described as active or complete.
+Only after Phase 4 and the subsequent ownership/hybrid gates pass may CUDA scatter/join, layer/logit/generation parity, continuous batching/prefill, piecewise graphs, operational recovery, or the Phase 10 production benchmark be described as active or complete.

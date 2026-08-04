@@ -4,7 +4,7 @@
 
 This document defines the source-checkpoint, provider-artifact, compact-ownership, and capability-manifest contract for the architecture in [`../plan.md`](../plan.md).
 
-The production deployment derives separate CUDA and B70 artifacts from one identical higher-precision BF16/FP16 source checkpoint. Provider formats are not interchangeable. The Phase-1 QuixiCore-XPU NVFP4 artifact and provider core passed their direct representation and B70 execution gates, and Phase 2 passed the process-ring transport/lifecycle and real-B70 numerical boundary. These gates do not yet prove the full Phase-3 mathematics matrix, upstream-vLLM integration, or end-to-end hybrid inference.
+The production deployment derives separate CUDA and B70 artifacts from one identical higher-precision BF16/FP16 source checkpoint. Provider formats are not interchangeable. Phase 1 qualified the QuixiCore-XPU NVFP4 bank and provider core, Phase 2 qualified its process-ring transport/lifecycle boundary, and Phase 3 completed the independent BF16-source/NVFP4 artifact and B70 wire-partial gate. These gates do not prove the CUDA artifact, CUDA scatter/join, upstream-vLLM integration, or end-to-end hybrid inference.
 
 The existing Colibri signed-S4 GS64 native worker is proven reference evidence and remains a comparator. Its reference artifact is distinct from the qualified Phase-1 NVFP4 bank and the secondary llm-scaler INT4 path.
 
@@ -196,7 +196,7 @@ A later match does not waive an earlier mismatch. Representation fields and iden
 
 Required cases include zero, small, saturating, seeded random, repeated, and changing inputs; `M=1`, `M=2..32`, and representative prefill `M`; changing/non-sorted/duplicate IDs under canonical semantics; multiple rows choosing one expert; unequal and near-zero weights; boundary compact slots; zero-row experts; and different supported shapes sequentially in one process.
 
-The current Phase-1 primary artifact has passed the layer-0/expert-0 representation fixture: bank tensor bytes match the checkpoint exactly, raw E4M3 scale bytes are preserved, the stored kernel multipliers equal the FP32 reciprocals of checkpoint `weight_global_scale`, the installed `compressed_tensors` decompressor agrees with the saved reference, and real B70 split/fused outputs pass the predeclared tolerance for `M=1`, `M=2..32`, duplicate top-8 routes, and representative `M=128` prefill. This qualifies that format mapping and tested shape set only; it does not qualify the eight FP8 layers, every expert, the secondary llm-scaler artifact, the production transport, or end-to-end vLLM integration.
+The Phase-1 primary artifact passed its initial layer-0/expert-0 representation fixture and real-B70 split/fused shape gate. Phase 3 then independently authenticated the full 14,495,580,220-byte bank (SHA-256 `0ce6377ba3c9848da42b6063574ea884052d2e0f5e605d86d1684a1e5826e8db`) and the canonical NVFP4 shard manifest (SHA-256 `320fad67387d36509947a691fa269d5a55dfb08f0cd7da6434868a6861bff2fa`), byte-audited packed E2M1 weights, raw E4M3 scales, and FP32 reciprocal global-scale bits for layers 0/31 and experts `0,1,7,63,127,191,254,255`, and computed independent float64 BF16-source and decoded-NVFP4 expert outputs for those 16 layer/expert pairs across eight deterministic FP16 inputs. The generator atomically freezes and validates `phase3/reference_fixture.bin` at SHA-256 `3ebac16d0f09907cee4718ac1054d21939e420eabaf76ebe79c75fa5d0132606`. The corresponding process-ring test passed on the physical B70 with compact resident order `255,0,7,63,127,191,254,1` and canonical-global-to-local remapping. This qualifies the sampled source-to-NVFP4 records and tested primary-provider wire mathematics only; it does not qualify the CUDA artifact, the eight FP8 layers, every expert, the secondary llm-scaler artifact, CUDA scatter/join, or end-to-end vLLM integration.
 
 ## Model, placement, and provider manifests
 
@@ -296,4 +296,4 @@ The following violate this contract:
 - accepting final-output similarity while source, representation, ownership, or intermediate checks fail;
 - moving, packing, allocating, or quantizing expert weights on the token path;
 - bulk conversion before the one-expert dual-artifact gate; or
-- describing the planned production artifact/provider as proven because the Colibri native GS64 comparator passed.
+- describing the QuixiCore provider or end-to-end hybrid path as proven solely because the Colibri native GS64 comparator passed.

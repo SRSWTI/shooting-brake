@@ -4,7 +4,7 @@
 
 This document defines evidence, benchmark configurations, metrics, and production acceptance for the one-RTX-5090 plus one-isolated-B70 design in [`../plan.md`](../plan.md). Correctness requirements are detailed in [`correctness.md`](correctness.md); topology and scheduling contracts are in [`hardware.md`](hardware.md) and [`scheduling.md`](scheduling.md).
 
-This is a measurement contract, not a claim that the upstream-vLLM 0.26+ `HybridMoERunner`/`HybridRoutedExperts` adapter or batched QuixiCore-XPU B70 provider has been implemented or qualified.
+This is a measurement contract. The isolated batched QuixiCore-XPU NVFP4 provider and protocol-v2 process ring are qualified through the completed Phase-3 independent provider-mathematics gate, but the upstream-vLLM 0.26+ `HybridMoERunner`/`HybridRoutedExperts` adapter, CUDA scatter/join, layer/logit/generation parity, and production throughput are not yet implemented or qualified.
 
 ## Evidence classes
 
@@ -48,11 +48,15 @@ Every comparable result records:
 
 A material manifest difference makes results non-comparable unless the difference is the explicit independent variable.
 
-## Historical and reference evidence
+## Observed non-production evidence
 
 The proven Colibri GS64 native path has demonstrated persistent compact B70 ownership, FP16 activation staging, canonical selected IDs/weights, ESIMD expert execution, one routing-weighted hidden-size partial, asynchronous issue/take, exact failed-route recovery, CPU-reference numerical agreement, end-to-end CUDA+B70 generation with zero normal-path CPU expert fallback, and controlled hybrid throughput close to its corresponding all-CUDA Colibri expert configuration.
 
 Separately, direct QuixiCore-XPU `nvfp4_moe` testing on the B70 on 2026-08-04 passed the correctness smoke gate for all tested operations, including fused and split execution, with maximum absolute error approximately $10^{-9}$. Split-kernel medians were 46.5 µs at `M=1` (270 GB/s weight bandwidth), 61.5 µs at `M=2` (409 GB/s), approximately 60–215 µs at `M=4` (233 GB/s), 173.8 µs at `M=8` (579 GB/s), and 343.3 µs at `M=16` (586 GB/s). These are direct-kernel measurements, not evidence that the production provider process or end-to-end path is implemented or qualified.
+
+Phase 2 separately measured the real process-ring timings reported in [`progress.md`](progress.md#phase-2-process-ring-evidence); those publication-to-observation percentiles remain **Phase-2 transport measurements** and are not reclassified as Phase-3 performance. Phase 3 added pass/fail and numerical-quality evidence, not throughput: `phase3/provider_math_test` passed on the physical B70, and the frozen independent BF16-source-versus-NVFP4 matrix records worst sampled-expert relative RMSE `0.1683012879458`, minimum cosine `0.985919468279`, aggregate relative RMSE `0.1579548618065`, and aggregate cosine `0.987528585785` against fixed gates of relative RMSE at most `0.18` and cosine at least `0.98`.
+
+The Phase-3 process-ring quality matrix covered zero-remote no-publication; every `M=1..128` with one remote route; all-remote duplicate/non-sorted/boundary/$2^{-12}$-weight `M=4`; mixed sparse/interleaved ownership with local-route invariance; compact canonical remapping through resident order `255,0,7,63,127,191,254,1`; identity/status/allocation accounting; split/fused sequence-bound injected failures; unsupported `M=0/129`; and trusted bank/placement/weight bootstrap negatives. These are scoped correctness results. No Phase-3 throughput, TTFT, ITL, concurrency, CUDA-overlap, or production-tail claim follows from them.
 
 Historical observations include:
 
@@ -96,9 +100,9 @@ Exercise the isolated persistent provider with preselected IDs/weights and the e
 | Larger decode | representative negotiated `M>32` | qualified fused or split NVFP4 MoE for the negotiated shape |
 | Prefill | representative short/medium/large negotiated `M` | qualified fused or split NVFP4 MoE for the negotiated shape |
 
-For every direct-provider class cover all staged routes remote, mixed local/remote semantic subsets, duplicate/non-sorted IDs, multiple tokens selecting one expert, unequal and near-zero weights, boundary IDs, and compact-slot remapping. Measure provider dispatch, H2D/D2H, remap, up, activation, down, weighted accumulation, complete device-local partial, first-call compilation, allocation count, memory growth, power, clocks, and p50/p95/p99. Exercise zero-remote layers only at the adapter/ring/end-to-end gate, where they must produce no provider dispatch and a zero CUDA remote lane.
+For every direct-provider class cover all staged routes remote, mixed local/remote semantic subsets, duplicate/non-sorted IDs, multiple tokens selecting one expert, unequal and near-zero weights, boundary IDs, and compact-slot remapping. The completed Phase-3 matrix covers those provider-wire semantics for its frozen primary NVFP4 fixture, including zero-remote ring no-publication; later adapter/ring/end-to-end gates must repeat zero-remote behavior at the CUDA state owner. Performance qualification must still measure provider dispatch, H2D/D2H, remap, up, activation, down, weighted accumulation, complete device-local partial, first-call compilation, allocation count, memory growth, power, clocks, and p50/p95/p99.
 
-The direct provider gate requires correct compact `[M_remote, hidden]` weighted wire partials plus exact row maps, explicit rejection of unsupported shapes, stable multiple-shape reuse, and no steady-state weight upload or tensor allocation. The CUDA-side gate separately verifies deterministic scatter into a zero-initialized `[M, hidden]` batch buffer. The provider must never run router/top-k or shared-expert work.
+The completed provider gate establishes correct compact `[M_remote, hidden]` weighted wire partials, exact row/route identity, stable allocation accounting, explicit `M=0/129` rejection, and failure results without exposed payload for the tested primary NVFP4 bundle. The CUDA-side gate remains open and must separately verify deterministic scatter into a zero-initialized `[M, hidden]` batch buffer and the subsequent local/remote join. The provider must never run router/top-k or shared-expert work.
 
 ### 2. Fixed pinned-ring transport matrix
 
@@ -121,16 +125,16 @@ Exercise:
 
 Report each copy direction, publication/queue time, completion time, total round trip, pinned NUMA placement, CPU signaling/polling cost, allocations, stale/discarded completions, and exposed CUDA wait. The gate requires bounded p99, no early reuse, no global synchronization, no hot-path allocation, correct release/acquire ordering, and no stale output acceptance.
 
-### 3. Batched provider mathematics
+### 3. Batched provider mathematics — Phase 3 complete
 
-Compare independently:
+Phase 3 compared independently:
 
 ```text
 Y_reference = weighted sum of exactly the B70-owned routes
-Y_provider_wire  = returned weighted [M_remote, hidden] partial before CUDA scatter
+Y_provider_wire = returned weighted [M_remote, hidden] partial before CUDA scatter
 ```
 
-Validate CUDA and B70 artifacts independently against the same higher-precision source checkpoint before validating their joined output. Cover `M=1`, `M=2..32`, representative prefill `M`, all/mixed/no remote routes, repeated experts, unequal weights, invalid placement/weight generation, and injected provider error. Unsupported shape/layout/group-size combinations fail explicitly.
+`phase3/generate_reference.py` authenticates the full expert-bank SHA-256 and frozen NVFP4 shard manifest, byte-audits the selected bank records, computes independent float64 BF16-source and decoded-NVFP4 outputs for layers 0/31 and experts `0,1,7,63,127,191,254,255` across eight deterministic FP16 inputs, and freezes/validates `phase3/reference_fixture.bin`. The physical-B70 process-ring test passed the supported `M=1..128` and semantic/failure cases listed above. The result qualifies the primary NVFP4 provider wire partial only. CUDA scatter/join, CUDA-artifact parity, upstream adapter parity, layer/logit/generation parity, and every performance metric remain open.
 
 ### 4. Hybrid layer matrix
 

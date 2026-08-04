@@ -4,7 +4,7 @@
 
 [`../plan.md`](../plan.md) is the sole authoritative active architecture and implementation plan. This document explains that architecture's boundaries and data flow. If it diverges from `plan.md`, `plan.md` controls.
 
-**Production status:** planned and under qualification. The target is upstream vLLM 0.26+ on one RTX 5090 as the CUDA state owner plus one isolated persistent QuixiCore-XPU B70 provider on one Intel Arc Pro B70. That production integration is not yet claimed complete.
+**Production status:** planned and under qualification. Phase 0 through Phase 3 are complete: the frozen baseline, persistent QuixiCore-XPU provider, process ring, and independent pre-CUDA provider-wire mathematics gates passed. The target remains upstream vLLM 0.26+ on one RTX 5090 as the CUDA state owner plus one isolated persistent QuixiCore-XPU provider on one Intel Arc Pro B70; the CUDA scatter/join and upstream-vLLM adapter are not yet implemented or claimed complete.
 
 **Reference status:** `colibri-variants/colibri-qwen36/` has already demonstrated a native CUDA+B70 Qwen3.6 GS64 path. Its transport lifecycle, expert residency, conversion, route ownership, numerical agreement, placement behavior, and exact recovery semantics are proven reference evidence. It is not the selected production model host.
 
@@ -291,21 +291,12 @@ Its proven scope includes:
 - exact failed-route recovery;
 - end-to-end CUDA+B70 generation without normal-path CPU expert fallback.
 
-Those are Colibri reference-path facts. The planned production equivalents are conversion from the common higher-precision source into QuixiCore-XPU's NVFP4 E2M1-plus-E4M3-block-scale layout and qualified QuixiCore-XPU NVFP4 MoE execution.
+Those are Colibri reference-path facts. Phase 3 separately qualified conversion from the common higher-precision source into QuixiCore-XPU's NVFP4 E2M1-plus-E4M3-block-scale layout and the B70 provider-wire mathematics; the upstream CUDA adapter and join remain planned.
 
-The planned one-token form of the production kernel transaction is native and uses the NVFP4 artifact:
-
-```text
-activation       [2048] FP32 host input
-expert IDs       [routes] int32
-routing weights  [routes] FP32
-    -> B70 NVFP4 MoE expert execution
-weighted partial [2048] FP32 host output
-```
 
 The observed roughly `56–100 µs` one-token issue/take range and other Colibri throughput results are reference measurements. They do not establish production vLLM throughput, continuous-batch behavior, grouped prefill performance, graph compatibility, or production provider overhead.
 
-The planned production transaction is batched and runtime-neutral:
+The completed provider-side transaction is batched and runtime-neutral; its CUDA scatter target remains an unimplemented downstream boundary:
 
 ```text
 activation       [M_remote, hidden] FP16/BF16
@@ -317,7 +308,16 @@ weighted partial [M_remote, hidden] FP16/FP32
 completion and recovery metadata; CUDA scatter target [M, hidden]
 ```
 
-Colibri therefore supplies the correctness, transport, placement, and failure baseline while production engineering focuses on batching, the provider boundary, and insertion into vLLM's modular routed-expert lifecycle.
+Colibri therefore remains the reference baseline, while the independent Phase-3 gate supplies production-oriented artifact and provider-wire evidence. Production engineering now proceeds to Phase 4 insertion into vLLM's modular routed-expert lifecycle; CUDA scatter/join is still open.
+
+## Completed Phase 3 provider-wire gate
+
+Phase 3 independently bound the provider wire result to the frozen model artifacts before any CUDA scatter or join. `phase3/generate_reference.py` authenticates the full expert-bank SHA-256 and the frozen NVFP4 shard manifest, byte-audits the sampled bank records against the NVFP4 artifact, and computes independent float64 BF16-source and NVFP4 expert outputs for layers `0` and `31`, experts `0,1,7,63,127,191,254,255`, and eight deterministic FP16 inputs. The generated `phase3/reference_fixture.bin` is schema-, identity-, and SHA-256-validated by the C++ harness.
+
+`phase3/provider_math_test` passed on the physical B70. It proved the compact weighted `[M_remote, hidden]` wire partial for the `M=1..128` one-remote-route sweep; all-remote duplicate, non-sorted, boundary, and \(2^{-12}\)-weight routes; sparse/interleaved mixed ownership with invariance to changes in local-only routes; canonical-to-compact remapping for resident order `255,0,7,63,127,191,254,1`; zero-remote no-publication; wire identity/status/allocation accounting; split/fused sequence-bound failure poisoning; unsupported `M=0/129`; and trusted bank/placement/weight bootstrap rejection.
+
+This gate proves source/NVFP4 artifact agreement and the B70 process-ring partial **before CUDA scatter**. It does not prove the full-batch CUDA scatter/add join, upstream-vLLM integration, layer/logit/generation parity, concurrent serving, throughput, or production acceptance.
+
 
 ## Repository role matrix
 
@@ -379,7 +379,7 @@ The controlled benchmark must compare identical stock all-CUDA vLLM, hybrid CUDA
 
 Architecture delivery follows only Phase 0 through Phase 10 in [`../plan.md`](../plan.md). [`implementation-plan.md`](implementation-plan.md) is the subordinate gate checklist for those same phases. The architecture introduces no alternate Stage sequence, GLM-first target, or multi-device rollout.
 
-Phase 0, Phase 1, and Phase 2 are complete. The fixed-layout protocol-v2 eight-slot ring, process-isolated B70 server, CUDA/Level-Zero pinned-memory probe, lifecycle stress suite, real-B70 numerical validation, and warmed stage percentiles passed their direct gates. The immediate work is Phase 3: validate provider weighted-partial mathematics and row mappings over the full route/shape/failure matrix, including deterministic CUDA scatter. Qwen-scoped upstream-vLLM adapter work begins in Phase 4 only after that independent mathematics gate passes.
+Phase 0, Phase 1, Phase 2, and Phase 3 are complete. The physical-device evidence now covers the fixed-layout protocol-v2 ring, isolated B70 server, CUDA/Level-Zero byte transport, lifecycle stress, and an independently generated source/NVFP4 oracle matched by the weighted provider-wire partial over the complete Phase-3 matrix. The immediate work is Phase 4: install the Qwen-scoped upstream-vLLM adapter and prove stock-equivalent all-CUDA behavior. CUDA scatter/join and remote-route enablement remain open and are not implied by the completed provider-wire gate.
 
 ## Non-goals
 

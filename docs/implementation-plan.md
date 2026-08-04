@@ -4,7 +4,7 @@
 
 [`../plan.md`](../plan.md) is the sole authoritative active plan. This document is a subordinate execution and evidence checklist for the same **Phase 0 through Phase 10** sequence. It does not authorize a second sequence, rename phases, add prerequisites, or override a gate in `plan.md`. If wording differs, `plan.md` controls.
 
-**Status:** Phase 0, Phase 1, and Phase 2 are complete against the pinned production configuration; Phase 3 is next. Existing Colibri CUDA+B70 work remains reference evidence only. Completion evidence for the production-oriented QuixiCore-XPU provider and process ring is recorded in [`progress.md`](progress.md#phase-1-persistent-provider-evidence) and [`progress.md`](progress.md#phase-2-process-ring-evidence); later phases remain unpassed until their own evidence is recorded.
+**Status:** Phase 0, Phase 1, Phase 2, and Phase 3 are complete against the pinned production configuration; Phase 4 all-CUDA adapter parity is next. Existing Colibri CUDA+B70 work remains reference evidence only. Completion evidence for the production-oriented QuixiCore-XPU provider, process ring, and independent provider-wire mathematics is recorded in [`progress.md`](progress.md#phase-1-persistent-provider-evidence), [`progress.md`](progress.md#phase-2-process-ring-evidence), and [`progress.md`](progress.md#phase-3-independent-provider-wire-mathematics-evidence); Phase 4 and later remain unpassed until their own evidence is recorded.
 
 The active production direction is:
 
@@ -226,6 +226,8 @@ Any ambiguous ownership, premature reuse, stale acceptance, lost completion, unb
 
 ## Phase 3 — Validate provider mathematics independently
 
+**Status: COMPLETE.** The independent artifact/source and physical-B70 provider-wire gate passed; see [`progress.md`](progress.md#phase-3-independent-provider-wire-mathematics-evidence).
+
 ### Objective
 
 Prove that the provider's returned partial contains exactly the B70-owned routed contributions before combining it with vLLM.
@@ -241,40 +243,47 @@ Y_{\text{provider}}[t] \approx
 =Y_{\text{reference}}[t].
 $$
 
-Validate CUDA and B70 artifacts independently against the same higher-precision source checkpoint before validating their sum. Record the accepted quantization and accumulation tolerance rather than borrowing one from an unrelated model or format.
+Validate the B70 NVFP4 artifact independently against the frozen higher-precision BF16 source checkpoint. CUDA artifact qualification, full-batch scatter/add, and summed CUDA+B70 validation remain later adapter/hybrid gates.
 
-### Required cases
+### Completed cases
 
-- `M=1`, every qualified decode range through `M=32`, and representative prefill sizes;
-- all staged routes remote and mixed local/remote semantic subsets;
-- duplicate and non-sorted selected IDs as allowed by canonical inputs;
-- multiple tokens selecting the same expert;
-- unequal, zero, and near-zero routing weights;
-- boundary global IDs and compact-slot remapping;
-- padded/invalid route positions;
-- invalid provider, placement, and weight generations;
-- unsupported shapes and capacities;
-- injected device or kernel failure.
+- zero-remote materialization with no ring publication or provider dispatch;
+- the one-remote-route sweep for every `M=1..128`;
+- all-remote `M=4` with duplicate, non-sorted, repeated, and boundary IDs plus an exactly \(2^{-12}\) routing weight;
+- sparse row maps and interleaved mixed local/remote ownership, including invariance when only local routes change;
+- canonical-to-compact remapping for resident order `255,0,7,63,127,191,254,1`;
+- process-ring request/completion identity, route/token status, allocation, and dispatch accounting;
+- sequence-bound failures injected into both split and fused kernel paths, with no payload exposure or accepted partial;
+- unsupported direct-provider shapes `M=0` and `M=129`;
+- trusted bank SHA-256 plus placement- and weight-bootstrap rejection.
 
-For a full batch with no B70-owned routes, the adapter must issue no provider request and must preserve a zero CUDA remote lane. Within an already-staged row, an empty valid remote subset must produce zero provider contribution. The provider must never include local CUDA contributions.
+For a full batch with no B70-owned routes, the Phase-3 wire harness published no provider request and retained zero provider dispatches. Phase 3 does not claim the CUDA remote lane or upstream adapter; CUDA scatter/add remains a later gate.
 
 ### Gate
 
-Every supported shape and route case satisfies the recorded numerical tolerance and route identity. Unsupported inputs fail explicitly. Error metadata identifies exactly which routes require recovery without accepting a partial contribution as complete.
+Every supported wire shape and route case passed the recorded numerical budget and route identity on the physical B70. Unsupported inputs failed explicitly. Injected failures preserved sequence identity, reported no contributed route/token status, exposed no output payload, and left poison output unchanged.
 
 ### Evidence checklist
 
-- source checkpoint and both artifact fingerprints;
-- reference implementation and tolerance rationale;
-- per-case maximum/mean error and NaN/Inf checks;
-- route/slot mapping and weighted-sum trace;
-- duplicate, invalid, boundary, and zero-route behavior;
-- failure metadata and exact recovery input reconstruction;
-- sequential mixed-shape stability.
+- frozen BF16 source snapshot, NVFP4 snapshot/manifest, expert-bank, and fixture fingerprints;
+- independent float64 reference implementation and tolerance rationale;
+- per-expert and aggregate relative-RMSE/cosine metrics plus finite/nonzero checks;
+- route/slot mapping, weighted-sum, and local-route-invariance traces;
+- duplicate, non-sorted, repeated, boundary, \(2^{-12}\)-weight, and zero-publication behavior;
+- sequence-bound split/fused failure metadata with no payload exposure;
+- sequential mixed-shape stability, compact remapping, and allocation/dispatch accounting.
 
 ### Decision rule
 
 Any unexplained route loss, double count, slot confusion, generation confusion, numerical divergence, or silent generic-kernel fallback blocks the adapter phase.
+
+### Completion evidence
+
+`phase3/generate_reference.py` authenticated the 14,495,580,220-byte expert bank (`0ce6377ba3c9848da42b6063574ea884052d2e0f5e605d86d1684a1e5826e8db`) and canonical NVFP4 shard manifest (`320fad67387d36509947a691fa269d5a55dfb08f0cd7da6434868a6861bff2fa`), then byte-audited sampled packed E2M1 weights, raw E4M3FN block scales, and global-scale fields against the artifact. It computed float64 BF16-source and NVFP4 outputs for layers `0/31`, experts `0,1,7,63,127,191,254,255`, and eight deterministic FP16 inputs, and froze `phase3/reference_fixture.bin` at SHA-256 `3ebac16d0f09907cee4718ac1054d21939e420eabaf76ebe79c75fa5d0132606`.
+
+Across the 16 sampled layer/expert pairs, the worst relative RMSE was `0.1683012879458` and the minimum cosine was `0.985919468279`; aggregate relative RMSE was `0.1579548618065` and aggregate cosine was `0.987528585785`. The frozen acceptance boundaries are relative RMSE `<=0.18`, cosine `>=0.98`, and finite/nonzero metric inputs. `phase3/provider_math_test` validated fixture identity, independent NVFP4 wire results, raw completion identity/status, and the completed matrix on the physical B70, ending with the exact success record `Phase-3 provider mathematics PASS`.
+
+The Phase-3 decision is limited to source/NVFP4 artifact agreement and the process-ring `[M_remote, hidden]` partial before CUDA scatter. It does not establish upstream-vLLM integration, CUDA scatter/join, layer/logit/generation parity, concurrency, throughput, or production acceptance.
 
 ## Phase 4 — Add the upstream-vLLM out-of-tree adapter
 
@@ -608,7 +617,7 @@ Condition 8 permits profiling a native Torch-free provider around the already-qu
 
 ## Immediate next step
 
-Execute Phase 3. Compare the process-ring weighted partial with an independent oracle across mixed local/remote subsets, duplicate/non-sorted and boundary expert IDs, repeated experts across tokens, unequal and near-zero weights, explicit token-row remapping, already-staged rows whose valid remote subset becomes empty, invalid generations, and provider failures. Verify deterministic CUDA scatter into the full `[M, hidden]` buffer before beginning Phase 4 all-CUDA upstream-vLLM adapter parity.
+Execute Phase 4. Install the Qwen-scoped out-of-tree `HybridMoERunner`, `HybridRoutedExperts`, and `ShootingBrakeExpertProviderClient` in the pinned upstream vLLM configuration, route every expert locally, and prove stock-equivalent all-CUDA router IDs/weights, routed outputs, shared-expert behavior, logits, generated tokens, completion, cancellation, and performance before enabling any B70-owned route. The completed Phase-3 wire partial does not waive this adapter-parity gate or prove CUDA scatter/join.
 
 ## Superseded sequencing
 

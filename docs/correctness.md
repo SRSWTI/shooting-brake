@@ -4,7 +4,7 @@
 
 This document defines the normative correctness contract for the architecture in [`../plan.md`](../plan.md). It is a design and qualification target, not a claim that the upstream-vLLM plus B70 production path has been implemented or passed.
 
-The production direction is one upstream vLLM 0.26+ CUDA state owner on the RTX 5090 and one isolated, persistent QuixiCore-XPU provider on the B70. Phase 1 qualified the native provider core directly for batched NVFP4 expert execution, and Phase 2 made that issue/take path process-facing through the protocol-v2 eight-slot ring with real-B70 numerical and lifecycle validation. The existing Colibri implementation remains separate reference evidence for transport, placement, failure handling, and the signed-S4 GS64 native worker. Phase 3 must now qualify the complete provider mathematics matrix before upstream-vLLM integration.
+The production direction is one upstream vLLM 0.26+ CUDA state owner on the RTX 5090 and one isolated, persistent QuixiCore-XPU provider on the B70. Phase 1 qualified the native provider core directly for batched NVFP4 expert execution, Phase 2 made that issue/take path process-facing through the protocol-v2 eight-slot ring, and Phase 3 completed the independent provider-mathematics gate on the physical B70. The existing Colibri implementation remains separate reference evidence for transport, placement, failure handling, and the signed-S4 GS64 native worker. Phase 4 upstream-vLLM adapter integration, CUDA scatter/join, and later layer/logit/generation parity remain open.
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
@@ -167,21 +167,25 @@ Allowed numerical differences are only those covered by a declared precision con
 
 Tolerances MUST be fixed before observing results and MUST specify absolute/relative error, zero-reference handling, and NaN/Inf policy. Speed does not waive an unexplained mismatch. Route identity, ownership, generation, shape, and completion checks are exact even when tensor comparison uses a tolerance.
 
-The proven native Colibri comparator uses signed-S4, group size 64, FP16 scales, FP16 activation staging, ESIMD fused gate/up/SiLU/down execution, and a routing-weighted hidden-size partial, with numerical agreement against its CPU reference. Those facts validate the Colibri GS64 reference path only. The planned QuixiCore-XPU batched production provider uses NVFP4 and requires independent qualification; the llm-scaler INT4 path remains a secondary alternative if NVFP4 quality is insufficient and requires its own independent qualification.
+The primary QuixiCore-XPU NVFP4 path has now passed two distinct numerical gates. Phase 1 qualified direct provider execution; Phase 3 independently authenticated the full packed bank and frozen NVFP4 shard manifest, byte-audited sampled bank records against the NVFP4 artifact, and computed float64 BF16-source and NVFP4 expert outputs for layers 0 and 31, experts `0,1,7,63,127,191,254,255`, and eight deterministic FP16 inputs. The frozen Phase-3 quality gate passed with worst sampled-expert relative RMSE `0.1683012879458`, minimum cosine `0.985919468279`, aggregate relative RMSE `0.1579548618065`, and aggregate cosine `0.987528585785`. These facts qualify the sampled source-to-NVFP4 artifact agreement and the tested B70 wire partial, not the CUDA artifact, heterogeneous CUDA join, or end-to-end model. The proven native Colibri signed-S4 GS64 path remains reference-only; llm-scaler INT4 remains a separately qualified secondary alternative requiring its own artifact and numerical gate.
 
 ## Qualification hierarchy
 
 Passing a lower level does not establish a higher one.
 
-1. **Artifact and one-expert comparison:** validate the CUDA and B70 artifacts independently against the common higher-precision source at dequantized rows, gate/up output, activation, down output, and complete expert output.
-2. **Batched provider mathematics:** compare the returned weighted `[M_remote, hidden]` wire partial with exactly the B70-owned staged routes for full scheduler batches `M=1`, `M=2..32`, and representative prefill sizes, then verify deterministic scatter into the full `[M, hidden]` CUDA buffer.
-3. **Layer replay:** preserve canonical CUDA top-k and compare the post-join routed result with all-CUDA execution, including mixed ownership, no remote routes, compact remapping, and join-before-reduction placement.
+1. **Artifact/source comparison:** validate each CUDA or B70 artifact independently against the common higher-precision source at dequantized rows, gate/up output, activation, down output, and complete expert output. Phase 3 closes this level only for the sampled primary B70 NVFP4 records and outputs described below; the CUDA artifact and secondary INT4 artifact remain separate gates.
+2. **Batched provider-wire mathematics:** compare the returned weighted `[M_remote, hidden]` wire partial with exactly the B70-owned staged routes for supported full scheduler batches. Phase 3 closes this level for the frozen primary NVFP4 fixture and tested `M=1..128` process-ring cases.
+3. **CUDA scatter and layer replay:** scatter the compact rows deterministically into the full `[M, hidden]` CUDA buffer, preserve canonical CUDA top-k, and compare the post-join routed result with all-CUDA execution, including mixed ownership, no remote routes, compact remapping, and join-before-reduction placement.
 4. **Teacher-forced replay:** compare routes, per-layer results, logits, recurrent/KV behavior, and top-1 tokens across long and multi-turn sequences.
 5. **Generation:** compare deterministic greedy generation and required quality workloads, including intentional B70 failure and restart.
 
 Required staged-provider cases include all staged routes remote and mixed local/remote semantic subsets; duplicate and non-sorted IDs under canonical semantics; multiple tokens choosing one expert; unequal, zero, and near-zero weights; boundary compact slots; changing decode/prefill batch sizes; invalid capability and generations; timeout; kernel failure; and stale completion. Adapter/ring cases separately include a zero-remote batch, which must issue no provider request and must preserve an additive-identity CUDA remote lane, plus ring wraparound and cancellation.
 
-No document currently records the production vLLM+B70 path as having passed these gates.
+**Phase-3 observed gate.** `phase3/provider_math_test` passed on the physical B70. It compared the process-ring wire partial against the independent NVFP4 oracle for a one-remote-route sweep at every `M=1..128`; an all-remote `M=4` case with duplicate, non-sorted, boundary IDs and an observable $2^{-12}$ weight; and sparse/interleaved mixed ownership with local-only route perturbations proving remote-lane invariance. The provider ran with compact resident order `255,0,7,63,127,191,254,1`, exercising canonical-global-to-provider-local remapping. The same gate proved zero-remote no-publication, exact raw wire identity/status, unchanged allocation accounting, sequence-bound split- and fused-kernel failures with no exposed payload, explicit rejection of `M=0` and `M=129`, and trusted bank/placement/weight bootstrap rejection.
+
+This closes the independent B70 provider-mathematics and process-ring failure matrix for the tested primary NVFP4 bundle. It does **not** prove the CUDA artifact, CUDA scatter/add, upstream-vLLM adapter behavior, join-before-reduction placement, layer/logit/generation parity, concurrency, throughput, recovery execution, or production acceptance; those remain Phase 4 and later gates.
+
+No document currently records the upstream-vLLM plus B70 production path as having passed qualification levels 3–5. Phase 3 is complete only at the independent artifact/source and pre-CUDA-scatter provider-wire boundary described above.
 
 ## Failure matrix
 

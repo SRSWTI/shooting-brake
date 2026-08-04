@@ -11,9 +11,9 @@ The source inspection and B70 kernel evidence summarized here reflect the worksp
 - **Inspected source fact** — behavior or an interface observed in a named checkout. It is not a local production result.
 - **Upstream claim** — a result reported by an external project, article, or paper. It is never Shooting Brake benchmark evidence.
 - **Proven Colibri reference evidence** — behavior measured in `colibri-variants/colibri-qwen36/`. It establishes feasibility for that implementation only.
-- **QuixiCore-XPU B70 qualification evidence** — behavior measured for the named kernel checkout, completed Phase-1 provider core, and completed Phase-2 process ring on the actual B70. It qualifies direct full-bank execution and the isolated process boundary, not the Phase-3 oracle matrix or vLLM integration.
-- **Production decision** — the required destination architecture from [`../plan.md`](../plan.md). Phases 0, 1, and 2 are complete; later behavior remains planned until its corresponding gate is completed.
-- **Unverified production assumption** — a proposition requiring evidence against upstream vLLM and the isolated B70 provider.
+- **QuixiCore-XPU B70 qualification evidence** — behavior measured for the named kernel checkout and completed Phase-1 provider, Phase-2 process ring, and Phase-3 independent provider-wire gate on the actual B70. It qualifies direct full-bank execution, the isolated process boundary, source/NVFP4 artifact agreement, and the compact weighted partial before CUDA scatter; it does not qualify CUDA scatter/join or vLLM integration.
+- **Production decision** — the required destination architecture from [`../plan.md`](../plan.md). Phases 0, 1, 2, and 3 are complete; Phase 4 and later behavior remain planned until their corresponding gates are completed.
+- **Unverified production assumption** — a proposition requiring evidence against upstream vLLM, the CUDA adapter/join, and the isolated B70 provider.
 
 Repository revisions identify what was inspected; they do not assert that a checkout has remained unchanged. Compatibility must be established through the model/provider manifest and correctness gates, never inferred from similar dimensions, dtypes, device names, or model-family names.
 
@@ -58,11 +58,12 @@ CPU work is limited to orchestration, placement, queue management, telemetry, an
 ### QuixiCore-XPU NVFP4 MoE
 
 - **Provenance:** local `QuixiCore-XPU/` checkout, inspected from source and built on the Intel Arc Pro B70 on 2026-08-04. It is an MIT-licensed native SYCL kernel library with a framework-neutral raw-pointer C++ ABI and an optional PyTorch binding.
-- **Inspected source facts:** its purpose-built `nvfp4_moe` fused and split operations accept preselected `int32` expert IDs and `float32` routing weights. The NVFP4 contract uses packed E2M1 weights, E4M3 block scales over blocks of 16, and per-expert FP32 global scales. Nonblocking dispatch returns a SYCL event for asynchronous chaining; this API fact does not claim that the production provider process is implemented.
+- **Inspected source facts:** its purpose-built `nvfp4_moe` fused and split operations accept preselected `int32` expert IDs and `float32` routing weights. The NVFP4 contract uses packed E2M1 weights, E4M3 block scales over blocks of 16, and per-expert FP32 global scales. Nonblocking dispatch returns a SYCL event for asynchronous chaining; these source facts are distinct from the separately recorded local provider/process evidence.
 - **B70 qualification evidence:** all operations passed the correctness smoke gate on the B70, including `nvfp4_moe` fused and split, with maximum absolute error approximately `1e-9`. Reported split-kernel results were a `46.5 µs` median at `M=1` (`270 GB/s` weight bandwidth), a `61.5 µs` median at `M=2` (`409 GB/s`), approximately `60–215 µs` at `M=4` (`233 GB/s`), a `173.8 µs` median at `M=8` (`579 GB/s`), and a `343.3 µs` median at `M=16` (`586 GB/s`).
 - **Production decision:** use only qualified preselected-route QuixiCore-XPU NVFP4 MoE operations in the separate persistent B70 provider. The provider accepts canonical IDs and routing weights, owns persistent compact B70 weights and preallocated buffers, and returns one weighted `[M_remote, hidden]` wire partial plus the row map used by CUDA to construct the full `[M, hidden]` contribution.
 - **Format rule:** the production B70 artifact is NVFP4 and derives from the same higher-precision source checkpoint as the separately converted CUDA NVFP4 or FP8 artifact. Conversion occurs offline or at initialization, never on the token path.
-- **Does not prove:** production process isolation, ring correctness, batched provider behavior, vLLM integration, cross-runtime failure recovery, end-to-end production latency, or production throughput.
+- **Completed Phase-3 provider-wire evidence:** the independent generator authenticated the full expert-bank SHA-256 and canonical NVFP4 shard manifest, byte-audited the sampled bank records, and froze float64 BF16-source and NVFP4 outputs for layers `0/31`, experts `0,1,7,63,127,191,254,255`, and eight deterministic FP16 inputs. Worst sampled relative RMSE was `0.1683012879458` with minimum cosine `0.985919468279`; aggregate relative RMSE was `0.1579548618065` with cosine `0.987528585785`, inside the frozen `<=0.18` / `>=0.98` boundaries. The physical-B70 process-ring harness passed zero-publication, `M=1..128`, duplicate/non-sorted/boundary/small-weight, mixed-ownership invariance, compact-remap, identity/status/allocation, split/fused failure, unsupported-shape, and trusted-bootstrap cases.
+- **Does not prove:** CUDA scatter/add or the upstream CUDA join, vLLM adapter integration, mixed layer/logit/generation parity, cross-runtime recovery in the integrated host, concurrency, end-to-end production latency, production throughput, or production acceptance.
 
 ### llm-scaler and vLLM XPU kernels
 
@@ -96,7 +97,7 @@ CPU work is limited to orchestration, placement, queue management, telemetry, an
 - **Scope of proof:** the current transaction is single-token and the native worker has one in-order queue, one pending operation, and fixed scratch. The controlled measurements and traces in [progress.md](progress.md) are Colibri reference results.
 - **Production reuse:** preserve the lifecycle invariants, placement semantics, exact route ownership, recovery semantics, and native worker as a comparator.
 - **Explicit non-adoption:** Colibri is not the production state owner. Its CUDA model path, serving stack, single-token protocol, and timings are not substitutes for upstream vLLM Phase 0–10 acceptance.
-- **Does not prove:** the Phase-3 full provider mathematics matrix, scheduler-step aggregation, continuous-batch decode, end-to-end grouped prefill, an out-of-tree vLLM adapter, piecewise CUDA graphs, operational recovery, or production performance. Those remain independent of the completed direct Phase-1 provider and Phase-2 process-ring gates.
+- **Does not prove:** scheduler-step aggregation, continuous-batch decode, end-to-end grouped prefill, an out-of-tree vLLM adapter, CUDA scatter/join, piecewise CUDA graphs, operational recovery, or production performance. Phase 3 now has its own independent provider-wire evidence; it was not inferred from Colibri.
 
 ## Secondary source ledger
 

@@ -4,7 +4,7 @@ Shooting Brake is a heterogeneous Mixture-of-Experts inference system for one NV
 
 [`plan.md`](plan.md) is the sole authoritative active architecture and implementation plan. Documents under `docs/` explain its contracts and evidence, but do not define a second delivery sequence.
 
-> **Status:** Phase 0, Phase 1, and Phase 2 are complete. The frozen vLLM/CUDA baseline and compatibility package are recorded under `phase0/`; the native QuixiCore-XPU provider core, isolated control process, full 8,192-expert bank, independent representation oracle, and direct B70 lifecycle/correctness/allocation gate are implemented under `phase1/`; and the fixed-layout eight-slot process ring, deterministic protocol stress suite, CUDA/Level-Zero transport probe, isolated B70 ring server, real-device numerical gate, and warmed latency percentiles are implemented under `phase2/`. Phase 3—the independent provider mathematics matrix—is next. The upstream-vLLM adapter and end-to-end production hybrid path remain later work.
+> **Status:** Phase 0, Phase 1, Phase 2, and Phase 3 are complete. The frozen vLLM/CUDA baseline and compatibility package are recorded under `phase0/`; the native QuixiCore-XPU provider core and direct B70 gate are implemented under `phase1/`; the fixed-layout process ring, transport probe, isolated B70 ring server, and real-device integration gate are implemented under `phase2/`; and the independent source/artifact/provider mathematics gate is implemented under `phase3/`. Phase 3 evidence is generated and authenticated by `phase3/generate_reference.py`, frozen in `phase3/reference_fixture.bin`, and exercised on the physical B70 by `phase3/provider_math_test`. Phase 4—the Qwen-scoped upstream-vLLM out-of-tree adapter—is next. The adapter and end-to-end production hybrid path remain later work.
 
 ## Production architecture
 
@@ -74,12 +74,15 @@ These results establish the transport, correctness, placement, and failure-seman
 
 The process-facing activation/route data plane is intentionally the Phase-2 pinned ring; stdin is control-only.
 
+### Completed Phase-3 provider mathematics
+
+`phase3/generate_reference.py` authenticates the full expert-bank SHA-256 and frozen NVFP4 shard manifest, byte-audits sampled bank records against the NVFP4 artifact, computes independent float64 BF16-source and NVFP4 expert outputs for layers 0 and 31 and experts 0, 1, 7, 63, 127, 191, 254, and 255 across eight deterministic FP16 inputs, and freezes and validates `phase3/reference_fixture.bin`. On the physical B70, `phase3/provider_math_test` passed zero-remote no-publication; the `M=1..128` one-remote-route sweep; all-remote duplicate, non-sorted, boundary, and \(2^{-12}\)-weight `M=4`; mixed sparse and interleaved ownership with local-route invariance; process-ring identity, status, and allocation accounting; split- and fused-path sequence-bound injected failures; unsupported `M=0` and `M=129`; trusted bank, placement, and weight-bootstrap negatives; and compact resident list `255,0,7,63,127,191,254,1` with canonical-to-local remapping. This proves the B70 wire partial before CUDA scatter and artifact/source agreement. It does not claim upstream-vLLM integration, CUDA scatter/join, layer/logit/generation parity, concurrency or throughput, or production acceptance.
+
 ### Remaining production path
 
 Production still requires:
 
-- a multi-slot, batched, versioned pinned-memory ring connecting the vLLM process to the completed provider core;
-- independent mathematical qualification of compact `[M_remote, hidden]` provider output and its scatter into the full `[M, hidden]` CUDA batch;
+- CUDA scatter/join of the qualified compact `[M_remote, hidden]` provider output into the full `[M, hidden]` batch through the upstream-vLLM adapter;
 - Qwen-scoped `HybridMoERunner` and `HybridRoutedExperts` integration in upstream vLLM;
 - eager hybrid correctness, then continuous-batch decode and grouped prefill;
 - piecewise CUDA graph restoration and removal of exposed synchronization;
@@ -108,7 +111,9 @@ The complete numerical and route contract is in [`docs/correctness.md`](docs/cor
 | Directory | Role | Boundary |
 |---|---|---|
 | `QuixiCore-XPU/` | Primary MIT-licensed B70 NVFP4 MoE kernel source | Imported through its framework-neutral native SYCL ABI; do not fork without measured need |
-| `phase1/` | Completed native provider core, control process, full-bank artifact tooling, oracle, and direct tests | Phase-2 transport will make its issue/take path process-facing |
+| `phase1/` | Completed native provider core, control process, full-bank artifact tooling, oracle, and direct tests | Supplies the qualified persistent B70 compute core |
+| `phase2/` | Completed protocol-v2 ring, transport probe, isolated B70 server, and process integration tests | Supplies the process-facing activation/route/partial boundary |
+| `phase3/` | Completed independent source/artifact/provider mathematics fixture and physical-B70 gate | Proves the B70 wire partial before CUDA scatter; does not prove the upstream join |
 | `vllm/` | Upstream vLLM 0.26+ CUDA state owner and production serving host | Keep changes out-of-tree and Qwen-scoped; do not apply llm-scaler's vLLM 0.21 patch wholesale |
 | `intel-xpu/llm-scaler/` | Qualified secondary B70 INT4 fallback and kernel-design reference | Not the primary provider and never the CUDA host |
 | `intel-xpu/vllm-xpu/vllm-xpu-kernels/` | Independently versioned binding/kernel surface for the secondary fallback | Qualify shapes, layouts, safety fixes, and numerics per fallback release |
@@ -132,7 +137,7 @@ The only active sequence is Phase 0 through Phase 10 in [`plan.md`](plan.md):
 0. Freeze baselines and compatibility contracts. **Complete.**
 1. Build and directly qualify the isolated QuixiCore-XPU B70 provider. **Complete.**
 2. Implement the batched versioned pinned-memory protocol. **Complete.**
-3. Validate provider mathematics independently.
+3. Validate provider mathematics independently. **Complete.**
 4. Add the Qwen-scoped upstream-vLLM out-of-tree adapter.
 5. Load compact immutable expert ownership.
 6. Integrate eager hybrid execution.
@@ -145,7 +150,7 @@ The only active sequence is Phase 0 through Phase 10 in [`plan.md`](plan.md):
 
 ## Immediate next step
 
-Execute Phase 3: validate that every process-ring result is exactly the weighted sum of the B70-owned staged routes across the complete route/shape/failure matrix. Cover mixed local/remote ownership, duplicate and non-sorted IDs, repeated experts across tokens, boundary IDs, unequal and near-zero weights, explicit row maps, already-staged rows whose valid remote subset becomes empty, invalid generations, and provider failures; then verify deterministic CUDA scatter into the full `[M, hidden]` buffer before beginning Phase 4 all-CUDA adapter parity.
+Execute Phase 4: add the Qwen-scoped `HybridMoERunner`, `HybridRoutedExperts`, and `ShootingBrakeExpertProviderClient` as an out-of-tree upstream-vLLM adapter. First prove that all-CUDA mode through the adapter matches stock vLLM output and performance within measurement noise; only then enable B70 routes and implement the CUDA scatter/join of the already-qualified wire partial.
 
 ## Documentation
 

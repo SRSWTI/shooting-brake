@@ -4,7 +4,7 @@
 
 This document specifies the production routed-expert ownership policy for one RTX 5090 CUDA state owner and one isolated B70 provider. It follows [`../plan.md`](../plan.md) and the boundaries in [architecture.md](architecture.md), [memory.md](memory.md), [scheduling.md](scheduling.md), and [benchmarking.md](benchmarking.md).
 
-This is a design and qualification contract. Phase 1 has qualified the full 8,192-expert B70 NVFP4 bank and provider-core batch execution, but not a CUDA/B70 ownership split or traffic-derived production placement. The current Colibri implementation remains reference evidence for compact ownership, correctness, and failure semantics; the secondary llm-scaler INT4 placement remains unqualified.
+This is a design and qualification contract. Phase 1 qualified the full 8,192-expert B70 NVFP4 bank and provider-core batch execution; Phase 3 additionally qualified canonical-global-to-compact remapping and weighted wire mathematics for the frozen compact resident list `255,0,7,63,127,191,254,1`. Neither gate selects or validates a traffic-derived production CUDA/B70 ownership split. The current Colibri implementation remains reference evidence for compact ownership, correctness, and failure semantics; the secondary llm-scaler INT4 placement remains unqualified.
 
 ## Normative ownership invariants
 
@@ -117,6 +117,8 @@ missing/unhealthy owner    -> exact recovery mask/error
 
 The masks partition the original routes without changing IDs or weights. Rows with no B70 route do not enter the remote request. B70 remaps global IDs to compact slots, evaluates only its owned route pairs, applies the original route weights, reduces by staged token row, and returns one `[M_remote, hidden]` wire partial with `token_row_map`. CUDA scatters it into a zero-initialized `[M, hidden]` buffer and adds that full-batch buffer to the local routed partial.
 
+The completed Phase-3 process-ring gate exercised the provider-private remap with canonical IDs retained on the wire and the non-canonical resident order `255,0,7,63,127,191,254,1`. It passed every one-remote-route `M=1..128`, all-remote duplicate/non-sorted/boundary IDs, mixed sparse/interleaved ownership, and a paired local-only route perturbation that left the staged request and returned remote partial invariant. It also proved that a zero-remote case publishes no ring slot. This validates the provider-side remap and compact wire partial for that frozen test placement; it does not validate a production hot/cold placement, CUDA local compaction, CUDA scatter/join, route-frequency policy, or capacity gain.
+
 One active layer and scheduler step produces at most one aggregated B70 operation, regardless of the number of requests or B70-owned experts. Placement must not induce per-request B70 submissions.
 
 ## Failure and recovery ownership
@@ -134,7 +136,7 @@ Recovery does not make CPU a normal placement tier. Recovery count must be zero 
 
 The proven Colibri GS64 native path demonstrates persistent compact `(layer, expert) -> slot` B70 ownership, canonical route metadata, weighted-partial return, exact failed-route recomputation, and end-to-end CUDA+B70 generation without normal-path CPU expert fallback. Its placement evidence supports keeping high-traffic experts on CUDA while using B70 for substantial resident capacity.
 
-Those Colibri results remain reference/baseline evidence only. Phase 1 validates batched QuixiCore-XPU NVFP4 provider-core execution, and Phase 2 validates the direct process ring and isolated real-B70 service. Neither validates the production Qwen-scoped adapter, mixed CUDA/B70 placement manifest, continuous scheduler integration, actual capacity gain, or comparison with stock all-CUDA upstream vLLM. The llm-scaler INT4 path remains a qualified secondary fallback, but its production placement and integration remain unqualified.
+Those Colibri results remain reference/baseline evidence only. Phase 1 validates batched QuixiCore-XPU NVFP4 provider-core execution, Phase 2 validates the direct process ring and isolated real-B70 service, and Phase 3 validates the compact canonical remap and primary-NVFP4 wire partial described above. None validates the production Qwen-scoped adapter, a traffic-derived mixed CUDA/B70 placement manifest, CUDA scatter/join, continuous scheduler integration, actual capacity gain, or comparison with stock all-CUDA upstream vLLM. The llm-scaler INT4 path remains a qualified secondary fallback, but its production placement and integration remain unqualified.
 
 ## Placement qualification
 

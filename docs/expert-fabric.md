@@ -4,7 +4,7 @@
 
 This document specifies the versioned pinned-memory protocol between the Qwen-scoped `HybridMoERunner`/`HybridRoutedExperts` adapter in upstream vLLM 0.26+ and one isolated, persistent QuixiCore-XPU B70 routed-expert provider. [`../plan.md`](../plan.md) is authoritative.
 
-This is the normative production transport design. Phase 1 completed and directly qualified the native provider core and isolated control process; Phase 2 completed the protocol-v2 multi-slot process ring, physical CUDA/Level-Zero mapping probe, isolated B70 server, lifecycle stress, and direct numerical/latency gate. The existing Colibri native worker remains the transport, placement, and failure-semantics comparator, not the production endpoint. Phase 3 provider mathematics and Phase 4 upstream-vLLM integration remain open.
+This is the normative production transport design. Phase 1 completed and directly qualified the native provider core and isolated control process; Phase 2 completed the protocol-v2 multi-slot process ring, physical CUDA/Level-Zero mapping probe, isolated B70 server, lifecycle stress, and direct numerical/latency gate; and Phase 3 completed the independent provider-mathematics matrix over that process ring on the physical B70. The existing Colibri native worker remains the transport, placement, and failure-semantics comparator, not the production endpoint. Phase 4 upstream-vLLM adapter integration and CUDA scatter/join remain open.
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
@@ -277,7 +277,13 @@ The Colibri native worker has proven:
 
 Separately, qualified QuixiCore-XPU kernels have proven NVFP4 fused gate/up/SiLU/down execution on B70.
 
-That Colibri worker remains a correctness/latency comparator. Its own logical transaction is single-token, one-pending-operation, fixed-scratch execution. Phase 1 separately qualified QuixiCore-XPU split/fused execution, batched shapes through `M=128`, and fixed provider buffers; Phase 2 separately qualified the multi-slot process ring, per-route/per-token status, and isolated real-B70 data plane. Neither result proves scheduler-step aggregation inside upstream vLLM, the full Phase-3 oracle matrix, or Phase-4 adapter integration.
+That Colibri worker remains a correctness/latency comparator. Its own logical transaction is single-token, one-pending-operation, fixed-scratch execution. Separately, Phase 1 qualified QuixiCore-XPU split/fused execution, batched shapes through `M=128`, and fixed provider buffers; Phase 2 qualified the multi-slot process ring, per-route/per-token status, and isolated real-B70 data plane; and Phase 3 qualified the primary NVFP4 weighted wire partial before CUDA scatter. Phase 3 used compact resident order `255,0,7,63,127,191,254,1` and proved canonical-global-to-local remapping, `M=1..128`, all-remote and mixed sparse/interleaved ownership, duplicate/non-sorted/boundary IDs, a $2^{-12}$ route weight, local-route invariance, zero-remote no-publication, exact identity/status/allocation accounting, and sequence-bound split/fused failure publication. It does not prove scheduler-step aggregation inside upstream vLLM, the CUDA scatter/join, adapter parity, or end-to-end behavior.
+
+### Completed Phase-3 wire gate
+
+`phase3/generate_reference.py` authenticates the 14,495,580,220-byte packed bank by SHA-256, authenticates the frozen NVFP4 shard manifest, byte-compares sampled expert records with the NVFP4 artifact, independently computes float64 BF16-source and decoded-NVFP4 expert outputs, and freezes and validates `phase3/reference_fixture.bin`. `phase3/provider_math_test` then passed against the physical B70 through the standalone process and protocol-v2 ring, including trusted placement/weight bootstrap negatives, unsupported `M=0/129`, and failure completions that expose no partial payload.
+
+This is evidence for the compact `[M_remote, hidden]` wire partial and its process semantics only. CUDA has not yet scattered those rows into `[M, hidden]`, joined them with local CUDA experts, or proved the upstream-vLLM layer seam.
 
 ## Hard gates
 
@@ -286,7 +292,7 @@ The fabric is eligible only after:
 1. capability mismatches fail before execution;
 2. ring stress covers concurrent slots, wraparound, stale replies, invalid generations, provider restart, cancellation, timeout, and injected kernel failure;
 3. no hot-path allocation, weight upload, global device synchronization, unbounded queue, or unsafe buffer reuse occurs;
-4. provider mathematics matches the weighted sum of exactly its B70-owned routes for `M=1`, `M=2..32`, and representative prefill sizes;
-5. zero-remote, all-remote, mixed, duplicate/non-sorted, compact-boundary, near-zero-weight, and shared-expert-preservation cases pass;
+4. the completed Phase-3 provider gate remains reproducible for the weighted sum of exactly its B70-owned routes across `M=1..128`, all-remote and mixed ownership, compact remapping, duplicates, non-sorted and boundary IDs, and near-zero weights;
+5. the completed Phase-3 ring cases continue to preserve zero-remote no-publication, local-route invariance, exact status/identity/allocation accounting, and explicit split/fused failure publication;
 6. the CUDA+B70 partial joins before final TP/EP reduction and matches the all-CUDA layer oracle within the declared artifact/precision tolerance; and
 7. every failure produces exact route recovery or explicit request failure, with no normal-path CPU matrix work.

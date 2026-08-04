@@ -1,0 +1,99 @@
+# Shooting Brake Phase 0 — Fixed Performance Workload
+# Date: 2026-08-04
+# All baselines (CUDA-only, CUDA+B70, CUDA+CPU) must use this exact workload.
+
+# ---------------------------------------------------------------------------
+# Decode workload (primary — measures steady-state throughput and ITL)
+# ---------------------------------------------------------------------------
+decode:
+  description: >
+    Single-request decode at batch=1. Measures pure decode tok/s and ITL.
+    This is the primary comparison point for B70 expert offload impact.
+  prompts:
+    - "Write a detailed essay about the history of computing, from Charles Babbage to modern AI. Cover at least five key milestones."
+  max_tokens: 512
+  temperature: 0.0          # greedy — deterministic
+  top_p: 1.0
+  batch_size: 1
+  metrics:
+    - output_tokens
+    - throughput_tok_s
+    - ttft_ms
+    - mean_itl_ms
+    - p99_itl_ms
+
+# ---------------------------------------------------------------------------
+# Batched decode workload (measures batch scaling)
+# ---------------------------------------------------------------------------
+batched_decode:
+  description: >
+    8 concurrent requests, each generating 256 tokens. Measures how batching
+    affects throughput and whether B70 expert contention changes the curve.
+  num_requests: 8
+  prompts:
+    - "Explain how a transformer neural network processes text, step by step."
+    - "Describe the water cycle in detail."
+    - "Write a short story about a robot learning to paint."
+    - "What are the key differences between renewable and non-renewable energy?"
+    - "Explain the concept of recursion in programming with an example."
+    - "Describe the process of photosynthesis."
+    - "What caused the fall of the Roman Empire?"
+    - "Explain quantum entanglement for a general audience."
+  max_tokens: 256
+  temperature: 0.0
+  metrics:
+    - total_output_tokens
+    - aggregate_throughput_tok_s
+    - mean_ttft_ms
+    - mean_itl_ms
+    - p99_itl_ms
+
+# ---------------------------------------------------------------------------
+# Prefill workload (measures prompt processing throughput)
+# ---------------------------------------------------------------------------
+prefill:
+  description: >
+    Long-prompt prefill to measure prompt-processing throughput.
+    Relevant because grouped prefill is a B70 kernel family.
+  prompt: |
+    Summarize the following text in one paragraph:
+
+    The Industrial Revolution was a period of major industrialization and
+    innovation that took place during the late 1700s and early 1800s. The
+    Industrial Revolution began in Great Britain and quickly spread throughout
+    the world. The use of new basic materials, primarily iron and steel, new
+    energy sources such as coal and the steam engine, new machines like the
+    spinning jenny and the power loom that increased production, the factory
+    system, and new transportation technologies like railways and steamboats
+    were all key developments. These changes had profound effects on social
+    and cultural conditions, leading to urbanization as people moved from
+    farms to cities, changes in family structure, and the emergence of new
+    social classes. The Industrial Revolution marked a major turning point
+    in history; almost every aspect of daily life was influenced in some way.
+    In particular, average income and population began to exhibit unprecedented
+    sustained growth. In the words of Nobel Prize winner Robert E. Lucas Jr.,
+    'For the first time in history, the living standards of the masses of
+    ordinary people have begun to undergo sustained growth. Nothing remotely
+    like this economic behavior has happened before.'
+  max_tokens: 128
+  temperature: 0.0
+  metrics:
+    - prefill_tokens
+    - prefill_throughput_tok_s
+    - ttft_ms
+
+# ---------------------------------------------------------------------------
+# Mode matrix
+# ---------------------------------------------------------------------------
+modes:
+  - name: "eager"
+    enforce_eager: true
+  - name: "graph"
+    enforce_eager: false
+    description: "vLLM piecewise compiled graph (CUDA-side; B70 path exempt)"
+
+# ---------------------------------------------------------------------------
+# Acceptance: each baseline must complete all workloads above with
+# correct outputs on correctness_prompts.jsonl (cosine similarity >= 0.95
+# against the CUDA-only reference, or exact match on expected_contains tokens).
+# ---------------------------------------------------------------------------

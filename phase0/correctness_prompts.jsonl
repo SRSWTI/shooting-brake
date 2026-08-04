@@ -1,0 +1,12 @@
+{"id": "arith_001", "prompt": "What is 17 multiplied by 23? Show your work.", "max_tokens": 128, "expected_contains": ["391"]}
+{"id": "arith_002", "prompt": "What is 2+2?", "max_tokens": 32, "expected_contains": ["4"]}
+{"id": "logic_001", "prompt": "If all roses are flowers and some flowers fade quickly, can we conclude that some roses fade quickly? Explain your reasoning.", "max_tokens": 256, "expected_contains": ["cannot", "no"]}
+{"id": "code_001", "prompt": "Write a Python function that returns the nth Fibonacci number using iteration. Include type hints.", "max_tokens": 256, "expected_contains": ["def", "fibonacci"]}
+{"id": "code_002", "prompt": "Write a SQL query to find the top 3 customers by total order amount from an orders table with columns customer_id and amount.", "max_tokens": 128, "expected_contains": ["SELECT", "ORDER BY", "LIMIT 3"]}
+{"id": "factual_001", "prompt": "What is the capital of Australia?", "max_tokens": 32, "expected_contains": ["Canberra"]}
+{"id": "factual_002", "prompt": "Who wrote 'One Hundred Years of Solitude'?", "max_tokens": 32, "expected_contains": ["Garcia Marquez"]}
+{"id": "instruction_001", "prompt": "Explain the difference between TCP and UDP in exactly three sentences.", "max_tokens": 128, "expected_contains": ["connection", "reliable"]}
+{"id": "instruction_002", "prompt": "List the first five prime numbers.", "max_tokens": 32, "expected_contains": ["2", "3", "5", "7", "11"]}
+{"id": "reasoning_001", "prompt": "A train travels 60 km in 45 minutes. What is its speed in km/h?", "max_tokens": 128, "expected_contains": ["80"]}
+{"id": "reasoning_002", "prompt": "If you have a 3-liter jug and a 5-liter jug, how do you measure exactly 4 liters? List each step.", "max_tokens": 256, "expected_contains": ["fill", "5"]}
+{"id": "multilingual_001", "prompt": "Translate to English: 'La vida es corta, el arte es larga.'", "max_tokens": 64, "expected_contains": ["Life is short", "art is long"]}

@@ -1,0 +1,122 @@
+# Shooting Brake — Model and Provider Capability Manifest
+# Version: 1
+# Date: 2026-08-04
+#
+# Validated at startup. Any mismatch between this manifest and the loaded
+# model/provider is a hard fail with an actionable error.
+
+manifest_version: 1
+
+# ---------------------------------------------------------------------------
+# Model capability
+# ---------------------------------------------------------------------------
+model:
+  name: "Qwen3.6-35B-A3B"
+  architecture: "Qwen3_5MoeForConditionalGeneration"
+  source_checkpoint: "Qwen/Qwen3.6-35B-A3B"
+  source_snapshot: "995ad96eacd98c81ed38be0c5b274b04031597b0"
+  
+  architecture_params:
+    hidden_size: 2048
+    num_hidden_layers: 40
+    num_experts: 256
+    num_experts_per_tok: 8
+    moe_intermediate_size: 512
+    shared_expert_intermediate_size: 512
+    head_dim: 256
+    num_attention_heads: 16
+    num_key_value_heads: 2
+    vocab_size: 248320
+    full_attention_interval: 4
+    layer_layout: "hybrid (3 linear_attention : 1 full_attention)"
+    rope_theta: 10000000
+    partial_rotary_factor: 0.25
+
+# ---------------------------------------------------------------------------
+# CUDA artifact capability
+# ---------------------------------------------------------------------------
+cuda_artifact:
+  source: "unsloth/Qwen3.6-35B-A3B-NVFP4"
+  format: "NVFP4"
+  quantization_method: "compressed-tensors"
+  residency: "full model in VRAM"
+  device: "RTX 5090 (32 GiB)"
+  fingerprint_algorithm: "SHA-256 of the lexicographically ordered model-*.safetensors sha256sum manifest"
+  fingerprint: "320fad67387d36509947a691fa269d5a55dfb08f0cd7da6434868a6861bff2fa"
+
+# ---------------------------------------------------------------------------
+# B70 provider capability
+# ---------------------------------------------------------------------------
+b70_provider:
+  backend_primary: "quixicore-xpu-nvfp4"
+  backend_secondary: "torch-xpu-llm-scaler (INT4 GS128, qualified fallback)"
+  
+  device: "Intel Arc Pro B70 (34,242,297,856 bytes reported)"
+  
+  nvfp4_contract:
+    weight_dtype: "E2M1 (4-bit, packed uint8)"
+    block_scale_dtype: "E4M3 (8-bit)"
+    block_size: 16
+    kernel_multiplier_dtype: "FP32"
+    kernel_multiplier_count: "1 per expert per projection (w13 and w2)"
+    
+    # Per-expert weight tensors:
+    w13_layout: "[2 * intermediate, hidden] = [1024, 2048]"
+    w13_packed: "[1024, 2048/2] uint8"        # 2 nibbles per byte
+    w13_block_scales: "[1024, 2048/16] E4M3"
+    w13_global_scale: "1 FP32 QuixiCore multiplier = 1 / checkpoint weight_global_scale"
+    
+    w2_layout: "[hidden, intermediate] = [2048, 512]"
+    w2_packed: "[2048, 512/2] uint8"
+    w2_block_scales: "[2048, 512/16] E4M3"
+    w2_global_scale: "1 FP32 QuixiCore multiplier = 1 / checkpoint weight_global_scale"
+    
+    # Per-expert total, including two FP32 kernel multipliers:
+    expert_bytes_packed: 1769480   # 1,769,472 tensor bytes + 8 scale bytes
+    expert_count_per_layer_max: 256
+    total_expert_bytes_per_layer: 452986880
+    total_expert_bytes_all_nvfp4_layers: 14495580160
+    expert_bank_file_bytes: 14495580220  # payload + 60-byte packed header
+    expert_bank_sha256: "0ce6377ba3c9848da42b6063574ea884052d2e0f5e605d86d1684a1e5826e8db"
+  
+  supported_kernels:
+    primary:
+      - name: "nvfp4_moe_split"
+        signature: "(queue, hidden, topk_ids, topk_weights, w13, w13_scales, w13_global_scales, w2, w2_scales, w2_global_scales, scratch, out, M, E, top_k, K, I, act_dt, multiply_router_weight=true)"
+        provider_policy: "split for M <= 32"
+        measured: { m1_us: 46.5, m2_us: 61.5, m8_us: 173.8 }
+      - name: "nvfp4_moe_fused"
+        signature: "(queue, hidden, topk_ids, topk_weights, w13, w13_scales, w13_global_scales, w2, w2_scales, w2_global_scales, out, M, E, top_k, K, I, act_dt, multiply_router_weight=true)"
+        provider_policy: "fused for M > 32"
+    secondary:
+      - name: "llm-scaler moe_forward_full_int4"
+        format: "signed-S4 GS128"
+        status: "qualified fallback"
+  
+  residency_capacity:
+    # The checkpoint has NVFP4 expert tensors for model layers 0..31.
+    # Layers 32..39 use FP8 expert weights and are not part of this artifact.
+    nvfp4_artifact_full_residency: true
+    nvfp4_layer_count: 32
+    resident_experts: 8192
+    max_resident_experts_for_this_artifact: 8192
+    non_nvfp4_layers: "32..39 remain CUDA-local unless separately converted and qualified"
+
+# ---------------------------------------------------------------------------
+# Startup validation gates (hard fail on mismatch)
+# ---------------------------------------------------------------------------
+startup_gates:
+  - check: "model.architecture == loaded_config.architectures[0]"
+    fail_action: "ABORT"
+  - check: "model.num_experts == loaded_config.num_experts"
+    fail_action: "ABORT"
+  - check: "model.hidden_size == loaded_config.hidden_size"
+    fail_action: "ABORT"
+  - check: "b70_provider.device == detected_xpu_device_name"
+    fail_action: "ABORT"
+  - check: "cuda_artifact.format == loaded_quantization_format"
+    fail_action: "ABORT"
+  - check: "b70_provider.nvfp4_contract.block_size == 16"
+    fail_action: "ABORT"
+  - check: "capability.protocol_version == 1"
+    fail_action: "ABORT"

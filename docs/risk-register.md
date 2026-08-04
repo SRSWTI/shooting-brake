@@ -48,7 +48,7 @@ The Colibri Qwen3.6 implementation provides reference evidence for:
 - exact failed-route recomputation;
 - end-to-end CUDA+B70 generation with zero normal-path CPU expert fallback in the recorded suite.
 
-This evidence supports the feasibility of the lifecycle and informs mitigations for R4, R5, R10, R13, R15, and R16. It does **not** close those production risks because the planned provider is batched and process-isolated, the state owner is upstream vLLM, and the production protocol and adapter do not yet exist.
+Phase 1 adds direct evidence for explicit B70 selection, exact full-bank startup validation, fixed provider buffers, split/fused batched execution through `M=128`, duplicate top-8 weighting, generation/sequence rejection, allocation stability, and shutdown. Phase 2 adds a separately mapped CUDA/Level-Zero pinned-memory probe, the protocol-v2 eight-slot process ring, deterministic lifecycle/failure stress through 2,000,000-request wraparound, process-isolated real-B70 numerical execution, exact dispatch/allocation accounting, and warmed stage percentiles. Together they close the direct-provider and direct-process-ring portions of R3, R7, R8, R9, and R17 for the pinned bundle. They do **not** close production placement, the full provider mathematics matrix, upstream-vLLM integration, scheduler aggregation/overlap, operational recovery, or production-performance risks; those belong to Phases 3–10.
 
 ## Stop and fallback rules
 

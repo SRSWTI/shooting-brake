@@ -4,7 +4,7 @@
 
 This document specifies the production routed-expert ownership policy for one RTX 5090 CUDA state owner and one isolated B70 provider. It follows [`../plan.md`](../plan.md) and the boundaries in [architecture.md](architecture.md), [memory.md](memory.md), [scheduling.md](scheduling.md), and [benchmarking.md](benchmarking.md).
 
-This is a design and qualification contract. The current Colibri implementation is reference evidence for compact ownership, correctness, and failure semantics; it is not evidence that the upstream-vLLM plus batched QuixiCore-XPU NVFP4 primary placement or llm-scaler INT4 secondary/fallback placement is implemented or qualified.
+This is a design and qualification contract. Phase 1 has qualified the full 8,192-expert B70 NVFP4 bank and provider-core batch execution, but not a CUDA/B70 ownership split or traffic-derived production placement. The current Colibri implementation remains reference evidence for compact ownership, correctness, and failure semantics; the secondary llm-scaler INT4 placement remains unqualified.
 
 ## Normative ownership invariants
 
@@ -134,7 +134,7 @@ Recovery does not make CPU a normal placement tier. Recovery count must be zero 
 
 The proven Colibri GS64 native path demonstrates persistent compact `(layer, expert) -> slot` B70 ownership, canonical route metadata, weighted-partial return, exact failed-route recomputation, and end-to-end CUDA+B70 generation without normal-path CPU expert fallback. Its placement evidence supports keeping high-traffic experts on CUDA while using B70 for substantial resident capacity.
 
-Those results are reference/baseline evidence only. They do not validate the production Qwen-scoped out-of-tree adapter, batched QuixiCore-XPU NVFP4 primary provider, llm-scaler INT4 secondary/fallback provider, continuous batching, grouped prefill, immutable production manifest, actual capacity gain, or comparison with stock all-CUDA upstream vLLM.
+Those Colibri results remain reference/baseline evidence only. Phase 1 validates batched QuixiCore-XPU NVFP4 provider-core execution, and Phase 2 validates the direct process ring and isolated real-B70 service. Neither validates the production Qwen-scoped adapter, mixed CUDA/B70 placement manifest, continuous scheduler integration, actual capacity gain, or comparison with stock all-CUDA upstream vLLM. The llm-scaler INT4 path remains a qualified secondary fallback, but its production placement and integration remain unqualified.
 
 ## Placement qualification
 

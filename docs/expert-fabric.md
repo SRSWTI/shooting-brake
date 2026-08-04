@@ -4,7 +4,7 @@
 
 This document specifies the versioned pinned-memory protocol between the Qwen-scoped `HybridMoERunner`/`HybridRoutedExperts` adapter in upstream vLLM 0.26+ and one isolated, persistent QuixiCore-XPU B70 routed-expert provider. [`../plan.md`](../plan.md) is authoritative.
 
-This is a normative production design, not a claim that the batched vLLM+B70 path has been implemented or measured. The existing Colibri native worker is the proven transport, correctness, placement, and failure-semantics comparator; it is not the production endpoint.
+This is the normative production transport design. Phase 1 completed and directly qualified the native provider core and isolated control process; Phase 2 completed the protocol-v2 multi-slot process ring, physical CUDA/Level-Zero mapping probe, isolated B70 server, lifecycle stress, and direct numerical/latency gate. The existing Colibri native worker remains the transport, placement, and failure-semantics comparator, not the production endpoint. Phase 3 provider mathematics and Phase 4 upstream-vLLM integration remain open.
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
@@ -277,7 +277,7 @@ The Colibri native worker has proven:
 
 Separately, qualified QuixiCore-XPU kernels have proven NVFP4 fused gate/up/SiLU/down execution on B70.
 
-That worker remains a correctness/latency comparator. Its current logical transaction is single-token, one-pending-operation, fixed-scratch execution. It does not prove the production requirements for multi-slot continuous batching, aggregated decode, grouped prefill, per-route batched status, QuixiCore-XPU kernel qualification, or isolated-process vLLM integration.
+That Colibri worker remains a correctness/latency comparator. Its own logical transaction is single-token, one-pending-operation, fixed-scratch execution. Phase 1 separately qualified QuixiCore-XPU split/fused execution, batched shapes through `M=128`, and fixed provider buffers; Phase 2 separately qualified the multi-slot process ring, per-route/per-token status, and isolated real-B70 data plane. Neither result proves scheduler-step aggregation inside upstream vLLM, the full Phase-3 oracle matrix, or Phase-4 adapter integration.
 
 ## Hard gates
 

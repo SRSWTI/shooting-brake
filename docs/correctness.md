@@ -4,7 +4,7 @@
 
 This document defines the normative correctness contract for the architecture in [`../plan.md`](../plan.md). It is a design and qualification target, not a claim that the upstream-vLLM plus B70 production path has been implemented or passed.
 
-The production direction is one upstream vLLM 0.26+ CUDA state owner on the RTX 5090 and one isolated, persistent QuixiCore-XPU provider on the B70. The existing Colibri implementation is proven reference evidence for transport, placement, failure handling, and the signed-S4 GS64 native worker; it is not the production model host or proof of the planned batched provider.
+The production direction is one upstream vLLM 0.26+ CUDA state owner on the RTX 5090 and one isolated, persistent QuixiCore-XPU provider on the B70. Phase 1 qualified the native provider core directly for batched NVFP4 expert execution, and Phase 2 made that issue/take path process-facing through the protocol-v2 eight-slot ring with real-B70 numerical and lifecycle validation. The existing Colibri implementation remains separate reference evidence for transport, placement, failure handling, and the signed-S4 GS64 native worker. Phase 3 must now qualify the complete provider mathematics matrix before upstream-vLLM integration.
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 

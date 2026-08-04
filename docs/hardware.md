@@ -108,7 +108,7 @@ The native worker in `colibri-variants/colibri-qwen36/c/b70_moe_sycl.cpp` has al
 - end-to-end CUDA+B70 generation with zero normal-path CPU expert fallback; and
 - controlled hybrid throughput close to the corresponding all-CUDA Colibri expert configuration.
 
-Observed one-token B70 issue/take was roughly 56–100 µs per active MoE layer. This is a useful transport/correctness/latency baseline only. The native worker has one in-order queue, one pending operation, fixed single-token scratch, no continuous-batch aggregation, and no large-prefill grouped path. It does not prove the planned batched QuixiCore-XPU provider, process-ring overhead, upstream-vLLM integration, graph behavior, production throughput, or production tail latency.
+Observed Colibri one-token B70 issue/take was roughly 56–100 µs per active MoE layer. This remains transport/reference evidence only. Phase 1 separately qualified the full-bank QuixiCore-XPU provider core across `M=1`, decode batches, and `M=128` prefill with fixed buffers. Phase 2 then measured the real process ring: warmed publication-to-observation p50 was 245.640, 292.517, 581.815, and 1,896.458 µs for sequential one-route `M=1`, `M=8`, `M=32`, and `M=128` requests, with unfiltered long-tail p99 reported in [`progress.md`](progress.md#phase-2-process-ring-evidence). Neither evidence proves upstream-vLLM integration, CUDA/B70 overlap, graph behavior, production throughput, or production tail latency.
 
 The B70's 608 GB/s specification is an upstream claim. For an ideal 18 MiB W4 expert it implies a roughly 31 µs weight-read lower bound, but that omits scales, dequantization, launch, intermediates, imbalance, transport, and join. It must not be reported as measured latency.
 

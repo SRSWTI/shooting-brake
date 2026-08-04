@@ -11,8 +11,8 @@ The project has **proven a Colibri-based CUDA+B70 reference path**. It has **not
 | Colibri CUDA+B70 reference | Proven for the recorded single-token Qwen3.6 GS64 path | Establishes transport, residency, selected-route compute, placement, exact recovery, and end-to-end feasibility. |
 | Native B70 comparator | Proven for the recorded shapes and tests | Provides a Torch-free correctness/latency baseline derived from QuixiCore-XPU NVFP4 MoE kernels. |
 | Upstream vLLM 0.26+ CUDA state owner | Planned, not integrated | The inspected checkout and injection seams are known; no production `HybridMoERunner` path is complete. |
-| Isolated persistent QuixiCore-XPU B70 provider | Planned, not implemented | The intended primary NVFP4 batched decode/prefill provider does not yet exist; llm-scaler remains a secondary INT4 fallback. |
-| Versioned batched pinned-memory request ring | Planned, not implemented | The current Colibri transaction is single-token and not the production protocol. |
+| Isolated persistent QuixiCore-XPU B70 provider | **Phase 1 implemented and direct-provider gate passed** | Explicit B70 selection, full 8,192-expert NVFP4 bank load, fixed USM buffers, protocol-v1 capability, issue/take, health/shutdown, split/fused policy, generation/sequence rejection, and direct correctness/allocation-stability tests pass. |
+| Versioned batched pinned-memory request ring | **Phase 2 implemented and direct ring gate passed** | The protocol-v2 eight-slot shared ring, process-isolated B70 service, canonical route payloads, lifecycle/failure semantics, two-million-request wraparound stress, real-B70 numerical validation, and warmed latency percentiles pass. This is a direct provider/ring gate, not upstream-vLLM integration. |
 | Qwen-scoped out-of-tree adapter | Planned, not implemented | Canonical vLLM routing, local/remote partition, weighted-partial join, and eager parity remain to be built. |
 | Phase 0–10 production qualification | Not complete | No phase gate should be inferred from the Colibri evidence. |
 
@@ -103,6 +103,28 @@ QuixiCore-XPU `nvfp4_moe` was benchmarked on B70 on 2026-08-04 after the correct
 | `M=16` | 343.3 µs | 586 GB/s |
 
 This is direct provider-kernel evidence, not an implemented or qualified upstream-vLLM production path.
+
+#### Phase-1 persistent provider evidence
+
+The production-oriented Phase-1 provider now loads the full 32-layer, 8,192-expert NVFP4 bank into one explicitly selected `Intel(R) Arc(TM) Pro B70 Graphics`. The bank is 14,495,580,220 bytes including its 60-byte header; layers `32..39` of the mixed-precision checkpoint are FP8 and remain CUDA-local unless separately converted and qualified.
+
+The independent representation oracle uses the installed `compressed_tensors.NVFP4PackedCompressor.decompress`. It verifies checkpoint-to-bank packed weights and raw E4M3 scale bytes exactly, verifies both FP32 QuixiCore multipliers, and agrees with the saved expert output at maximum absolute error \(1.070\times10^{-6}\) and RMSE \(3.051\times10^{-7}\).
+
+One full-bank provider run reported:
+
+| Provider case | Kernel | Kernel time | Issue-to-take total | Max abs error | Bad / nonfinite |
+|---|---|---:|---:|---:|---:|
+| first cold `M=1`, one valid route | split | 473,482.7 µs | 516,785.3 µs | \(2.183\times10^{-10}\) | 0 / 0 |
+| warmed `M=1`, one valid route | split | 35.3 µs | 77.6 µs | \(2.183\times10^{-10}\) | 0 / 0 |
+| `M=2` | split | 492.5 µs | 529.2 µs | \(2.183\times10^{-10}\) | 0 / 0 |
+| `M=4` | split | 56.9 µs | 114.1 µs | \(2.183\times10^{-10}\) | 0 / 0 |
+| `M=8` | split | 74.4 µs | 129.3 µs | \(2.183\times10^{-10}\) | 0 / 0 |
+| `M=16` | split | 111.7 µs | 201.4 µs | \(2.183\times10^{-10}\) | 0 / 0 |
+| `M=32` | split | 210.4 µs | 352.6 µs | \(2.183\times10^{-10}\) | 0 / 0 |
+| representative prefill `M=128` | fused | 1,245.1 µs | 1,716.0 µs | \(2.183\times10^{-10}\) | 0 / 0 |
+| `M=8`, all top-8 slots valid duplicate expert with unequal weights summing to one | split | 361.9 µs | 431.1 µs | \(2.328\times10^{-10}\) | 0 / 0 |
+
+The first row includes one-time SYCL/kernel warmup and is intentionally separated from warmed dispatch. These are single observed provider-test timings, not production latency distributions. The test also rejects invalid layer/IDs, stale generation/sequence, and concurrent issue; keeps the provider allocation count unchanged across nine successful mixed-shape dispatches; and verifies idempotent shutdown plus post-shutdown rejection.
 
 | Colibri native GS64 reference measurement | Result |
 |---|---:|
@@ -209,6 +231,37 @@ The principal completed reference code is:
 - `qwen36_tier.{c,h}` — disjoint ownership, dispatch, recovery, and telemetry;
 - `experiments/test_b70_int4_path.py` — deterministic conversion and route-output validation;
 - `experiments/transport_test.c` and related diagnostics — host-staged transport evidence.
+- `phase1/b70_provider.{hpp,cpp}` — full-bank QuixiCore-XPU provider core with fixed buffers and issue/take lifecycle;
+- `phase1/b70_provider_main.cpp` — isolated persistent capability/health/shutdown control process;
+- `phase1/b70_provider_tests.cpp` — direct shape, route, lifecycle, and allocation-stability gate;
+- `phase1/validate_reference.py` — official compressed-tensors representation oracle;
+- `phase1/extract_experts.py` — byte-preserving NVFP4 bank extractor with per-record and final-size validation.
+- `phase2/ring_protocol.hpp` and `phase2/shared_ring.{hpp,cpp}` — fixed-layout protocol-v2 wire ABI and eight-slot process-shared ring;
+- `phase2/shared_ring_tests.cpp` — deterministic fork/process-death/stale-generation/wraparound protocol suite;
+- `phase2/memfd_transport_{host.cu,provider.cpp}` — independently mapped CUDA/Level-Zero pinned-memory transport probe;
+- `phase2/b70_ring_{provider.cpp,integration_test.cpp}` — isolated real-B70 server and numerical/lifecycle/latency gate.
+
+### Phase 2 process-ring evidence
+
+The production-oriented process boundary passed on the physical RTX 5090 and Arc Pro B70 on 2026-08-04:
+
+- a sealed `memfd` mapping registered by CUDA and independently mapped by the Level Zero provider preserved every tested byte across CUDA D2H, process notification, B70 H2D/D2H, and CUDA H2D;
+- the eight-slot protocol-v2 ring passed all-or-nothing device failure, stale-completion rejection, delayed cross-process writes, provider death/generation replacement, full-ring backpressure, safe reclamation, and deterministic wraparound;
+- the extended protocol-only wraparound run completed 2,000,000 requests;
+- the isolated B70 server loaded the Phase-1 bank once, accepted canonical global IDs plus explicit remote masks, suppressed zero-remote submission, and preserved the Phase-1 allocation count through all successful requests;
+- real B70 results matched the saved FP32 partial at `atol=1e-6`, `rtol=1e-2` for `M=1`, duplicate top-8 `M=8`, all eight live slots, wrapped reuse, and the benchmark shapes below;
+- stale provider generation, request sequence, and provider PID identities failed closed; shutdown was clean.
+
+The warmed benchmark used eight warmups and 100 measured sequential requests per shape. Each row had one remote route. `publication_to_observation` spans host release-publication through successful host consumption; `provider_total` is the Phase-1 issue/take interval; `ring_process_overhead` is their per-sample difference and includes wakeup, validation/compaction, server scheduling, and completion observation.
+
+| `M` | Publication to observation p50/p95/p99 | Provider total p50/p95/p99 | Kernel p50/p95/p99 | Ring/process overhead p50/p95/p99 |
+|---:|---:|---:|---:|---:|
+| 1 | 245.640 / 375.199 / 397.498 µs | 102.917 / 124.167 / 125.781 µs | 44.062 / 53.229 / 53.438 µs | 143.946 / 288.481 / 309.321 µs |
+| 8 | 292.517 / 686.828 / 2,795.787 µs | 86.145 / 172.604 / 2,245.209 µs | 38.750 / 79.271 / 99.480 µs | 195.519 / 451.286 / 524.429 µs |
+| 32 | 581.815 / 713.304 / 1,968.519 µs | 234.791 / 237.604 / 1,470.209 µs | 103.542 / 105.938 / 110.416 µs | 347.634 / 475.752 / 498.647 µs |
+| 128 | 1,896.458 / 2,929.813 / 4,290.717 µs | 1,065.209 / 2,050.104 / 3,390.990 µs | 601.979 / 603.333 / 1,518.854 µs | 831.926 / 986.683 / 1,078.048 µs |
+
+The long-tail outliers are retained rather than filtered. This benchmark closes the Phase-2 direct protocol gate; it does **not** establish the 200 tok/s target, CUDA/B70 overlap, production placement, continuous batching, or upstream-vLLM performance.
 
 Historical oneMKL/Python workers remain investigative artifacts and are not the planned provider.
 
@@ -216,9 +269,9 @@ Historical oneMKL/Python workers remain investigative artifacts and are not the 
 
 | Phase | Status | Work still required |
 |---|---|---|
-| 0 — Freeze baselines and compatibility contracts | **Not complete** | Freeze exact host/provider/dependency versions, source checkpoint and both artifact fingerprints, fixed correctness/performance workloads, all-CUDA vLLM eager/graph baselines, versioned provider protocol, and model/provider capability schemas. |
-| 1 — Isolated QuixiCore-XPU B70 provider | **Not implemented** | Build the persistent isolated provider around qualified QuixiCore-XPU NVFP4 MoE operators, explicit device selection, grow-only tensors, load/issue/take/health API, kernel policy, and direct `M=1`, `M=2..32`, and prefill qualification; retain llm-scaler INT4 only as a separately qualified secondary fallback. |
-| 2 — Batched pinned-memory protocol | **Not implemented** | Build multiple versioned ring slots, batch descriptors, token/route map, sequence and generation checks, acquire/release publication, per-route status, timeout, restart, and stale-reply rejection. |
+| 0 — Freeze baselines and compatibility contracts | **Complete** | Exact runtime/hardware/checkpoint identities, fixed correctness and workload inputs, CUDA/B70 artifact SHA-256 fingerprints, the accepted all-CUDA vLLM graph-mode baseline, provider protocol, and capability manifest are recorded. Eager equivalence is intentionally deferred to the Phase-4 adapter-parity gate. |
+| 1 — Isolated QuixiCore-XPU B70 provider | **Complete; direct gate passed** | Full-bank load, explicit B70 selection, fixed buffers, protocol-v1 capability, provider-core load/issue/take/health/shutdown, split/fused policy, `M=1`, `M=2..32`, duplicate top-8, `M=128` prefill, fail-closed validation, and allocation stability passed on the actual B70. The isolated executable supplies startup load and control; the Phase-2 ring supplies process-facing route payload transport. llm-scaler remains a separately qualified secondary fallback. |
+| 2 — Batched pinned-memory protocol | **Complete; direct ring gate passed** | Protocol-v2 fixed-layout ABI, eight disjoint slots, canonical route/row payloads, release/acquire state transitions, bounded admission, cancellation/deadline quarantine, stale generation/PID rejection, process restart semantics, protocol stress, real-B70 numerical execution, allocation stability, and p50/p95/p99 stage measurements passed. |
 | 3 — Independent provider mathematics | **Not complete** | Validate weighted `[M_remote, hidden]` wire results and row maps over the full route/shape/failure matrix, verify CUDA scatter into `[M, hidden]`, and validate CUDA/B70 artifacts against one higher-precision source model. |
 | 4 — Upstream-vLLM adapter | **Not implemented** | Add Qwen-scoped `HybridMoERunner`, `HybridRoutedExperts`, and provider client; prove all-CUDA adapter parity before remote routes. |
 | 5 — Compact expert ownership | **Not implemented in vLLM** | Load immutable CUDA/B70 compact banks from a validated placement manifest; prove exactly one normal owner and no inference-time weight movement. |
@@ -232,12 +285,9 @@ No row is marked complete merely because an analogous behavior works in Colibri.
 
 ## Next concrete deliverables
 
-Work proceeds in the Phase 0–10 order from [`../plan.md`](../plan.md). The immediate deliverables are:
+Work proceeds in the Phase 0–10 order from [`../plan.md`](../plan.md). Phases 0, 1, and 2 are complete. The next deliverables are:
 
-1. **Phase 0 frozen contract package:** exact upstream vLLM and provider dependency fingerprints; source checkpoint plus CUDA/B70 artifact fingerprints; fixed correctness prompts and production workload; stock all-CUDA vLLM eager and supported graph baselines; versioned request/completion schema; model, weight, placement, and provider capability manifests with fail-closed startup validation.
-2. **Phase 1 isolated provider:** a persistent isolated B70 provider using only qualified QuixiCore-XPU NVFP4 MoE operators for the primary path, with explicit B70 selection, resident compact weights, grow-only buffers, capability/load/issue/take/health/shutdown operations, and measured kernel selection for `M=1`, batched decode, and prefill; llm-scaler INT4 / vllm-xpu-kernels remains a separately qualified secondary fallback if NVFP4 quality is insufficient.
-3. **Phase 2 versioned batched ring:** multiple pinned slots, token/route maps, request and provider generations, stale-completion rejection, per-route failure status, bounded capacities, and stress coverage for wraparound, concurrency, restart, and injected failure.
-4. **Phase 3 provider oracle matrix:** batched weighted-partial comparisons for mixed ownership, duplicate/non-sorted experts, repeated experts across tokens, boundary IDs, near-zero weights, already-staged rows whose valid remote subset becomes empty, invalid generations, and failures.
-5. **Phase 4 all-CUDA adapter parity:** Qwen-scoped out-of-tree `HybridMoERunner` / `HybridRoutedExperts` installed in upstream vLLM, with stock-equivalent all-CUDA behavior before any B70 route is enabled.
+1. **Phase 3 provider oracle matrix:** batched weighted-partial comparisons for mixed ownership, duplicate/non-sorted experts, repeated experts across tokens, boundary IDs, near-zero weights, already-staged rows whose valid remote subset becomes empty, invalid generations, and failures.
+2. **Phase 4 all-CUDA adapter parity:** Qwen-scoped out-of-tree `HybridMoERunner` / `HybridRoutedExperts` installed in upstream vLLM, with stock-equivalent all-CUDA behavior before any B70 route is enabled.
 
-Only after these deliverables pass their gates should eager hybrid execution, continuous batching/prefill, piecewise graphs, operational recovery, and the Phase 10 production benchmark be described as active or complete.
+Only after these remaining gates pass should eager hybrid execution, continuous batching/prefill, piecewise graphs, operational recovery, and the Phase 10 production benchmark be described as active or complete.

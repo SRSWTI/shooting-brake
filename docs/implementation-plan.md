@@ -4,7 +4,7 @@
 
 [`../plan.md`](../plan.md) is the sole authoritative active plan. This document is a subordinate execution and evidence checklist for the same **Phase 0 through Phase 10** sequence. It does not authorize a second sequence, rename phases, add prerequisites, or override a gate in `plan.md`. If wording differs, `plan.md` controls.
 
-**Status:** production implementation plan, not an implementation-completion report. Existing Colibri CUDA+B70 work is proven reference evidence for transport, native GS64 expert execution, placement, and failure semantics. It does not by itself pass any production upstream-vLLM/QuixiCore-XPU provider phase. Unless an evidence record explicitly demonstrates a phase gate against the pinned production configuration, that gate remains unpassed.
+**Status:** Phase 0, Phase 1, and Phase 2 are complete against the pinned production configuration; Phase 3 is next. Existing Colibri CUDA+B70 work remains reference evidence only. Completion evidence for the production-oriented QuixiCore-XPU provider and process ring is recorded in [`progress.md`](progress.md#phase-1-persistent-provider-evidence) and [`progress.md`](progress.md#phase-2-process-ring-evidence); later phases remain unpassed until their own evidence is recorded.
 
 The active production direction is:
 
@@ -78,6 +78,8 @@ Phase 0  freeze baselines and compatibility contracts
 
 ## Phase 0 — Freeze baselines and compatibility contracts
 
+**Status: COMPLETE.** Evidence: [`../phase0/SUMMARY.md`](../phase0/SUMMARY.md), [`../phase0/freeze.yaml`](../phase0/freeze.yaml), and [`../phase0/capability_manifest.yaml`](../phase0/capability_manifest.yaml).
+
 ### Objective
 
 Make both independently evolving runtimes and every cross-runtime artifact explicit before coupling them.
@@ -129,6 +131,8 @@ No provider or adapter coupling begins while any compatibility field is implicit
 
 ## Phase 1 — Build the isolated QuixiCore-XPU B70 provider
 
+**Status: COMPLETE.** The direct native provider-core gate passed on the physical B70; see [`progress.md`](progress.md#phase-1-persistent-provider-evidence).
+
 ### Objective
 
 Create one persistent B70 provider, using QuixiCore-XPU's framework-neutral C++ ABI or PyTorch binding, that exposes only the qualified routed-expert operations required by Shooting Brake.
@@ -139,8 +143,8 @@ The provider must:
 
 - select the B70 explicitly and fail if the admitted device is absent or ambiguous;
 - import only the Phase-0-pinned QuixiCore-XPU operator bundle;
-- expose capability, load, issue, take, health, reset/restart generation, and shutdown operations;
-- load each compact B70 expert artifact once and verify its fingerprint;
+- expose capability, load, issue, take, health, generation, and shutdown on the provider core; expose startup load plus capability/health/shutdown on the isolated process control shell; use the completed Phase-2 pinned ring for process-facing activation/route payload transport;
+- load each compact B70 expert artifact once; validate exact bank size/header/layout at startup; record and qualify its SHA-256 externally in the frozen manifest; require the completed Phase-2 ring's per-request weight-generation match;
 - maintain `(layer, global expert) -> compact slot` mapping;
 - preallocate grow-only or fixed XPU activation, route, scratch, and output tensors;
 - accept only canonical preselected IDs, routing weights, masks, and row maps;
@@ -154,6 +158,8 @@ Retain `colibri-variants/colibri-qwen36/c/b70_moe_sycl.cpp` as the native GS64 c
 ### Gate
 
 Direct provider cases pass for `M=1`, decode-relevant `M=2..32`, and representative prefill `M`. Steady-state dispatch performs no weight upload, tensor allocation, or artifact conversion. Repeated mixed shapes do not reuse stale buffers or grow memory.
+
+Recorded evidence: the exact 14,495,580,220-byte full bank loaded after startup size/header/layout validation, and its externally computed SHA-256 is frozen in the manifest; `M=1`, `M=2..32`, duplicate valid top-8, and fused `M=128` passed against the saved reference; invalid layer/IDs and stale generation/sequence failed closed; allocations remained at the post-load baseline across nine successful dispatches; shutdown was idempotent; and the official compressed-tensors representation oracle passed. The cold first dispatch and warmed `M=1` dispatch are reported separately in [`progress.md`](progress.md#phase-1-persistent-provider-evidence).
 
 ### Evidence checklist
 
@@ -215,6 +221,8 @@ The ring survives wraparound, concurrent slots, full-ring backpressure, stale re
 ### Decision rule
 
 Any ambiguous ownership, premature reuse, stale acceptance, lost completion, unbounded queue, or global device synchronization blocks integration.
+
+**Completion evidence — PASS on 2026-08-04.** `phase2/ring_protocol.hpp` and `phase2/shared_ring.{hpp,cpp}` implement the protocol-v2 fixed-layout eight-slot ABI and lifecycle. `phase2/shared_ring_tests.cpp` passed malformed payload/bounds checks, all-or-nothing failure, cancellation/deadline quarantine, stale completion, delayed writer, full-ring backpressure/reuse, provider death/generation replacement, cross-process generation retirement, and 2,000,000-request wraparound. `phase2/memfd_transport_{host.cu,provider.cpp}` passed independently mapped CUDA/Level-Zero byte transport. `phase2/b70_ring_{provider.cpp,integration_test.cpp}` passed real-B70 numerical execution, all eight queued slots, wrapped reuse, zero-remote no-submission, stale identity rejection, exact dispatch/allocation accounting, clean shutdown, and warmed p50/p95/p99 stage measurement for `M=1/8/32/128`. Full values and limitations are recorded in [`progress.md`](progress.md#phase-2-process-ring-evidence).
 
 ## Phase 3 — Validate provider mathematics independently
 
@@ -600,7 +608,7 @@ Condition 8 permits profiling a native Torch-free provider around the already-qu
 
 ## Immediate next step
 
-Execute Phase 0. Freeze the two runtime baselines, hardware/software environment, checkpoint and CUDA/B70 artifacts, correctness prompts, performance workload, protocol schema, capability/model/provider manifest, and stock all-CUDA vLLM eager/graph baselines. Do not start by bulk-converting another model, integrating a production B70 route into vLLM, or treating the proven Colibri path as the production provider.
+Execute Phase 3. Compare the process-ring weighted partial with an independent oracle across mixed local/remote subsets, duplicate/non-sorted and boundary expert IDs, repeated experts across tokens, unequal and near-zero weights, explicit token-row remapping, already-staged rows whose valid remote subset becomes empty, invalid generations, and provider failures. Verify deterministic CUDA scatter into the full `[M, hidden]` buffer before beginning Phase 4 all-CUDA upstream-vLLM adapter parity.
 
 ## Superseded sequencing
 

@@ -11,8 +11,8 @@ The source inspection and B70 kernel evidence summarized here reflect the worksp
 - **Inspected source fact** — behavior or an interface observed in a named checkout. It is not a local production result.
 - **Upstream claim** — a result reported by an external project, article, or paper. It is never Shooting Brake benchmark evidence.
 - **Proven Colibri reference evidence** — behavior measured in `colibri-variants/colibri-qwen36/`. It establishes feasibility for that implementation only.
-- **QuixiCore-XPU B70 qualification evidence** — behavior measured for the named kernel checkout on the actual B70. It qualifies that kernel experiment only, not the production provider process or vLLM integration.
-- **Production decision** — the required destination architecture from [`../plan.md`](../plan.md). It remains planned until the corresponding Phase 0–10 gate is completed.
+- **QuixiCore-XPU B70 qualification evidence** — behavior measured for the named kernel checkout, completed Phase-1 provider core, and completed Phase-2 process ring on the actual B70. It qualifies direct full-bank execution and the isolated process boundary, not the Phase-3 oracle matrix or vLLM integration.
+- **Production decision** — the required destination architecture from [`../plan.md`](../plan.md). Phases 0, 1, and 2 are complete; later behavior remains planned until its corresponding gate is completed.
 - **Unverified production assumption** — a proposition requiring evidence against upstream vLLM and the isolated B70 provider.
 
 Repository revisions identify what was inspected; they do not assert that a checkout has remained unchanged. Compatibility must be established through the model/provider manifest and correctness gates, never inferred from similar dimensions, dtypes, device names, or model-family names.
@@ -96,7 +96,7 @@ CPU work is limited to orchestration, placement, queue management, telemetry, an
 - **Scope of proof:** the current transaction is single-token and the native worker has one in-order queue, one pending operation, and fixed scratch. The controlled measurements and traces in [progress.md](progress.md) are Colibri reference results.
 - **Production reuse:** preserve the lifecycle invariants, placement semantics, exact route ownership, recovery semantics, and native worker as a comparator.
 - **Explicit non-adoption:** Colibri is not the production state owner. Its CUDA model path, serving stack, single-token protocol, and timings are not substitutes for upstream vLLM Phase 0–10 acceptance.
-- **Does not prove:** a batched QuixiCore-XPU B70 provider, continuous-batch decode, grouped prefill, the versioned process ring, an out-of-tree vLLM adapter, piecewise CUDA graphs, provider restart, or production performance.
+- **Does not prove:** the Phase-3 full provider mathematics matrix, scheduler-step aggregation, continuous-batch decode, end-to-end grouped prefill, an out-of-tree vLLM adapter, piecewise CUDA graphs, operational recovery, or production performance. Those remain independent of the completed direct Phase-1 provider and Phase-2 process-ring gates.
 
 ## Secondary source ledger
 

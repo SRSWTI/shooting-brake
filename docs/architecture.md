@@ -379,7 +379,7 @@ The controlled benchmark must compare identical stock all-CUDA vLLM, hybrid CUDA
 
 Architecture delivery follows only Phase 0 through Phase 10 in [`../plan.md`](../plan.md). [`implementation-plan.md`](implementation-plan.md) is the subordinate gate checklist for those same phases. The architecture introduces no alternate Stage sequence, GLM-first target, or multi-device rollout.
 
-The immediate work is Phase 0: freeze both runtime baselines and artifacts, define the versioned protocol and capability schemas, and record all-CUDA vLLM eager/graph correctness and performance workloads. Production hybrid execution begins only after its prerequisite gates are satisfied.
+Phase 0, Phase 1, and Phase 2 are complete. The fixed-layout protocol-v2 eight-slot ring, process-isolated B70 server, CUDA/Level-Zero pinned-memory probe, lifecycle stress suite, real-B70 numerical validation, and warmed stage percentiles passed their direct gates. The immediate work is Phase 3: validate provider weighted-partial mathematics and row mappings over the full route/shape/failure matrix, including deterministic CUDA scatter. Qwen-scoped upstream-vLLM adapter work begins in Phase 4 only after that independent mathematics gate passes.
 
 ## Non-goals
 

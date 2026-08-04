@@ -4,9 +4,9 @@
 
 This document defines the source-checkpoint, provider-artifact, compact-ownership, and capability-manifest contract for the architecture in [`../plan.md`](../plan.md).
 
-The production deployment derives separate CUDA and B70 artifacts from one identical higher-precision BF16/FP16 source checkpoint. Provider formats are not interchangeable. This is a normative design and qualification contract, not a claim that the planned QuixiCore-XPU production provider or its model artifacts have passed.
+The production deployment derives separate CUDA and B70 artifacts from one identical higher-precision BF16/FP16 source checkpoint. Provider formats are not interchangeable. The Phase-1 QuixiCore-XPU NVFP4 artifact and provider core passed their direct representation and B70 execution gates, and Phase 2 passed the process-ring transport/lifecycle and real-B70 numerical boundary. These gates do not yet prove the full Phase-3 mathematics matrix, upstream-vLLM integration, or end-to-end hybrid inference.
 
-The existing Colibri signed-S4 GS64 native worker is proven reference evidence and remains a comparator. Its reference artifact is distinct from the production NVFP4 contract, and it does not prove a batched QuixiCore-XPU provider or the secondary llm-scaler INT4 path.
+The existing Colibri signed-S4 GS64 native worker is proven reference evidence and remains a comparator. Its reference artifact is distinct from the qualified Phase-1 NVFP4 bank and the secondary llm-scaler INT4 path.
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
@@ -21,7 +21,7 @@ identical BF16/FP16 higher-precision source checkpoint
           B70-owned routed experts in a qualified NVFP4 (E2M1 weights + E4M3 block scales) layout
 ```
 
-The source checkpoint is the rebuild and semantic authority. Its model identity and exact tensor content MUST be fixed by provenance and cryptographic fingerprints. Both provider artifacts MUST name that same source identity. One artifact MUST NOT be derived by reinterpreting or requantizing the other provider's already-quantized bytes.
+The source checkpoint is the rebuild and semantic authority. Its model identity and exact tensor content MUST be fixed by provenance and cryptographic fingerprints. Both provider artifacts MUST name that same source identity. A provider artifact MUST NOT be produced by numerically reinterpreting or requantizing another provider's already-quantized bytes. Lossless container extraction of the same checkpoint tensor bytes is allowed only when both kernel contracts declare identical E2M1 packing, E4M3 scale layout, block size, and global-scale semantics and the extractor verifies those facts byte-for-byte against an independent decompressor.
 
 At runtime:
 
@@ -127,7 +127,7 @@ The existing conversion is exact for Colibri's captured signed-S4 GS64 semantics
 
 The production B70 formats are:
 
-1. **Primary — QuixiCore-XPU NVFP4:** packed E2M1 weight nibbles, E4M3 block scales with block size 16, and one FP32 global scale per expert. The selected `nvfp4_moe` fused or split operation MUST accept the canonical preselected routes; `multiply_router_weight` and asynchronous event chaining are provider capability facts, not claims that the production process is implemented.
+1. **Primary — QuixiCore-XPU NVFP4:** packed E2M1 weight nibbles, E4M3 block scales with block size 16, and one FP32 kernel multiplier per expert per projection (`w13` and `w2`). The selected `nvfp4_moe` fused or split operation MUST accept the canonical preselected routes; `multiply_router_weight` and asynchronous event chaining are provider capability facts.
 2. **Secondary — llm-scaler / vllm-xpu-kernels INT4 W4A16:** a separately converted signed-S4 GS128 artifact MAY be qualified only if primary NVFP4 quality is insufficient. It remains a fallback and MUST NOT become the CUDA host.
 
 The primary QuixiCore-XPU physical records are:
@@ -141,7 +141,9 @@ w2_scales:          [E, K, I/16]  uint8 E4M3 block scales
 w2_global_scales:   [E]            float32
 ```
 
-NVFP4, GS64, and GS128 are different numerical and storage contracts. Their codes, scale counts, and boundaries MUST NOT be reinterpreted across formats. Every production or fallback B70 artifact MUST be quantized independently from the same BF16/FP16 higher-precision source used for the CUDA artifact, never from another provider's quantized artifact. Conversion or requantization MUST NOT occur on the token path.
+The pinned Unsloth checkpoint is mixed precision across expert layers: layers `0..31` expose `nvfp4-pack-quantized` expert tensors, while layers `32..39` expose FP8 expert weights and BF16 scales. The current Phase-1 bank therefore contains exactly 8,192 NVFP4 layer-experts and 14,495,580,160 payload bytes plus its 60-byte header. The eight FP8 layers remain CUDA-local unless a separate conversion and qualification explicitly adds them.
+
+NVFP4, GS64, and GS128 are different numerical and storage contracts. Their codes, scale counts, and boundaries MUST NOT be reinterpreted across formats. A separately quantized production or fallback artifact MUST derive from the same BF16/FP16 higher-precision source; a byte-identical NVFP4 container may instead extract the pinned checkpoint tensors under the lossless rule above. Conversion or requantization MUST NOT occur on the token path.
 
 Kernel family, group or block size, scale dtype, layout, supported shapes, and precision tolerance are capability facts. The provider MUST NOT choose them by an undocumented model-name conditional.
 
@@ -194,7 +196,7 @@ A later match does not waive an earlier mismatch. Representation fields and iden
 
 Required cases include zero, small, saturating, seeded random, repeated, and changing inputs; `M=1`, `M=2..32`, and representative prefill `M`; changing/non-sorted/duplicate IDs under canonical semantics; multiple rows choosing one expert; unequal and near-zero weights; boundary compact slots; zero-row experts; and different supported shapes sequentially in one process.
 
-Passing the QuixiCore-XPU kernel correctness smoke gate does not qualify a converted production model artifact. Bulk conversion is prohibited until the one-expert fixture passes for the chosen provider contract. No production QuixiCore-XPU NVFP4 artifact or secondary llm-scaler INT4 artifact is recorded here as having passed that artifact gate.
+The current Phase-1 primary artifact has passed the layer-0/expert-0 representation fixture: bank tensor bytes match the checkpoint exactly, raw E4M3 scale bytes are preserved, the stored kernel multipliers equal the FP32 reciprocals of checkpoint `weight_global_scale`, the installed `compressed_tensors` decompressor agrees with the saved reference, and real B70 split/fused outputs pass the predeclared tolerance for `M=1`, `M=2..32`, duplicate top-8 routes, and representative `M=128` prefill. This qualifies that format mapping and tested shape set only; it does not qualify the eight FP8 layers, every expert, the secondary llm-scaler artifact, the production transport, or end-to-end vLLM integration.
 
 ## Model, placement, and provider manifests
 

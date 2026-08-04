@@ -1,10 +1,10 @@
 # Shooting Brake
 
-Shooting Brake is a planned heterogeneous Mixture-of-Experts inference system for one NVIDIA RTX 5090 and one Intel Arc Pro B70. Upstream vLLM 0.26+ is the CUDA state owner and production serving runtime. A separate persistent PyTorch-XPU process uses qualified `intel-xpu/llm-scaler` kernels to execute B70-resident routed experts. The two runtimes exchange activations, canonical post-top-k route metadata, and weighted hidden-size partials through a versioned pinned-memory request ring; expert weights do not move on the foreground path.
+Shooting Brake is a heterogeneous Mixture-of-Experts inference system for one NVIDIA RTX 5090 and one Intel Arc Pro B70. Upstream vLLM 0.26+ is the CUDA state owner and production serving runtime. A separate persistent native C++ provider uses qualified QuixiCore-XPU NVFP4 kernels as the primary B70 compute path; llm-scaler INT4 remains a qualified secondary fallback. The completed process-facing boundary exchanges activations, canonical post-top-k route metadata, and weighted hidden-size partials through a protocol-v2 pinned-memory request ring; expert weights do not move on the foreground path. The upstream-vLLM adapter is not yet connected to that boundary.
 
 [`plan.md`](plan.md) is the sole authoritative active architecture and implementation plan. Documents under `docs/` explain its contracts and evidence, but do not define a second delivery sequence.
 
-> **Status:** the Colibri Qwen3.6 CUDA+B70 implementation proves the native GS64 transport, residency, routed-expert math, placement, and exact failure semantics used as Shooting Brake's reference. The upstream-vLLM CUDA host, isolated batched llm-scaler provider, versioned production ring, and Qwen-scoped out-of-tree adapter remain planned work. No document should be read as evidence that the production vLLM+B70 path is complete.
+> **Status:** Phase 0, Phase 1, and Phase 2 are complete. The frozen vLLM/CUDA baseline and compatibility package are recorded under `phase0/`; the native QuixiCore-XPU provider core, isolated control process, full 8,192-expert bank, independent representation oracle, and direct B70 lifecycle/correctness/allocation gate are implemented under `phase1/`; and the fixed-layout eight-slot process ring, deterministic protocol stress suite, CUDA/Level-Zero transport probe, isolated B70 ring server, real-device numerical gate, and warmed latency percentiles are implemented under `phase2/`. Phase 3—the independent provider mathematics matrix—is next. The upstream-vLLM adapter and end-to-end production hybrid path remain later work.
 
 ## Production architecture
 
@@ -15,8 +15,8 @@ flowchart LR
     R --> H[HybridMoERunner / HybridRoutedExperts]
     H --> C[CUDA-local routed experts]
     H --> Ring[Versioned pinned-memory ring]
-    Ring --> P[Persistent PyTorch-XPU B70 provider]
-    P --> K[llm-scaler tiny / batched / prefill ESIMD kernels]
+    Ring --> P[Persistent native C++ B70 provider]
+    P --> K[QuixiCore-XPU NVFP4 kernels primary / llm-scaler INT4 secondary]
     K --> Ring
     Ring --> J[CUDA asynchronous copy and addition]
     C --> J
@@ -36,7 +36,7 @@ The isolated B70 provider owns:
 - a compact, persistent bank of B70-resident routed experts;
 - global-expert-to-compact-slot mapping from an explicit placement manifest;
 - preallocated activation, route, scratch, and output buffers;
-- remap, gate/up, activation, down, and weighted accumulation using qualified llm-scaler kernels;
+- split/fused NVFP4 routed-expert execution using qualified QuixiCore-XPU kernels; separately qualified llm-scaler INT4 kernels remain the fallback;
 - one weighted compact wire partial shaped `[M_remote, hidden]`, its `token_row_map` into the full scheduler batch, and completion/failure metadata.
 
 The CPU orchestrates placement, queues, telemetry, provider lifecycle, and exact emergency recovery. It performs no normal-path matrix computation. CPU recovery must recompute exactly the failed routes or fail the request explicitly; it must never hide a lost expert contribution.
@@ -58,13 +58,27 @@ The CPU orchestrates placement, queues, telemetry, provider lifecycle, and exact
 
 These results establish the transport, correctness, placement, and failure-semantics baseline. Measurements such as the observed roughly `56–100 µs` one-token B70 issue/take range are Colibri reference measurements, not predictions or acceptance evidence for production vLLM continuous batching.
 
-### Planned production path
+### Completed Phase-1 provider
+
+`phase1/` now provides:
+
+- explicit Intel-vendor and B70-identity selection;
+- exact 60-byte header, shape, stride, and 14,495,580,220-byte bank validation;
+- one-time upload of all 8,192 NVFP4 experts into contiguous device planes;
+- fixed activation, ID, weight, scratch, and output USM buffers;
+- protocol-v1 capability plus provider-core load/issue/take/health/shutdown;
+- an isolated startup-load/control process exposing capability, health, and shutdown;
+- split dispatch for `M <= 32` and fused dispatch for `M > 32`;
+- generation/sequence, layer, ID, busy-state, and shutdown rejection;
+- direct `M=1`, `M=2..32`, duplicate top-8, and `M=128` correctness with unchanged post-load allocation count.
+
+The process-facing activation/route data plane is intentionally the Phase-2 pinned ring; stdin is control-only.
+
+### Remaining production path
 
 Production still requires:
 
-- a pinned capability/model/provider manifest and compatibility handshake;
-- an isolated persistent PyTorch-XPU provider using the validated llm-scaler operator bundle;
-- a multi-slot, batched, versioned pinned-memory ring;
+- a multi-slot, batched, versioned pinned-memory ring connecting the vLLM process to the completed provider core;
 - independent mathematical qualification of compact `[M_remote, hidden]` provider output and its scatter into the full `[M, hidden]` CUDA batch;
 - Qwen-scoped `HybridMoERunner` and `HybridRoutedExperts` integration in upstream vLLM;
 - eager hybrid correctness, then continuous-batch decode and grouped prefill;
@@ -93,9 +107,11 @@ The complete numerical and route contract is in [`docs/correctness.md`](docs/cor
 
 | Directory | Role | Boundary |
 |---|---|---|
+| `QuixiCore-XPU/` | Primary MIT-licensed B70 NVFP4 MoE kernel source | Imported through its framework-neutral native SYCL ABI; do not fork without measured need |
+| `phase1/` | Completed native provider core, control process, full-bank artifact tooling, oracle, and direct tests | Phase-2 transport will make its issue/take path process-facing |
 | `vllm/` | Upstream vLLM 0.26+ CUDA state owner and production serving host | Keep changes out-of-tree and Qwen-scoped; do not apply llm-scaler's vLLM 0.21 patch wholesale |
-| `intel-xpu/llm-scaler/` | Source of the initially qualified B70 tiny, batched, and prefill ESIMD kernels | Run selected operators in an isolated pinned environment; it is not the CUDA host |
-| `intel-xpu/vllm-xpu/vllm-xpu-kernels/` | Kernel dependency and independently versioned binding surface used by llm-scaler | Qualify shapes, layouts, safety fixes, and numerics per provider release |
+| `intel-xpu/llm-scaler/` | Qualified secondary B70 INT4 fallback and kernel-design reference | Not the primary provider and never the CUDA host |
+| `intel-xpu/vllm-xpu/vllm-xpu-kernels/` | Independently versioned binding/kernel surface for the secondary fallback | Qualify shapes, layouts, safety fixes, and numerics per fallback release |
 | `colibri-variants/colibri-qwen36/` | Proven native GS64 CUDA+B70 transport, correctness, placement, and failure reference | Comparator and oracle, not the production model host |
 | `exllamav3-quant-inference/` | Pinned-ring and CUDA stream-memory optimization reference | Borrow mechanisms only after the process ring is correct |
 | `lucebox/` | Traffic-aware placement policy reference | Static ownership comes first; policy concepts do not replace the execution contract |
@@ -113,9 +129,9 @@ Exact source provenance and limitations are recorded in [`docs/research.md`](doc
 
 The only active sequence is Phase 0 through Phase 10 in [`plan.md`](plan.md):
 
-0. Freeze baselines and compatibility contracts.
-1. Build the isolated llm-scaler B70 provider.
-2. Implement the batched versioned pinned-memory protocol.
+0. Freeze baselines and compatibility contracts. **Complete.**
+1. Build and directly qualify the isolated QuixiCore-XPU B70 provider. **Complete.**
+2. Implement the batched versioned pinned-memory protocol. **Complete.**
 3. Validate provider mathematics independently.
 4. Add the Qwen-scoped upstream-vLLM out-of-tree adapter.
 5. Load compact immutable expert ownership.
@@ -129,7 +145,7 @@ The only active sequence is Phase 0 through Phase 10 in [`plan.md`](plan.md):
 
 ## Immediate next step
 
-Begin Phase 0: freeze the exact upstream vLLM, llm-scaler, PyTorch-XPU, vLLM-XPU-kernel, oneAPI, Level Zero, driver, checkpoint, and weight-artifact baselines; define the provider protocol and capability/model/provider schemas; and capture identical all-CUDA vLLM correctness and performance workloads. The production runtimes must reject incompatible protocol versions, layouts, dtypes, quantization, shapes, top-k, placement generations, or weight generations before hybrid execution is enabled.
+Execute Phase 3: validate that every process-ring result is exactly the weighted sum of the B70-owned staged routes across the complete route/shape/failure matrix. Cover mixed local/remote ownership, duplicate and non-sorted IDs, repeated experts across tokens, boundary IDs, unequal and near-zero weights, explicit row maps, already-staged rows whose valid remote subset becomes empty, invalid generations, and provider failures; then verify deterministic CUDA scatter into the full `[M, hidden]` buffer before beginning Phase 4 all-CUDA adapter parity.
 
 ## Documentation
 
@@ -139,7 +155,7 @@ Begin Phase 0: freeze the exact upstream vLLM, llm-scaler, PyTorch-XPU, vLLM-XPU
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | Production boundaries, data flow, ownership, repository roles, and non-goals |
 | [`docs/implementation-plan.md`](docs/implementation-plan.md) | Companion Phase 0–10 gates and evidence checklist; subordinate to `plan.md` |
-| [`docs/progress.md`](docs/progress.md) | Implemented Colibri reference work and measured baseline evidence; not production vLLM status |
+| [`docs/progress.md`](docs/progress.md) | Completed Phase-0/Phase-1 evidence plus remaining production status |
 | [`docs/correctness.md`](docs/correctness.md) | Exactly-once route semantics, numerical agreement, stale-work rejection, and recovery |
 | [`docs/hardware.md`](docs/hardware.md) | RTX 5090/B70 topology, host-staged transport, and hardware qualification |
 | [`docs/model-format.md`](docs/model-format.md) | Weight formats, conversion, provider prepack, and artifact manifests |

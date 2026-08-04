@@ -1,6 +1,7 @@
 #include "b70_provider.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cctype>
 #include <cmath>
@@ -59,18 +60,21 @@ constexpr std::uint64_t kExpectedFileBytes =
     sizeof(ExpertBankHeader) +
     static_cast<std::uint64_t>(kTotalExperts) * kExpertBytes;
 
-constexpr std::uint64_t kPersistentWeightBytes =
-    static_cast<std::uint64_t>(kTotalExperts) *
-    (kW13Bytes + kS13Bytes + kW2Bytes + kS2Bytes + 2 * sizeof(float));
+constexpr std::uint64_t kPersistentWeightBytesPerExpert =
+    kW13Bytes + kS13Bytes + kW2Bytes + kS2Bytes + 2 * sizeof(float);
 
-std::uint64_t persistent_device_bytes(const std::size_t max_batch) {
+std::uint64_t persistent_device_bytes(const std::size_t max_batch,
+                                      const std::size_t resident_experts) {
   constexpr std::uint64_t kBytesPerBatchRow =
       kHiddenSize * sizeof(sycl::half) +
       kTopK * sizeof(std::int32_t) +
       kTopK * sizeof(float) +
       kTopK * 2 * kIntermediateSize * sizeof(float) +
       kHiddenSize * sizeof(float);
-  return kPersistentWeightBytes +
+  const std::uint64_t resident_weight_bytes =
+      static_cast<std::uint64_t>(kLayers) * resident_experts *
+      kPersistentWeightBytesPerExpert;
+  return resident_weight_bytes +
          static_cast<std::uint64_t>(max_batch) * kBytesPerBatchRow;
 }
 
@@ -151,6 +155,7 @@ struct B70Provider::Impl {
   float* scratch = nullptr;
   float* output = nullptr;
   std::uint8_t* upload_staging = nullptr;
+  float* copyout_staging = nullptr;
 
   std::optional<sycl::event> dispatch_begin;
   std::optional<sycl::event> kernel_begin;
@@ -161,6 +166,11 @@ struct B70Provider::Impl {
   std::size_t pending_M = 0;
   bool pending_split = false;
   std::string pending_error;
+
+#ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
+  std::optional<ProviderTestFault> armed_test_fault;
+  std::uint64_t armed_test_fault_sequence = 0;
+#endif
 
   Impl() {
     capability.protocol_version = 1;
@@ -237,6 +247,18 @@ struct B70Provider::Impl {
     return pointer;
   }
 
+  void retire_pending_locked() noexcept {
+    health.pending = false;
+    pending_generation = 0;
+    pending_sequence = 0;
+    pending_M = 0;
+    pending_split = false;
+    pending_error.clear();
+    dispatch_begin.reset();
+    kernel_begin.reset();
+    kernel_end.reset();
+  }
+
   void release_resources_locked(const bool mark_stopped) noexcept {
     if (queue) {
       try {
@@ -257,6 +279,7 @@ struct B70Provider::Impl {
       };
 
       free_pointer(upload_staging);
+      free_pointer(copyout_staging);
       free_pointer(output);
       free_pointer(scratch);
       free_pointer(weights);
@@ -300,6 +323,10 @@ struct B70Provider::Impl {
     pending_M = 0;
     pending_split = false;
     pending_error.clear();
+#ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
+    armed_test_fault.reset();
+    armed_test_fault_sequence = 0;
+#endif
   }
 
   ProviderStatus reject_load_locked(const ProviderStatus status,
@@ -312,32 +339,44 @@ struct B70Provider::Impl {
   void upload_plane(const std::uint8_t* records, const std::size_t record_offset,
                     const std::size_t bytes_per_expert, std::uint8_t* destination,
                     const std::size_t layer) {
-    const std::size_t first_expert = layer * kExpertsPerLayer;
-    for (std::size_t expert = 0; expert < kExpertsPerLayer; ++expert) {
+    const std::size_t resident_count = config.resident_experts.size();
+    const std::size_t source_layer = layer * kExpertsPerLayer;
+    const std::size_t destination_layer = layer * resident_count;
+    for (std::size_t local_expert = 0; local_expert < resident_count;
+         ++local_expert) {
+      const std::size_t canonical_expert =
+          static_cast<std::size_t>(config.resident_experts[local_expert]);
       const std::uint8_t* source =
-          records + (first_expert + expert) * kExpertBytes + record_offset;
-      std::memcpy(upload_staging + expert * bytes_per_expert, source,
+          records + (source_layer + canonical_expert) * kExpertBytes +
+          record_offset;
+      std::memcpy(upload_staging + local_expert * bytes_per_expert, source,
                   bytes_per_expert);
     }
     queue
-        ->memcpy(destination + first_expert * bytes_per_expert, upload_staging,
-                 kExpertsPerLayer * bytes_per_expert)
+        ->memcpy(destination + destination_layer * bytes_per_expert,
+                 upload_staging, resident_count * bytes_per_expert)
         .wait_and_throw();
   }
 
   void upload_globals(const std::uint8_t* records,
                       const std::size_t record_offset, float* destination,
                       const std::size_t layer) {
-    const std::size_t first_expert = layer * kExpertsPerLayer;
-    for (std::size_t expert = 0; expert < kExpertsPerLayer; ++expert) {
+    const std::size_t resident_count = config.resident_experts.size();
+    const std::size_t source_layer = layer * kExpertsPerLayer;
+    const std::size_t destination_layer = layer * resident_count;
+    for (std::size_t local_expert = 0; local_expert < resident_count;
+         ++local_expert) {
+      const std::size_t canonical_expert =
+          static_cast<std::size_t>(config.resident_experts[local_expert]);
       const std::uint8_t* source =
-          records + (first_expert + expert) * kExpertBytes + record_offset;
-      std::memcpy(upload_staging + expert * sizeof(float), source,
+          records + (source_layer + canonical_expert) * kExpertBytes +
+          record_offset;
+      std::memcpy(upload_staging + local_expert * sizeof(float), source,
                   sizeof(float));
     }
     queue
-        ->memcpy(destination + first_expert, upload_staging,
-                 kExpertsPerLayer * sizeof(float))
+        ->memcpy(destination + destination_layer, upload_staging,
+                 resident_count * sizeof(float))
         .wait_and_throw();
   }
 };
@@ -375,6 +414,38 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
             (kTopK * 2 * kIntermediateSize * sizeof(float))) {
       impl_->set_error("config.max_batch overflows the scratch-buffer size");
       return ProviderStatus::invalid_argument;
+    }
+
+    if (config.resident_experts.size() > kExpertsPerLayer) {
+      impl_->set_error(
+          "config.resident_experts contains more than 256 entries");
+      return ProviderStatus::invalid_argument;
+    }
+    std::array<bool, kExpertsPerLayer> seen_resident_experts{};
+    for (const std::int32_t canonical_expert : config.resident_experts) {
+      if (canonical_expert < 0 ||
+          canonical_expert >=
+              static_cast<std::int32_t>(kExpertsPerLayer)) {
+        impl_->set_error(
+            "config.resident_experts contains an ID outside [0, 256)");
+        return ProviderStatus::invalid_argument;
+      }
+      const std::size_t expert_index =
+          static_cast<std::size_t>(canonical_expert);
+      if (seen_resident_experts[expert_index]) {
+        impl_->set_error(
+            "config.resident_experts contains a duplicate ID");
+        return ProviderStatus::invalid_argument;
+      }
+      seen_resident_experts[expert_index] = true;
+    }
+
+    std::vector<std::int32_t> resident_experts = config.resident_experts;
+    if (resident_experts.empty()) {
+      resident_experts.reserve(kExpertsPerLayer);
+      for (std::size_t expert = 0; expert < kExpertsPerLayer; ++expert) {
+        resident_experts.push_back(static_cast<std::int32_t>(expert));
+      }
     }
 
     impl_->bank_fd = ::open(bank_path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -429,7 +500,10 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
         sycl::property_list{sycl::property::queue::in_order(),
                             sycl::property::queue::enable_profiling()});
 
-    impl_->config = config;
+    impl_->config.max_batch = config.max_batch;
+    impl_->config.top_k = config.top_k;
+    impl_->config.generation = config.generation;
+    impl_->config.resident_experts = std::move(resident_experts);
     impl_->health.generation = config.generation;
     impl_->capability.device_name = selected.name;
     impl_->capability.device_memory_total_bytes =
@@ -440,8 +514,12 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     impl_->capability.supported_intermediate_sizes = {
         static_cast<std::uint32_t>(kIntermediateSize)};
     impl_->capability.supported_topk = {static_cast<std::uint32_t>(kTopK)};
+    const std::size_t resident_experts_per_layer =
+        impl_->config.resident_experts.size();
+    const std::size_t resident_experts_total =
+        kLayers * resident_experts_per_layer;
     impl_->capability.num_resident_experts =
-        static_cast<std::uint32_t>(kTotalExperts);
+        static_cast<std::uint32_t>(resident_experts_total);
     impl_->capability.max_batch_remote =
         static_cast<std::uint32_t>(config.max_batch);
     impl_->capability.kernel_families = {
@@ -451,12 +529,18 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     impl_->capability.experts_per_layer =
         static_cast<std::uint32_t>(kExpertsPerLayer);
 
-    impl_->w13 = impl_->allocate_device<std::uint8_t>(kTotalExperts * kW13Bytes);
-    impl_->s13 = impl_->allocate_device<std::uint8_t>(kTotalExperts * kS13Bytes);
-    impl_->w2 = impl_->allocate_device<std::uint8_t>(kTotalExperts * kW2Bytes);
-    impl_->s2 = impl_->allocate_device<std::uint8_t>(kTotalExperts * kS2Bytes);
-    impl_->w13_global = impl_->allocate_device<float>(kTotalExperts);
-    impl_->w2_global = impl_->allocate_device<float>(kTotalExperts);
+    impl_->w13 = impl_->allocate_device<std::uint8_t>(
+        resident_experts_total * kW13Bytes);
+    impl_->s13 = impl_->allocate_device<std::uint8_t>(
+        resident_experts_total * kS13Bytes);
+    impl_->w2 = impl_->allocate_device<std::uint8_t>(
+        resident_experts_total * kW2Bytes);
+    impl_->s2 = impl_->allocate_device<std::uint8_t>(
+        resident_experts_total * kS2Bytes);
+    impl_->w13_global =
+        impl_->allocate_device<float>(resident_experts_total);
+    impl_->w2_global =
+        impl_->allocate_device<float>(resident_experts_total);
 
     impl_->hidden =
         impl_->allocate_device<sycl::half>(config.max_batch * kHiddenSize);
@@ -466,11 +550,13 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
         config.max_batch * kTopK * 2 * kIntermediateSize);
     impl_->output =
         impl_->allocate_device<float>(config.max_batch * kHiddenSize);
+    impl_->copyout_staging =
+        impl_->allocate_host<float>(config.max_batch * kHiddenSize);
 
-    constexpr std::size_t kLayerStagingBytes =
-        kExpertsPerLayer * kW13Bytes;
+    const std::size_t layer_staging_bytes =
+        resident_experts_per_layer * kW13Bytes;
     impl_->upload_staging =
-        impl_->allocate_host<std::uint8_t>(kLayerStagingBytes);
+        impl_->allocate_host<std::uint8_t>(layer_staging_bytes);
 
     const auto* records = static_cast<const std::uint8_t*>(impl_->bank_mapping) +
                           sizeof(ExpertBankHeader);
@@ -492,8 +578,8 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     sycl::free(impl_->upload_staging, *impl_->queue);
     impl_->upload_staging = nullptr;
 
-    const std::uint64_t owned_device_bytes =
-        persistent_device_bytes(config.max_batch);
+    const std::uint64_t owned_device_bytes = persistent_device_bytes(
+        config.max_batch, resident_experts_per_layer);
     impl_->capability.device_memory_available_bytes =
         impl_->capability.device_memory_total_bytes > owned_device_bytes
             ? impl_->capability.device_memory_total_bytes - owned_device_bytes
@@ -567,9 +653,12 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
     }
 
     const std::size_t route_elements = M * kTopK;
+    const std::size_t resident_experts = impl_->config.resident_experts.size();
     for (std::size_t index = 0; index < route_elements; ++index) {
-      if (ids[index] < -1 || ids[index] >= static_cast<std::int32_t>(kExpertsPerLayer)) {
-        impl_->set_error("issue received an expert ID outside [-1, 256)");
+      if (ids[index] < -1 ||
+          ids[index] >= static_cast<std::int32_t>(resident_experts)) {
+        impl_->set_error(
+            "issue received an expert ID outside the configured compact range");
         return ProviderStatus::invalid_argument;
       }
       if (!std::isfinite(weights[index])) {
@@ -587,7 +676,7 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
 
     impl_->kernel_begin.emplace(impl_->queue->single_task([] {}));
 
-    const std::size_t first_expert = layer * kExpertsPerLayer;
+    const std::size_t first_expert = layer * resident_experts;
     const std::uint8_t* layer_w13 = impl_->w13 + first_expert * kW13Bytes;
     const std::uint8_t* layer_s13 = impl_->s13 + first_expert * kS13Bytes;
     const std::uint8_t* layer_w2 = impl_->w2 + first_expert * kW2Bytes;
@@ -600,20 +689,31 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
       quixicore::xpu::ops::nvfp4_moe_split(
           *impl_->queue, impl_->hidden, impl_->ids, impl_->weights, layer_w13,
           layer_s13, layer_w13_global, layer_w2, layer_s2, layer_w2_global,
-          impl_->scratch, impl_->output, M, kExpertsPerLayer, kTopK,
+          impl_->scratch, impl_->output, M, resident_experts, kTopK,
           kHiddenSize, kIntermediateSize, quixicore::xpu::DType::f16, true,
           quixicore::xpu::Variant::sycl, false);
     } else {
       quixicore::xpu::ops::nvfp4_moe_fused(
           *impl_->queue, impl_->hidden, impl_->ids, impl_->weights, layer_w13,
           layer_s13, layer_w13_global, layer_w2, layer_s2, layer_w2_global,
-          impl_->output, M, kExpertsPerLayer, kTopK, kHiddenSize,
+          impl_->output, M, resident_experts, kTopK, kHiddenSize,
           kIntermediateSize, quixicore::xpu::DType::f16, true,
           quixicore::xpu::Variant::sycl, false);
     }
 
     impl_->pending_error.clear();
     impl_->kernel_end.emplace(impl_->queue->single_task([] {}));
+#ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
+    if (impl_->armed_test_fault &&
+        *impl_->armed_test_fault ==
+            ProviderTestFault::after_kernel_before_copyout &&
+        impl_->armed_test_fault_sequence == sequence) {
+      impl_->pending_error =
+          "injected device error after kernel before copyout";
+      impl_->armed_test_fault.reset();
+      impl_->armed_test_fault_sequence = 0;
+    }
+#endif
     impl_->pending_generation = generation;
     impl_->pending_sequence = sequence;
     impl_->pending_M = M;
@@ -672,6 +772,7 @@ ProviderStatus B70Provider::take(const std::uint64_t generation,
     }
     if (!impl_->pending_error.empty()) {
       impl_->set_error(impl_->pending_error);
+      impl_->retire_pending_locked();
       return ProviderStatus::device_error;
     }
 
@@ -682,15 +783,27 @@ ProviderStatus B70Provider::take(const std::uint64_t generation,
       return ProviderStatus::invalid_argument;
     }
 
-    sycl::event copy_out = impl_->queue->memcpy(
-        output, impl_->output, required_elements * sizeof(float));
-    copy_out.wait_and_throw();
-
-    const std::string asynchronous_error = impl_->consume_async_error();
+    impl_->kernel_end->wait_and_throw();
+    std::string asynchronous_error = impl_->consume_async_error();
     if (!asynchronous_error.empty()) {
       impl_->pending_error =
           "provider dispatch failed asynchronously: " + asynchronous_error;
       impl_->set_error(impl_->pending_error);
+      impl_->retire_pending_locked();
+      return ProviderStatus::device_error;
+    }
+
+    sycl::event copy_out = impl_->queue->memcpy(
+        impl_->copyout_staging, impl_->output,
+        required_elements * sizeof(float));
+    copy_out.wait_and_throw();
+
+    asynchronous_error = impl_->consume_async_error();
+    if (!asynchronous_error.empty()) {
+      impl_->pending_error =
+          "provider copyout failed asynchronously: " + asynchronous_error;
+      impl_->set_error(impl_->pending_error);
+      impl_->retire_pending_locked();
       return ProviderStatus::device_error;
     }
 
@@ -706,37 +819,69 @@ ProviderStatus B70Provider::take(const std::uint64_t generation,
     const auto total_stop =
         copy_out.get_profiling_info<sycl::info::event_profiling::command_end>();
 
-    result->generation = impl_->pending_generation;
-    result->sequence = impl_->pending_sequence;
-    result->M = impl_->pending_M;
-    result->kernel = impl_->pending_split ? "split" : "fused";
-    result->kernel_us = static_cast<double>(kernel_stop - kernel_start) * 1.0e-3;
-    result->total_us = static_cast<double>(total_stop - total_start) * 1.0e-3;
+    DispatchResult completed_result;
+    completed_result.generation = impl_->pending_generation;
+    completed_result.sequence = impl_->pending_sequence;
+    completed_result.M = impl_->pending_M;
+    completed_result.kernel = impl_->pending_split ? "split" : "fused";
+    completed_result.kernel_us =
+        static_cast<double>(kernel_stop - kernel_start) * 1.0e-3;
+    completed_result.total_us =
+        static_cast<double>(total_stop - total_start) * 1.0e-3;
+    *result = std::move(completed_result);
 
     impl_->health.last_error.clear();
-    impl_->health.pending = false;
-    impl_->pending_generation = 0;
-    impl_->pending_sequence = 0;
-    impl_->pending_M = 0;
-    impl_->pending_split = false;
-    impl_->pending_error.clear();
-    impl_->dispatch_begin.reset();
-    impl_->kernel_begin.reset();
-    impl_->kernel_end.reset();
+    impl_->retire_pending_locked();
+
+    std::memcpy(output, impl_->copyout_staging,
+                required_elements * sizeof(float));
     return ProviderStatus::ok;
   } catch (...) {
     try {
       std::lock_guard<std::mutex> lock(impl_->mutex);
       impl_->set_current_exception("provider take failed: ");
-      try {
-        impl_->pending_error = impl_->health.last_error;
-      } catch (...) {
-      }
+      impl_->retire_pending_locked();
     } catch (...) {
     }
     return ProviderStatus::device_error;
   }
 }
+
+#ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
+ProviderStatus B70Provider::arm_test_fault(const ProviderTestFault fault,
+                                           const std::uint64_t sequence) {
+  try {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+
+    if (impl_->health.stopped) {
+      return ProviderStatus::shutdown;
+    }
+    if (!impl_->health.loaded || !impl_->queue) {
+      return ProviderStatus::not_loaded;
+    }
+    if (impl_->health.pending || impl_->armed_test_fault) {
+      return ProviderStatus::busy;
+    }
+    if (fault != ProviderTestFault::after_kernel_before_copyout ||
+        sequence == 0) {
+      impl_->set_error("invalid provider test fault or sequence");
+      return ProviderStatus::invalid_argument;
+    }
+
+    impl_->armed_test_fault = fault;
+    impl_->armed_test_fault_sequence = sequence;
+    impl_->health.last_error.clear();
+    return ProviderStatus::ok;
+  } catch (...) {
+    try {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      impl_->set_current_exception("arming provider test fault failed: ");
+    } catch (...) {
+    }
+    return ProviderStatus::device_error;
+  }
+}
+#endif
 
 void B70Provider::shutdown() noexcept {
   try {

@@ -1,4 +1,4 @@
-#include "shared_ring.hpp"
+#include "b70_ring_control.hpp"
 
 #include <algorithm>
 #include <array>
@@ -16,7 +16,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -30,68 +29,33 @@
 #include <unistd.h>
 
 namespace sb = shooting_brake::phase2;
+namespace ctl = shooting_brake::phase2::b70_control;
 namespace {
 
-constexpr std::array<char, 8> kBootstrapMagic{'S', 'B', 'R', 'B', 'O', 'O', 'T', '2'};
-constexpr std::array<char, 8> kStartupMagic{'S', 'B', 'R', 'R', 'E', 'A', 'D', '2'};
-constexpr std::array<char, 8> kControlMagic{'S', 'B', 'R', 'C', 'T', 'R', 'L', '2'};
-constexpr std::array<char, 8> kShutdownMagic{'S', 'B', 'R', 'D', 'O', 'N', 'E', '2'};
-constexpr std::uint16_t kBootstrapMajor = 1;
-constexpr std::uint16_t kBootstrapMinor = 0;
 constexpr std::uint32_t kIntermediateSize = 512;
 constexpr float kAtol = 1.0e-6F;
 constexpr float kRtol = 1.0e-2F;
 constexpr int kPollSliceMs = 250;
 constexpr std::uint64_t kOperationTimeoutNs = 120'000'000'000ULL;
+constexpr std::uint64_t kExpectedPlacementGeneration = 29;
+constexpr std::uint64_t kExpectedWeightGeneration = 31;
 
-struct Bootstrap final {
-  char magic[8];
-  std::uint16_t major;
-  std::uint16_t minor;
-  std::uint32_t bytes;
-  std::uint64_t mapping_bytes;
-  sb::RingIdentity identity;
-  std::uint8_t reserved[32];
-};
+inline constexpr sb::Fingerprint kExpectedPlacementSha256{{
+    0x1aU, 0xa9U, 0x92U, 0x90U, 0x92U, 0x9cU, 0xb6U, 0xd7U,
+    0x38U, 0xf1U, 0xd0U, 0xdeU, 0xe4U, 0xf6U, 0x06U, 0x57U,
+    0xb2U, 0xbeU, 0xcbU, 0x93U, 0x6bU, 0x51U, 0x90U, 0x30U,
+    0x04U, 0xffU, 0x87U, 0xf4U, 0xadU, 0xa0U, 0x96U, 0xe9U}};
+inline constexpr sb::Fingerprint kExpectedWeightSha256{{
+    0x0cU, 0xe6U, 0x37U, 0x7bU, 0xa3U, 0xc9U, 0x84U, 0x8dU,
+    0xa4U, 0x2bU, 0x60U, 0x63U, 0x57U, 0x4eU, 0xa8U, 0x84U,
+    0x05U, 0x2dU, 0x2eU, 0x0fU, 0x5eU, 0x60U, 0x5dU, 0x86U,
+    0xd1U, 0x68U, 0x4aU, 0x1eU, 0x58U, 0x26U, 0xe8U, 0xdbU}};
 
-struct StartupReply final {
-  char magic[8];
-  std::uint16_t major;
-  std::uint16_t minor;
-  std::uint32_t bytes;
-  std::uint32_t startup_status;
-  std::uint32_t provider_status;
-  std::uint64_t allocation_baseline;
-  std::uint8_t reserved[32];
-};
+sb::Fingerprint mismatched(sb::Fingerprint fingerprint) noexcept {
+  fingerprint.bytes[0] ^= 0xffU;
+  return fingerprint;
+}
 
-struct Control final {
-  char magic[8];
-  std::uint16_t major;
-  std::uint16_t minor;
-  std::uint32_t bytes;
-  std::uint32_t command;
-  std::uint32_t reserved0;
-  std::uint8_t reserved[32];
-};
-
-struct ShutdownReply final {
-  char magic[8];
-  std::uint16_t major;
-  std::uint16_t minor;
-  std::uint32_t bytes;
-  std::uint32_t status;
-  std::uint32_t reserved0;
-  std::uint64_t dispatches;
-  std::uint64_t allocation_baseline;
-  std::uint64_t allocation_final;
-  std::uint8_t reserved[32];
-};
-
-static_assert(std::is_trivially_copyable_v<Bootstrap>);
-static_assert(std::is_trivially_copyable_v<StartupReply>);
-static_assert(std::is_trivially_copyable_v<Control>);
-static_assert(std::is_trivially_copyable_v<ShutdownReply>);
 
 class TestFailure final : public std::runtime_error {
  public:
@@ -362,12 +326,15 @@ GoldenReference load_golden(const std::string& path) {
   return golden;
 }
 
-sb::RingIdentity make_identity(pid_t provider_pid) noexcept {
+sb::RingIdentity make_identity(
+    pid_t provider_pid,
+    const sb::Fingerprint& placement_sha256 = kExpectedPlacementSha256,
+    const sb::Fingerprint& weight_sha256 = kExpectedWeightSha256) noexcept {
   sb::RingIdentity identity{};
   identity.ring_generation = 101;
   identity.provider_generation = 73;
-  identity.placement_generation = 29;
-  identity.weight_generation = 31;
+  identity.placement_generation = kExpectedPlacementGeneration;
+  identity.weight_generation = kExpectedWeightGeneration;
   identity.provider_pid = static_cast<std::uint64_t>(provider_pid);
   for (std::size_t index = 0; index < sizeof(identity.provider_nonce.bytes);
        ++index) {
@@ -375,27 +342,45 @@ sb::RingIdentity make_identity(pid_t provider_pid) noexcept {
         static_cast<std::uint8_t>(0x10U + index);
     identity.ring_nonce.bytes[index] = static_cast<std::uint8_t>(0x80U + index);
   }
-  for (std::size_t index = 0; index < sizeof(identity.placement_sha256.bytes);
-       ++index) {
-    identity.placement_sha256.bytes[index] =
-        static_cast<std::uint8_t>(0x21U + index);
-    identity.weight_sha256.bytes[index] =
-        static_cast<std::uint8_t>(0xa1U + index);
-  }
+  identity.placement_sha256 = placement_sha256;
+  identity.weight_sha256 = weight_sha256;
   return identity;
 }
 
-pid_t spawn_provider(const std::string& provider_path,
-                     const std::string& socket_path,
-                     const std::string& bank_path) {
+std::string fingerprint_hex(const sb::Fingerprint& fingerprint) {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string result(2U * sizeof(fingerprint.bytes), '0');
+  for (std::size_t index = 0; index < sizeof(fingerprint.bytes); ++index) {
+    result[index * 2U] = kHex[fingerprint.bytes[index] >> 4U];
+    result[index * 2U + 1U] = kHex[fingerprint.bytes[index] & 0x0fU];
+  }
+  return result;
+}
+
+pid_t spawn_provider(
+    const std::string& provider_path, const std::string& socket_path,
+    const std::string& bank_path,
+    const sb::Fingerprint& placement_sha256 = kExpectedPlacementSha256,
+    const sb::Fingerprint& weight_sha256 = kExpectedWeightSha256) {
+  const std::string placement_generation =
+      std::to_string(kExpectedPlacementGeneration);
+  const std::string weight_generation =
+      std::to_string(kExpectedWeightGeneration);
+  const std::string placement_sha256_hex = fingerprint_hex(placement_sha256);
+  const std::string weight_sha256_hex = fingerprint_hex(weight_sha256);
   const pid_t child = ::fork();
   if (child < 0) {
     fail("fork failed: " + std::string(std::strerror(errno)));
   }
   if (child == 0) {
-    ::execl(provider_path.c_str(), provider_path.c_str(), "--socket",
-            socket_path.c_str(), "--bank", bank_path.c_str(), "--quiet",
-            static_cast<char*>(nullptr));
+    ::execl(
+        provider_path.c_str(), provider_path.c_str(), "--socket",
+        socket_path.c_str(), "--bank", bank_path.c_str(),
+        "--expected-placement-generation", placement_generation.c_str(),
+        "--expected-weight-generation", weight_generation.c_str(),
+        "--expected-placement-sha256", placement_sha256_hex.c_str(),
+        "--expected-weight-sha256", weight_sha256_hex.c_str(), "--quiet",
+        static_cast<char*>(nullptr));
     _exit(127);
   }
   return child;
@@ -438,10 +423,10 @@ Fd connect_provider(const std::string& path, ChildProcess& child) {
 }
 
 void send_bootstrap(int socket, const sb::SharedRing& ring) {
-  Bootstrap bootstrap{};
-  copy_magic(bootstrap.magic, kBootstrapMagic);
-  bootstrap.major = kBootstrapMajor;
-  bootstrap.minor = kBootstrapMinor;
+  ctl::Bootstrap bootstrap{};
+  copy_magic(bootstrap.magic, ctl::kBootstrapMagic);
+  bootstrap.major = ctl::kProtocolMajor;
+  bootstrap.minor = ctl::kProtocolMinor;
   bootstrap.bytes = sizeof(bootstrap);
   bootstrap.mapping_bytes = ring.mapping_size();
   bootstrap.identity = ring.identity();
@@ -464,6 +449,38 @@ void send_bootstrap(int socket, const sb::SharedRing& ring) {
   const ssize_t sent = ::sendmsg(socket, &message, MSG_NOSIGNAL);
   require(sent == static_cast<ssize_t>(sizeof(bootstrap)),
           "bootstrap sendmsg was not exact size");
+}
+
+void check_startup_identity_rejection(
+    const std::string& provider_path, const std::string& bank_path,
+    const sb::Fingerprint& placement_sha256,
+    const sb::Fingerprint& weight_sha256, int expected_exit,
+    std::string_view operation) {
+  TemporaryDirectory temporary;
+  const std::string socket_path = temporary.socket_path();
+  ChildProcess child(spawn_provider(provider_path, socket_path, bank_path,
+                                      placement_sha256, weight_sha256));
+  const sb::RingIdentity identity =
+      make_identity(child.pid(), placement_sha256, weight_sha256);
+  sb::SharedRing ring;
+  const char* create_detail = nullptr;
+  require_status(sb::SharedRing::create(identity, &ring, &create_detail),
+                 sb::RingStatus::ok,
+                 create_detail == nullptr ? operation : create_detail);
+  Fd connection = connect_provider(socket_path, child);
+  send_bootstrap(connection.get(), ring);
+
+  const int wait_status = child.wait_bounded();
+  require(WIFEXITED(wait_status) &&
+              WEXITSTATUS(wait_status) == expected_exit,
+          std::string(operation) +
+              ": provider did not reject before bank load");
+  std::byte unexpected{};
+  const ssize_t received =
+      ::recv(connection.get(), &unexpected, sizeof(unexpected), MSG_DONTWAIT);
+  require(received == 0,
+          std::string(operation) +
+              ": provider emitted a startup packet after identity rejection");
 }
 
 void wait_readable(int fd, std::string_view operation) {
@@ -817,6 +834,13 @@ void run_integration() {
   const std::string golden_path = repository_root + "/phase1/golden_reference.bin";
   const GoldenReference golden = load_golden(golden_path);
 
+  check_startup_identity_rejection(
+      provider_path, bank_path, mismatched(kExpectedPlacementSha256),
+      kExpectedWeightSha256, 15, "placement SHA-256 mismatch");
+  check_startup_identity_rejection(
+      provider_path, bank_path, kExpectedPlacementSha256,
+      mismatched(kExpectedWeightSha256), 17, "weight SHA-256 mismatch");
+
   TemporaryDirectory temporary;
   const std::string socket_path = temporary.socket_path();
   ChildProcess child(spawn_provider(provider_path, socket_path, bank_path));
@@ -829,17 +853,41 @@ void run_integration() {
                  create_detail == nullptr ? "SharedRing::create"
                                           : create_detail);
 
-  sb::RingIdentity stale_identity = identity;
-  ++stale_identity.provider_generation;
-  sb::SharedRing rejected_attach;
+  sb::RingIdentity stale_provider_identity = identity;
+  ++stale_provider_identity.provider_generation;
+  sb::SharedRing stale_provider_attach;
   const char* attach_detail = nullptr;
   require_status(sb::SharedRing::attach(
                      ring.fd(), ring.request_eventfd(), ring.completion_eventfd(),
-                     stale_identity, &rejected_attach, &attach_detail),
+                     stale_provider_identity, &stale_provider_attach,
+                     &attach_detail),
                  sb::RingStatus::generation_mismatch,
                  "public API rejects stale provider generation");
-  require(!rejected_attach.is_open(),
-          "stale-generation attach exposed an open mapping");
+  require(!stale_provider_attach.is_open(),
+          "stale-provider-generation attach exposed an open mapping");
+
+  sb::RingIdentity stale_placement_identity = identity;
+  ++stale_placement_identity.placement_generation;
+  sb::SharedRing stale_placement_attach;
+  require_status(sb::SharedRing::attach(
+                     ring.fd(), ring.request_eventfd(), ring.completion_eventfd(),
+                     stale_placement_identity, &stale_placement_attach,
+                     &attach_detail),
+                 sb::RingStatus::generation_mismatch,
+                 "public API rejects stale placement generation");
+  require(!stale_placement_attach.is_open(),
+          "stale-placement-generation attach exposed an open mapping");
+
+  sb::RingIdentity stale_weight_identity = identity;
+  ++stale_weight_identity.weight_generation;
+  sb::SharedRing stale_weight_attach;
+  require_status(sb::SharedRing::attach(
+                     ring.fd(), ring.request_eventfd(), ring.completion_eventfd(),
+                     stale_weight_identity, &stale_weight_attach, &attach_detail),
+                 sb::RingStatus::generation_mismatch,
+                 "public API rejects stale weight generation");
+  require(!stale_weight_attach.is_open(),
+          "stale-weight-generation attach exposed an open mapping");
 
   sb::RingIdentity wrong_pid_identity = identity;
   ++wrong_pid_identity.provider_pid;
@@ -854,11 +902,11 @@ void run_integration() {
 
   Fd connection = connect_provider(socket_path, child);
   send_bootstrap(connection.get(), ring);
-  const StartupReply startup =
-      receive_exact<StartupReply>(connection.get(), "provider startup");
-  require(exact_magic(startup.magic, kStartupMagic) &&
-              startup.major == kBootstrapMajor &&
-              startup.minor == kBootstrapMinor &&
+  const ctl::StartupReply startup =
+      receive_exact<ctl::StartupReply>(connection.get(), "provider startup");
+  require(exact_magic(startup.magic, ctl::kStartupMagic) &&
+              startup.major == ctl::kProtocolMajor &&
+              startup.minor == ctl::kProtocolMinor &&
               startup.bytes == sizeof(startup) && startup.startup_status == 0U &&
               startup.provider_status == 0U && startup.allocation_baseline > 0U &&
               all_zero(startup.reserved, sizeof(startup.reserved)),
@@ -936,18 +984,19 @@ void run_integration() {
       benchmark_ring(ring, golden, connection.get(), 12U);
   const std::uint64_t expected_dispatches = next_sequence - 1U;
 
-  Control shutdown{};
-  copy_magic(shutdown.magic, kControlMagic);
-  shutdown.major = kBootstrapMajor;
-  shutdown.minor = kBootstrapMinor;
+  ctl::Control shutdown{};
+  copy_magic(shutdown.magic, ctl::kControlMagic);
+  shutdown.major = ctl::kProtocolMajor;
+  shutdown.minor = ctl::kProtocolMinor;
   shutdown.bytes = sizeof(shutdown);
-  shutdown.command = 1;
+  shutdown.command = ctl::Command::shutdown;
   send_exact(connection.get(), shutdown, "clean shutdown request");
-  const ShutdownReply shutdown_reply =
-      receive_exact<ShutdownReply>(connection.get(), "clean shutdown reply");
-  require(exact_magic(shutdown_reply.magic, kShutdownMagic) &&
-              shutdown_reply.major == kBootstrapMajor &&
-              shutdown_reply.minor == kBootstrapMinor &&
+  const ctl::ShutdownReply shutdown_reply =
+      receive_exact<ctl::ShutdownReply>(connection.get(),
+                                        "clean shutdown reply");
+  require(exact_magic(shutdown_reply.magic, ctl::kShutdownMagic) &&
+              shutdown_reply.major == ctl::kProtocolMajor &&
+              shutdown_reply.minor == ctl::kProtocolMinor &&
               shutdown_reply.bytes == sizeof(shutdown_reply) &&
               shutdown_reply.status == 0U && shutdown_reply.reserved0 == 0U &&
               shutdown_reply.dispatches == expected_dispatches &&

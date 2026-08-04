@@ -129,6 +129,9 @@ experiments/transport_test_v2
 /phase2/shared_ring_tests
 /phase2/memfd_transport_host
 /phase2/memfd_transport_provider
+/phase3/b70_ring_provider
+/phase3/b70_ring_provider_fault
+/phase3/provider_math_test
 
 # Local third-party research checkouts
 /phase0/guidellm/

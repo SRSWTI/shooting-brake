@@ -21,10 +21,17 @@ enum class ProviderStatus {
   shutdown,
 };
 
+#ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
+enum class ProviderTestFault : std::uint32_t {
+  after_kernel_before_copyout = 1,
+};
+#endif
+
 struct ProviderConfig {
   std::size_t max_batch = 128;
   std::size_t top_k = 8;
   std::uint64_t generation = 1;
+  std::vector<std::int32_t> resident_experts;
 };
 
 struct Capability {
@@ -85,6 +92,10 @@ class B70Provider final {
   ProviderStatus take(std::uint64_t generation, std::uint64_t sequence,
                       float* output, std::size_t output_elements,
                       DispatchResult* result);
+#ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
+  ProviderStatus arm_test_fault(ProviderTestFault fault,
+                                std::uint64_t sequence);
+#endif
 
   void shutdown() noexcept;
 

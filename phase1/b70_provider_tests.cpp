@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -25,6 +26,9 @@ using shooting_brake::phase1::B70Provider;
 using shooting_brake::phase1::DispatchResult;
 using shooting_brake::phase1::ProviderConfig;
 using shooting_brake::phase1::ProviderStatus;
+#ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
+using shooting_brake::phase1::ProviderTestFault;
+#endif
 
 constexpr std::size_t kLayers = 32;
 constexpr std::size_t kExpertsPerLayer = 256;
@@ -467,6 +471,210 @@ void run_duplicate_top8_case(B70Provider& provider,
                   "split");
 }
 
+void test_invalid_resident_lists() {
+  const auto require_invalid_load =
+      [](std::vector<std::int32_t> resident_experts,
+         std::string_view case_name) {
+        B70Provider provider;
+        ProviderConfig config;
+        config.max_batch = kMaxBatch;
+        config.top_k = kTopK;
+        config.generation = kGeneration;
+        config.resident_experts = std::move(resident_experts);
+        require_status(provider.load(std::string(kBankPath), config),
+                       ProviderStatus::invalid_argument, case_name);
+        require(!provider.health().loaded,
+                std::string(case_name) + ": provider became loaded");
+      };
+
+  require_invalid_load({0, 0}, "load duplicate resident expert");
+  require_invalid_load({-1, 0}, "load negative resident expert");
+  require_invalid_load(
+      {0, static_cast<std::int32_t>(kExpertsPerLayer)},
+      "load resident expert beyond model geometry");
+}
+
+void test_compact_resident_gather(const GoldenReference& golden) {
+  constexpr std::uint64_t kCompactSequence = 20000;
+  constexpr std::size_t kCompactExpertsPerLayer = 2;
+  constexpr std::int32_t kCanonicalZeroLocalSlot = 1;
+
+  B70Provider provider;
+  ProviderConfig config;
+  config.max_batch = kMaxBatch;
+  config.top_k = kTopK;
+  config.generation = kGeneration;
+  config.resident_experts = {1, 0};
+  require_status(provider.load(std::string(kBankPath), config),
+                 ProviderStatus::ok, "compact resident load [1,0]");
+
+  const auto capability = provider.capability();
+  require(capability.num_resident_experts ==
+              kLayers * kCompactExpertsPerLayer,
+          "compact capability: num_resident_experts is not 64");
+  require(capability.experts_per_layer == kExpertsPerLayer,
+          "compact capability: experts_per_layer changed from 256");
+  const std::uint64_t allocation_baseline = provider.health().allocations;
+  require(allocation_baseline > 0,
+          "compact health: allocation baseline is zero");
+
+  HostBatch batch = make_batch(golden, 1, false);
+  batch.ids[0] = static_cast<std::int32_t>(kCompactExpertsPerLayer);
+  require_status(provider.issue(kGeneration, kCompactSequence, 0,
+                                batch.hidden.data(), batch.ids.data(),
+                                batch.weights.data(), batch.M),
+                 ProviderStatus::invalid_argument,
+                 "compact issue local ID beyond residency");
+  require(provider.health().allocations == allocation_baseline,
+          "compact rejected issue changed allocation count");
+
+  batch.ids[0] = kCanonicalZeroLocalSlot;
+  require_status(provider.issue(kGeneration, kCompactSequence, 0,
+                                batch.hidden.data(), batch.ids.data(),
+                                batch.weights.data(), batch.M),
+                 ProviderStatus::ok,
+                 "compact issue canonical expert 0 through local slot 1");
+  finish_dispatch(provider, batch, kCompactSequence, golden,
+                  "compact-[1,0]-canonical-0", "split");
+
+  const auto final_health = provider.health();
+  require(final_health.dispatches == 1,
+          "compact health: accepted dispatch count is not one");
+  require(final_health.allocations == allocation_baseline,
+          "compact allocation invariant changed after dispatch");
+}
+
+#ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
+void test_sequence_bound_copyout_fault(const GoldenReference& golden) {
+  constexpr std::uint64_t kPassSequence = 10000;
+  constexpr std::uint64_t kFaultSequence = 10001;
+  constexpr float kOutputSentinel = 12345.25F;
+
+  B70Provider provider;
+  require_status(
+      provider.arm_test_fault(
+          ProviderTestFault::after_kernel_before_copyout, kFaultSequence),
+      ProviderStatus::not_loaded, "arm fault before load");
+
+  ProviderConfig config;
+  config.max_batch = kMaxBatch;
+  config.top_k = kTopK;
+  config.generation = kGeneration;
+  require_status(provider.load(std::string(kBankPath), config),
+                 ProviderStatus::ok, "fault-test load");
+  const std::uint64_t allocation_baseline = provider.health().allocations;
+
+  require_status(
+      provider.arm_test_fault(
+          ProviderTestFault::after_kernel_before_copyout, 0),
+      ProviderStatus::invalid_argument, "arm fault with zero sequence");
+  require_status(
+      provider.arm_test_fault(
+          ProviderTestFault::after_kernel_before_copyout, kFaultSequence),
+      ProviderStatus::ok, "arm sequence-bound copyout fault");
+  require_status(
+      provider.arm_test_fault(
+          ProviderTestFault::after_kernel_before_copyout, kFaultSequence + 1),
+      ProviderStatus::busy, "arm second fault while one is armed");
+
+  HostBatch passing_batch = make_batch(golden, 1, false);
+  issue_dispatch(provider, passing_batch, kPassSequence,
+                 "fault-sequence-nonmatch");
+  finish_dispatch(provider, passing_batch, kPassSequence, golden,
+                  "fault-sequence-nonmatch", "split");
+  require(provider.health().allocations == allocation_baseline,
+          "fault sequence nonmatch changed allocation count");
+
+  HostBatch fault_batch = make_batch(golden, 1, false);
+  std::fill(fault_batch.output.begin(), fault_batch.output.end(),
+            kOutputSentinel);
+  DispatchResult result;
+  result.generation = std::numeric_limits<std::uint64_t>::max();
+  result.sequence = std::numeric_limits<std::uint64_t>::max() - 1;
+  result.M = std::numeric_limits<std::size_t>::max();
+  result.kernel = "fault-result-sentinel";
+  result.kernel_us = -1.0;
+  result.total_us = -2.0;
+
+  const auto require_sentinels = [&]() {
+    require(std::all_of(fault_batch.output.begin(), fault_batch.output.end(),
+                        [](const float value) {
+                          return value == kOutputSentinel;
+                        }),
+            "fault take modified caller output");
+    require(result.generation ==
+                    std::numeric_limits<std::uint64_t>::max() &&
+                result.sequence ==
+                    std::numeric_limits<std::uint64_t>::max() - 1 &&
+                result.M == std::numeric_limits<std::size_t>::max() &&
+                result.kernel == "fault-result-sentinel" &&
+                result.kernel_us == -1.0 && result.total_us == -2.0,
+            "fault take modified caller dispatch result");
+  };
+
+  issue_dispatch(provider, fault_batch, kFaultSequence,
+                 "after-kernel-before-copyout-fault");
+  require_status(
+      provider.arm_test_fault(
+          ProviderTestFault::after_kernel_before_copyout, kFaultSequence + 1),
+      ProviderStatus::busy, "arm fault while dispatch is pending");
+  require_status(provider.take(kGeneration + 1, kFaultSequence,
+                               fault_batch.output.data(),
+                               fault_batch.output.size(), &result),
+                 ProviderStatus::generation_mismatch,
+                 "fault take wrong generation");
+  require_sentinels();
+  require_status(provider.take(kGeneration, kFaultSequence + 1,
+                               fault_batch.output.data(),
+                               fault_batch.output.size(), &result),
+                 ProviderStatus::sequence_mismatch,
+                 "fault take wrong sequence");
+  require_sentinels();
+  require_status(provider.take(kGeneration, kFaultSequence,
+                               fault_batch.output.data(),
+                               fault_batch.output.size(), &result),
+                 ProviderStatus::device_error, "fault take exact sequence");
+  require_sentinels();
+  require_status(provider.take(kGeneration, kFaultSequence,
+                               fault_batch.output.data(),
+                               fault_batch.output.size(), &result),
+                 ProviderStatus::sequence_mismatch,
+                 "fault take after terminal retirement");
+  require_sentinels();
+
+  const auto fault_health = provider.health();
+  require(fault_health.loaded, "fault health: provider is not loaded");
+  require(!fault_health.pending,
+          "fault health: terminal dispatch was not retired");
+  require(fault_health.dispatches == 2,
+          "fault health: expected two accepted dispatches");
+  require(fault_health.allocations == allocation_baseline,
+          "fault health: allocation count changed after load");
+  require(fault_health.last_error ==
+              "injected device error after kernel before copyout",
+          "fault health: deterministic device error does not match");
+  require_status(
+      provider.arm_test_fault(
+          ProviderTestFault::after_kernel_before_copyout, kFaultSequence + 1),
+      ProviderStatus::ok, "arm fault after terminal retirement");
+
+  provider.shutdown();
+  const auto shutdown_health = provider.health();
+  require(!shutdown_health.loaded,
+          "fault cleanup: provider is still loaded");
+  require(!shutdown_health.pending,
+          "fault cleanup: pending dispatch was not cleared");
+  require(shutdown_health.stopped,
+          "fault cleanup: provider was not stopped");
+  require(shutdown_health.allocations == allocation_baseline,
+          "fault cleanup: allocation count changed");
+  require_status(
+      provider.arm_test_fault(
+          ProviderTestFault::after_kernel_before_copyout, kFaultSequence),
+      ProviderStatus::shutdown, "arm fault after cleanup");
+}
+#endif
+
 }  // namespace
 
 int main() {
@@ -540,6 +748,13 @@ int main() {
                                   rejected.hidden.data(), rejected.ids.data(),
                                   rejected.weights.data(), rejected.M),
                    ProviderStatus::shutdown, "issue after shutdown");
+
+    test_invalid_resident_lists();
+    test_compact_resident_gather(golden);
+
+#ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
+    test_sequence_bound_copyout_fault(golden);
+#endif
 
     std::cout << "Phase-1 PASS\n";
     return 0;

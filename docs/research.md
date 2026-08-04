@@ -4,13 +4,14 @@
 
 This ledger records which upstream projects supply production components, which supply mechanics or ideas only, and which local results are proven reference evidence. [`../plan.md`](../plan.md) is the sole authoritative active architecture and implementation plan. This document does not claim that the planned upstream-vLLM-plus-B70 production integration is implemented.
 
-The source inspection summarized here reflects the workspace recorded by the plan on 2026-08-04. No new web research, build, test, model run, or benchmark was performed for this ledger.
+The source inspection and B70 kernel evidence summarized here reflect the workspace recorded on 2026-08-04. They are qualification evidence for named components, not a claim that the planned production integration has been built, tested, or benchmarked end to end.
 
 ## Evidence classes
 
 - **Inspected source fact** — behavior or an interface observed in a named checkout. It is not a local production result.
 - **Upstream claim** — a result reported by an external project, article, or paper. It is never Shooting Brake benchmark evidence.
 - **Proven Colibri reference evidence** — behavior measured in `colibri-variants/colibri-qwen36/`. It establishes feasibility for that implementation only.
+- **QuixiCore-XPU B70 qualification evidence** — behavior measured for the named kernel checkout on the actual B70. It qualifies that kernel experiment only, not the production provider process or vLLM integration.
 - **Production decision** — the required destination architecture from [`../plan.md`](../plan.md). It remains planned until the corresponding Phase 0–10 gate is completed.
 - **Unverified production assumption** — a proposition requiring evidence against upstream vLLM and the isolated B70 provider.
 
@@ -21,7 +22,9 @@ Repository revisions identify what was inspected; they do not assert that a chec
 | Source | Production role | Explicit non-role |
 |---|---|---|
 | Upstream vLLM 0.26+ | RTX 5090 CUDA state owner and serving host: scheduler, continuous batching, attention, KV/recurrent state, canonical router/top-k, local routed experts, shared expert, residual, LM head, sampling, and APIs. | It does not directly dispatch CUDA tensors to XPU operators and is not replaced by an old patched vLLM fork. |
-| `intel-xpu/llm-scaler` plus `vllm-xpu-kernels` | Source of qualified tiny, batched/grouped, and prefill ESIMD kernels used inside an isolated persistent PyTorch-XPU B70 routed-expert provider. | Its vLLM 0.21.0 patch is not the CUDA host and must not be applied unchanged to upstream vLLM 0.26+. |
+| `QuixiCore-XPU/` | Selected primary B70 provider kernel source: native SYCL NVFP4 MoE kernels with a framework-neutral C++ ABI and optional PyTorch binding. | It executes only preselected routed experts; it is not the CUDA model host, router/top-k authority, shared expert, transport, or serving runtime. |
+| `intel-xpu/llm-scaler/` plus `vllm-xpu-kernels` | Secondary INT4 W4A16 kernel alternative if NVFP4 quality is insufficient. | Its vLLM 0.21.0 patch is not the CUDA host and must not be applied unchanged to upstream vLLM 0.26+; it is not the selected primary provider source. |
+| `sonar/` | Protocol-design reference for an XPU-aware vLLM/Aphrodite fork and modular MoE seam. | AGPL-3.0; not adopted as the production host, and its XPU kernels remain external through the same `vllm-xpu-kernels` wheel. |
 | Shooting Brake | Qwen-scoped out-of-tree `HybridMoERunner` / `HybridRoutedExperts`, provider client, versioned pinned-memory request ring, capability/model/provider manifests, placement ownership, join, telemetry, and exact failed-route recovery. | It does not fork the full CUDA host or silently qualify arbitrary models and kernel fallbacks. |
 | ExLlamaV3 | Connector-mechanics reference for a pinned shared-memory ring, sequence protocol, and CUDA stream-ordered flag publication/wait. | It is not the model host, MoE runtime, weight format, placement policy, or serving stack. |
 | Colibri Qwen3.6 variant | Proven transport, correctness, placement, issue/take, and failure-semantics reference; its native B70 worker remains a correctness/latency comparator. | It is not the production CUDA model host and its single-token timings do not predict production vLLM performance. |
@@ -34,8 +37,8 @@ upstream vLLM 0.26+ on RTX 5090
     -> Qwen-scoped HybridMoERunner / HybridRoutedExperts
        |- local routes -> qualified stock-compatible CUDA MoE backend
        `- remote routes -> versioned pinned-memory request ring
-                           -> isolated persistent PyTorch-XPU B70 provider
-                           -> qualified llm-scaler ESIMD kernels
+                           -> isolated persistent QuixiCore-XPU B70 provider
+                           -> qualified QuixiCore-XPU NVFP4 MoE kernels
                            -> weighted [M_remote, hidden] wire partial plus token_row_map
     -> asynchronous CUDA copy and addition
 ```
@@ -52,14 +55,30 @@ CPU work is limited to orchestration, placement, queue management, telemetry, an
 - **Required local work:** qualify the exact adapter seam, CUDA local-route compaction/skip semantics, eager execution, piecewise graph boundary, all-CUDA parity, failure recovery, and upgrade compatibility.
 - **Does not prove:** that remote routes work, that a selected CUDA MoE backend accepts `-1` expert mappings, that full CUDA graphs can contain external XPU work, or that any B70 performance claim transfers to production.
 
+### QuixiCore-XPU NVFP4 MoE
+
+- **Provenance:** local `QuixiCore-XPU/` checkout, inspected from source and built on the Intel Arc Pro B70 on 2026-08-04. It is an MIT-licensed native SYCL kernel library with a framework-neutral raw-pointer C++ ABI and an optional PyTorch binding.
+- **Inspected source facts:** its purpose-built `nvfp4_moe` fused and split operations accept preselected `int32` expert IDs and `float32` routing weights. The NVFP4 contract uses packed E2M1 weights, E4M3 block scales over blocks of 16, and per-expert FP32 global scales. Nonblocking dispatch returns a SYCL event for asynchronous chaining; this API fact does not claim that the production provider process is implemented.
+- **B70 qualification evidence:** all operations passed the correctness smoke gate on the B70, including `nvfp4_moe` fused and split, with maximum absolute error approximately `1e-9`. Reported split-kernel results were a `46.5 µs` median at `M=1` (`270 GB/s` weight bandwidth), a `61.5 µs` median at `M=2` (`409 GB/s`), approximately `60–215 µs` at `M=4` (`233 GB/s`), a `173.8 µs` median at `M=8` (`579 GB/s`), and a `343.3 µs` median at `M=16` (`586 GB/s`).
+- **Production decision:** use only qualified preselected-route QuixiCore-XPU NVFP4 MoE operations in the separate persistent B70 provider. The provider accepts canonical IDs and routing weights, owns persistent compact B70 weights and preallocated buffers, and returns one weighted `[M_remote, hidden]` wire partial plus the row map used by CUDA to construct the full `[M, hidden]` contribution.
+- **Format rule:** the production B70 artifact is NVFP4 and derives from the same higher-precision source checkpoint as the separately converted CUDA NVFP4 or FP8 artifact. Conversion occurs offline or at initialization, never on the token path.
+- **Does not prove:** production process isolation, ring correctness, batched provider behavior, vLLM integration, cross-runtime failure recovery, end-to-end production latency, or production throughput.
+
 ### llm-scaler and vLLM XPU kernels
 
 - **Provenance:** `intel-xpu/llm-scaler/`; latest inspected image/release `intel/llm-scaler-vllm:0.21.0-b1`. Its environment pins a `vllm-xpu-kernels` revision and carries an older safety patch. The separate checkout `intel-xpu/vllm-xpu/vllm-xpu-kernels/` was inspected at `dd3bc2127cff`.
 - **Inspected source facts:** the stack contains B70/Xe2 ESIMD INT4 MoE families for tiny decode, small/batched decode, grouped routes, and prefill gather/up/down/weighted accumulation. Its operators consume XPU tensors and obtain an XPU/SYCL stream; they are not a CUDA-to-XPU transport mechanism. Some full-fused entry points own routing or shared-expert work and therefore cross the approved boundary.
-- **Production decision:** use only qualified preselected-route compute operations in a separate persistent PyTorch-XPU provider. The provider accepts canonical IDs and routing weights, owns persistent compact B70 weights and preallocated tensors, and returns one weighted `[M_remote, hidden]` wire partial plus the row map used by CUDA to construct the full `[M, hidden]` contribution.
-- **Version rule:** the vLLM 0.21.0 patch is historical B70-kernel provenance, not a patch set for the upstream 0.26+ CUDA host. Kernel bindings, layouts, shapes, safety guards, activation behavior, and numerical tolerance are qualified per pinned provider release.
-- **Format rule:** GS64 and GS128 are distinct contracts. Any CUDA and B70 artifacts must derive from the identical higher-precision source model, and conversion or requantization occurs offline or at initialization, never on the token path.
-- **Does not prove:** production process isolation, ring correctness, batched provider behavior, vLLM integration, cross-runtime failure recovery, or production latency.
+- **Production role:** this is the qualified secondary INT4 W4A16 alternative if primary QuixiCore-XPU NVFP4 quality is insufficient. Only preselected-route compute operations may enter the isolated provider; llm-scaler remains a kernel-design reference, not the selected host or primary provider source.
+- **Version rule:** the vLLM 0.21.0 patch is historical B70-kernel provenance, not a patch set for the upstream 0.26+ CUDA host. Kernel bindings, layouts, shapes, safety guards, activation behavior, and numerical tolerance require qualification for any pinned secondary provider release.
+- **Format rule:** the secondary signed-S4 GS128 contract is distinct from primary NVFP4 and from Colibri's reference GS64 contract. Any secondary artifact derives independently from the identical higher-precision source model; conversion or requantization occurs offline or at initialization, never on the token path.
+- **Does not prove:** equivalence to the primary NVFP4 path, production process isolation, ring correctness, vLLM integration, failure recovery, or production performance.
+
+### Sonar modular MoE seam
+
+- **Provenance:** local `sonar/` checkout; AGPL-3.0 vLLM/Aphrodite fork with XPU platform support.
+- **Inspected source facts:** `modular_kernel.py` exposes a modular MoE seam useful for reasoning about provider protocol boundaries. Sonar's XPU kernels are external through the same `vllm-xpu-kernels` wheel rather than an in-tree native kernel source.
+- **Approved reuse:** protocol-design concepts only.
+- **Explicit non-adoption:** Sonar is not the production host or provider. Its AGPL license, full-runtime fork, and external-kernel dependency keep it outside the selected upstream-vLLM-plus-QuixiCore architecture.
 
 ### ExLlamaV3 connector mechanics
 
@@ -77,7 +96,7 @@ CPU work is limited to orchestration, placement, queue management, telemetry, an
 - **Scope of proof:** the current transaction is single-token and the native worker has one in-order queue, one pending operation, and fixed scratch. The controlled measurements and traces in [progress.md](progress.md) are Colibri reference results.
 - **Production reuse:** preserve the lifecycle invariants, placement semantics, exact route ownership, recovery semantics, and native worker as a comparator.
 - **Explicit non-adoption:** Colibri is not the production state owner. Its CUDA model path, serving stack, single-token protocol, and timings are not substitutes for upstream vLLM Phase 0–10 acceptance.
-- **Does not prove:** a batched PyTorch-XPU/llm-scaler provider, continuous-batch decode, grouped prefill, the versioned process ring, an out-of-tree vLLM adapter, piecewise CUDA graphs, provider restart, or production performance.
+- **Does not prove:** a batched QuixiCore-XPU B70 provider, continuous-batch decode, grouped prefill, the versioned process ring, an out-of-tree vLLM adapter, piecewise CUDA graphs, provider restart, or production performance.
 
 ## Secondary source ledger
 

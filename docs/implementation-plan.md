@@ -4,7 +4,7 @@
 
 [`../plan.md`](../plan.md) is the sole authoritative active plan. This document is a subordinate execution and evidence checklist for the same **Phase 0 through Phase 10** sequence. It does not authorize a second sequence, rename phases, add prerequisites, or override a gate in `plan.md`. If wording differs, `plan.md` controls.
 
-**Status:** production implementation plan, not an implementation-completion report. Existing Colibri CUDA+B70 work is proven reference evidence for transport, native GS64 expert execution, placement, and failure semantics. It does not by itself pass any production upstream-vLLM/PyTorch-XPU provider phase. Unless an evidence record explicitly demonstrates a phase gate against the pinned production configuration, that gate remains unpassed.
+**Status:** production implementation plan, not an implementation-completion report. Existing Colibri CUDA+B70 work is proven reference evidence for transport, native GS64 expert execution, placement, and failure semantics. It does not by itself pass any production upstream-vLLM/QuixiCore-XPU provider phase. Unless an evidence record explicitly demonstrates a phase gate against the pinned production configuration, that gate remains unpassed.
 
 The active production direction is:
 
@@ -13,8 +13,8 @@ upstream vLLM 0.26+ on one RTX 5090
     -> CUDA scheduler, state, router, canonical top-k, local/shared experts
     -> Qwen-scoped out-of-tree HybridMoERunner / HybridRoutedExperts
     -> versioned pinned-memory request ring
-    -> isolated persistent PyTorch-XPU provider on one B70
-    -> qualified llm-scaler tiny / batched / prefill ESIMD kernels
+    -> isolated persistent QuixiCore-XPU provider on one B70
+    -> qualified QuixiCore-XPU tiny / batched / prefill NVFP4 MoE kernels
     -> weighted [M_remote, hidden] wire partial plus token_row_map
     -> asynchronous CUDA copy and addition
 ```
@@ -26,7 +26,7 @@ The CPU performs orchestration and exact emergency recovery only. Normal-path CP
 1. Work advances only through Phase 0–10 in [`../plan.md`](../plan.md).
 2. A later phase may prepare fixtures, but its results cannot waive an earlier phase gate.
 3. A gate passes only with reproducible evidence from the exact pinned model, provider, protocol, hardware, and workload scope.
-4. The native Colibri GS64 path is a comparator and correctness oracle, not proof of production batching, upstream-vLLM integration, or llm-scaler-provider overhead.
+4. The native Colibri GS64 path is a comparator and correctness oracle, not proof of production batching, upstream-vLLM integration, or QuixiCore-XPU-provider overhead.
 5. Stock upstream vLLM is the CUDA reference. All-CUDA behavior through the adapter must match stock behavior before B70 routes are enabled.
 6. vLLM remains the canonical router/top-k authority. The B70 consumes selected IDs and weights and never recomputes routing.
 7. Every selected route contributes exactly once, is recovered exactly, or causes explicit failure.
@@ -64,7 +64,7 @@ A record links raw or structured artifacts rather than copying only a favorable 
 
 ```text
 Phase 0  freeze baselines and compatibility contracts
-   -> Phase 1  isolated persistent llm-scaler B70 provider
+   -> Phase 1  isolated persistent QuixiCore-XPU B70 provider
    -> Phase 2  batched versioned pinned-memory protocol
    -> Phase 3  independent provider mathematics
    -> Phase 4  Qwen-scoped upstream-vLLM adapter
@@ -87,7 +87,7 @@ Make both independently evolving runtimes and every cross-runtime artifact expli
 Record and pin:
 
 - exact upstream vLLM 0.26+ commit and CUDA dependencies;
-- llm-scaler provider release and selected operator bundle;
+- QuixiCore-XPU provider release and selected NVFP4 MoE operator bundle, plus llm-scaler and `vllm-xpu-kernels` revisions for the secondary INT4 alternative;
 - PyTorch-XPU, `vllm-xpu-kernels`, oneAPI, Level Zero, firmware, and driver versions;
 - RTX 5090 and B70 identity, topology, memory, and negotiated links;
 - source checkpoint, tokenizer, model configuration, and artifact hashes;
@@ -106,7 +106,7 @@ Define before runtime integration:
 - maximum negotiated `M`, hidden size, top-k, dtypes, capacities, and kernel families;
 - exact unsupported-shape and recovery behavior.
 
-The compatibility table must treat upstream vLLM and the provider as separate upgrade surfaces. llm-scaler's complete vLLM 0.21 patch is not applied to vLLM 0.26+. Any API or binding adaptation remains inside the isolated provider or narrow out-of-tree adapter.
+The compatibility table must treat upstream vLLM, the primary QuixiCore-XPU provider, and the secondary llm-scaler INT4 alternative as separate upgrade surfaces. llm-scaler's complete vLLM 0.21 patch remains reference evidence and is not applied to vLLM 0.26+. Any API or binding adaptation remains inside the isolated provider or narrow out-of-tree adapter.
 
 ### Gate
 
@@ -127,18 +127,18 @@ Startup validation rejects incompatible protocol versions, models, shapes, dtype
 
 No provider or adapter coupling begins while any compatibility field is implicit or any baseline/artifact identity is unstable.
 
-## Phase 1 — Build the isolated llm-scaler B70 provider
+## Phase 1 — Build the isolated QuixiCore-XPU B70 provider
 
 ### Objective
 
-Create one persistent PyTorch-XPU process that exposes only the qualified routed-expert operations required by Shooting Brake.
+Create one persistent B70 provider, using QuixiCore-XPU's framework-neutral C++ ABI or PyTorch binding, that exposes only the qualified routed-expert operations required by Shooting Brake.
 
 ### Required work
 
 The provider must:
 
 - select the B70 explicitly and fail if the admitted device is absent or ambiguous;
-- import only the Phase-0-pinned llm-scaler operator bundle;
+- import only the Phase-0-pinned QuixiCore-XPU operator bundle;
 - expose capability, load, issue, take, health, reset/restart generation, and shutdown operations;
 - load each compact B70 expert artifact once and verify its fingerprint;
 - maintain `(layer, global expert) -> compact slot` mapping;
@@ -149,7 +149,7 @@ The provider must:
 - report unsupported shapes and kernel failures explicitly;
 - perform no router, top-k, shared-expert, attention, KV/GDN, residual, LM-head, or sampling work.
 
-Retain `colibri-variants/colibri-qwen36/c/b70_moe_sycl.cpp` as the native GS64 comparator. Do not extract llm-scaler kernels into a new native service unless later profiling identifies material PyTorch-XPU wrapper overhead.
+Retain `colibri-variants/colibri-qwen36/c/b70_moe_sycl.cpp` as the native GS64 comparator. Integrate the pinned QuixiCore-XPU bundle through its framework-neutral C++ ABI or PyTorch binding; do not fork or extract its kernels into a separate code lineage. Keep llm-scaler through `vllm-xpu-kernels` as a secondary INT4 alternative if NVFP4 quality is insufficient.
 
 ### Gate
 
@@ -403,7 +403,7 @@ Move from correct eager single-step integration to production scheduler-step agg
 - constrain upstream scheduler-step admission to the provider's negotiated token/route capacity, then aggregate every admitted step's remote token rows into exactly one B70 layer request;
 - preserve token/route maps across mixed request lifecycles;
 - select tiny versus batched decode kernels from qualified thresholds;
-- add llm-scaler's grouped prefill gather/up/down/accumulate path;
+- add QuixiCore-XPU's grouped prefill NVFP4 MoE path;
 - retain router, top-k, shared expert, attention, and state work on CUDA;
 - skip provider submission for zero-remote-route layers;
 - support changing batch sizes, mixed prefill/decode, completion, cancellation, and backpressure;
@@ -514,7 +514,7 @@ Measure capacity, correctness, latency, and throughput against the same upstream
 | Configuration | Purpose |
 |---|---|
 | Stock all-CUDA upstream vLLM | Correctness, throughput, and latency ceiling |
-| CUDA hot experts + isolated B70 llm-scaler provider | Shooting Brake production result |
+| CUDA hot experts + isolated B70 QuixiCore-XPU NVFP4 provider | Shooting Brake production result |
 | CUDA hot experts + exact CPU expert execution | Benchmark-only offload/recovery baseline; never the production normal path |
 | Reduced CUDA expert budget without B70 | Capacity/control baseline |
 | Native Colibri B70 worker where shape-compatible | Provider-overhead reference only |

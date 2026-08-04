@@ -4,7 +4,7 @@
 
 This document defines decode, continuous-batch, prefill, provider, and recovery scheduling for the one-RTX-5090 plus one-B70 production design. It follows [`../plan.md`](../plan.md), uses ownership from [`placement.md`](placement.md), and supplies the measurement classes in [`benchmarking.md`](benchmarking.md).
 
-This is a normative target, not a claim that the Qwen-scoped `HybridMoERunner`/`HybridRoutedExperts` integration or batched llm-scaler provider is complete. The proven Colibri worker is a single-token reference, not the production scheduler.
+This is a normative target, not a claim that the Qwen-scoped `HybridMoERunner`/`HybridRoutedExperts` integration or batched QuixiCore-XPU provider is complete. The proven Colibri worker is a single-token reference, not the production scheduler.
 
 ## Core invariants
 
@@ -47,11 +47,13 @@ The initial logical provider policy is:
 
 | Scheduled work | Aggregation | Initial B70 kernel family |
 |---|---|---|
-| `M=1` decode | dispatch the scheduler step without an added provider microbatch wait | llm-scaler tiny INT4 preselected-route path |
-| `1<M<=32` continuous-batch decode | combine all remote-bearing rows from the scheduler step | qualified tiny or small-batch INT4 path |
-| larger decode batch | one layer/step operation | grouped-route path |
-| prefill | group the scheduler step's remote token-route pairs while preserving token mapping | `gather-v2` → grouped `up-v2` → activation → grouped `down-v2` → weighted accumulation |
+| `M=1` decode | dispatch the scheduler step without an added provider microbatch wait | QuixiCore-XPU NVFP4 MoE fused/split path |
+| `1<M<=32` continuous-batch decode | combine all remote-bearing rows from the scheduler step | qualified QuixiCore-XPU NVFP4 MoE batched path |
+| larger decode batch | one layer/step operation | QuixiCore-XPU NVFP4 MoE grouped path |
+| prefill | group the scheduler step's remote token-route pairs while preserving token mapping | QuixiCore-XPU NVFP4 MoE grouped path |
 | zero B70-owned rows | no ring publication | no provider kernel |
+
+The selected primary is QuixiCore-XPU NVFP4. llm-scaler INT4 through `vllm-xpu-kernels` remains a qualified secondary alternative only if NVFP4 quality is insufficient and must pass the same scheduling, correctness, and performance gates before use.
 
 Thresholds are benchmark-selected for each qualified shape and provider bundle. The provider must accept precomputed IDs/weights and must not call a fused entry point that recomputes router/top-k or shared-expert work.
 
@@ -74,7 +76,7 @@ Decode has the tightest sequential dependency. For each active MoE layer:
 7. CUDA rejects stale or invalid completion metadata, asynchronously copies the partial, scatters rows if needed, and adds it exactly once.
 8. On exact route failure, recovery replaces only those failed contributions or fails the request explicitly.
 
-The current Colibri observation of roughly 56–100 µs one-token issue/take per active MoE layer is useful for transport and latency decomposition. It does not determine production decode eligibility or performance: upstream-vLLM scheduling, process-ring overhead, llm-scaler dispatch, local overlap, and graph boundaries are different.
+The current Colibri observation of roughly 56–100 µs one-token issue/take per active MoE layer is useful for transport and latency decomposition. It does not determine production decode eligibility or performance: upstream-vLLM scheduling, process-ring overhead, QuixiCore-XPU NVFP4 MoE dispatch, local overlap, and graph boundaries are different.
 
 ## Continuous batching
 
@@ -96,7 +98,7 @@ Prefill retains attention, KV/recurrent state, router/top-k, shared expert, and 
 
 1. collect remote-bearing rows and their canonical route pairs;
 2. gather/group by the provider's compact B70 expert slots;
-3. execute llm-scaler's prefill gather, grouped up, activation, grouped down, and weighted-accumulation phases in stable buffers;
+3. execute QuixiCore-XPU's NVFP4 MoE grouped prefill path in stable buffers;
 4. return one weighted partial per original token row; and
 5. scatter/add on CUDA before the residual continuation.
 
@@ -147,9 +149,9 @@ Record per layer/step and correlate to the run manifest:
 - upstream service class, request IDs, token rows, prefill/decode kind, and exact `M`;
 - canonical expert IDs/weights, owners, remote-bearing rows, and route counts;
 - placement, weight/provider, request, and ring-slot generations;
-- ring queue/occupancy/backpressure, copies, provider kernel family, and completion status;
+- ring queue/occupancy/backpressure, copies, QuixiCore-XPU NVFP4 MoE kernel family, and completion status;
 - exactly zero or one B70 request per active layer/step;
-- CUDA local routed/shared times, B70 queue/copy/kernel time, branch overlap, exposed join wait, and CUDA add time;
+- CUDA local routed/shared times, B70 queue/copy/QuixiCore-XPU NVFP4 MoE kernel time, branch overlap, exposed join wait, and CUDA add time;
 - cancellation, timeout, recovery, provider restart, stale/discarded completion, and explicit failure;
 - CPU recovery count/time and NVMe reads, both zero on the healthy warmed path;
 - TTFT, ITL, request/output throughput, and prefill throughput; and

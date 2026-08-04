@@ -4,7 +4,7 @@
 
 [`../plan.md`](../plan.md) is the sole authoritative active architecture and implementation plan. This document explains that architecture's boundaries and data flow. If it diverges from `plan.md`, `plan.md` controls.
 
-**Production status:** planned and under qualification. The target is upstream vLLM 0.26+ on one RTX 5090 as the CUDA state owner plus one isolated persistent PyTorch-XPU/llm-scaler provider on one Intel Arc Pro B70. That production integration is not yet claimed complete.
+**Production status:** planned and under qualification. The target is upstream vLLM 0.26+ on one RTX 5090 as the CUDA state owner plus one isolated persistent QuixiCore-XPU B70 provider on one Intel Arc Pro B70. That production integration is not yet claimed complete.
 
 **Reference status:** `colibri-variants/colibri-qwen36/` has already demonstrated a native CUDA+B70 Qwen3.6 GS64 path. Its transport lifecycle, expert residency, conversion, route ownership, numerical agreement, placement behavior, and exact recovery semantics are proven reference evidence. It is not the selected production model host.
 
@@ -15,7 +15,7 @@ Shooting Brake extends upstream vLLM with a narrow heterogeneous routed-expert b
 - vLLM remains responsible for scheduling, continuous batching, serving, sequential model state, CUDA routing, local CUDA compute, and output generation;
 - a Qwen-scoped out-of-tree `HybridMoERunner` / `HybridRoutedExperts` adapter partitions the canonical selected routes after top-k;
 - a versioned pinned-memory request ring submits only remote routes to a separate persistent B70 process;
-- qualified llm-scaler kernels execute the B70-resident experts and return one routing-weighted compact `[M_remote, hidden]` wire partial, which CUDA scatters into the full `[M, hidden]` batch;
+- qualified QuixiCore-XPU NVFP4 MoE kernels execute the B70-resident experts and return one routing-weighted compact `[M_remote, hidden]` wire partial, which CUDA scatters into the full `[M, hidden]` batch;
 - CUDA asynchronously copies and adds that partial before model execution continues.
 
 The normal path moves activations, route metadata, and weighted partials. It never moves expert weights and never performs CPU matrix computation.
@@ -34,8 +34,8 @@ flowchart LR
     Hybrid --> Local[Stock-compatible CUDA routed experts]
     Hybrid --> Shared[Stock shared expert]
     Hybrid --> Ring[Versioned pinned-memory request ring]
-    Ring --> Provider[Persistent PyTorch-XPU B70 provider]
-    Provider --> Kernels[Qualified llm-scaler ESIMD kernels]
+    Ring --> Provider[Persistent QuixiCore-XPU B70 provider]
+    Provider --> Kernels[Qualified QuixiCore-XPU NVFP4 MoE kernels]
     Kernels --> Provider
     Provider --> Ring
 
@@ -94,21 +94,21 @@ The adapter is selected only by an explicitly qualified Qwen architecture/config
 
 ### B70 provider
 
-The isolated persistent PyTorch-XPU process owns:
+The isolated persistent B70 provider process owns:
 
 - explicit selection of the one B70 device;
-- a pinned llm-scaler/PyTorch-XPU/vLLM-XPU-kernel/oneAPI environment;
+- a pinned QuixiCore-XPU/oneAPI environment;
 - provider capability reporting and compatibility validation;
 - compact persistent B70 expert storage;
 - `(layer, global expert) -> compact B70 slot` mapping;
 - grow-only or fixed preallocated activation, route, scratch, and output tensors;
-- tiny, small/batched, and prefill kernel selection from measured thresholds;
+- fused/split NVFP4 kernel selection from measured shape thresholds;
 - remap, gate/up, activation, down, and weighted accumulation;
 - health, issue, take, completion, timing, and failure reporting.
 
 It receives preselected route IDs and weights. It returns one weighted partial per submitted token row, not one tensor per expert. It owns no model-level request state.
 
-The initial production provider reuses qualified operators from `intel-xpu/llm-scaler/`. Its complete vLLM 0.21 patch must not be applied to the upstream vLLM 0.26+ CUDA host. A Torch-free native provider is considered only if profiling shows that the isolated PyTorch-XPU wrapper materially dominates the useful B70 work.
+The initial production provider reuses qualified preselected-route NVFP4 MoE operators from `QuixiCore-XPU/`. Its framework-neutral raw-pointer C++ ABI permits a native steady-state provider, while its PyTorch binding remains an optional integration surface. `intel-xpu/llm-scaler/` remains a secondary INT4 kernel-design reference; its complete vLLM 0.21 patch must not be applied to the upstream vLLM 0.26+ CUDA host.
 
 ### CPU
 
@@ -242,11 +242,11 @@ Startup requires an explicit capability/model/provider manifest. At minimum it r
 - hidden size, routed expert count, top-k, layer count, and supported batch bounds;
 - activation, route-weight, output, scale, and accumulation dtypes;
 - source checkpoint and converted CUDA/B70 weight fingerprints;
-- quantization family, group size, packing, layout, and prepack version;
+- quantization family, group or block size, packing, layout, and prepack version;
 - provider protocol and schema versions;
 - upstream vLLM adapter compatibility range;
-- llm-scaler, PyTorch-XPU, vLLM-XPU-kernel, oneAPI, Level Zero, and driver versions;
-- supported tiny, batched, and prefill kernel families;
+- QuixiCore-XPU, llm-scaler, vLLM-XPU-kernel, optional PyTorch-XPU binding, oneAPI, Level Zero, and driver versions;
+- supported QuixiCore-XPU fused/split NVFP4 families and any qualified secondary INT4 families;
 - CUDA/B70 ownership and placement generation;
 - exact recovery capability and unsupported-shape policy.
 
@@ -282,26 +282,28 @@ b70_moe_shutdown()
 Its proven scope includes:
 
 - persistent B70 weights and compact layer/expert ownership;
-- Colibri signed-S4 GS64 conversion into the ESIMD layout;
+- Colibri signed-S4 GS64 conversion into its native K-major layout;
 - FP16 activation/weight staging with canonical IDs and route weights;
-- fused ESIMD gate/up/SiLU/down execution;
+- fused native gate/up/SiLU/down execution for Colibri GS64;
 - routing-weighted hidden-size accumulation;
 - asynchronous issue/take separation;
 - numerical agreement with the CPU reference;
 - exact failed-route recovery;
 - end-to-end CUDA+B70 generation without normal-path CPU expert fallback.
 
-The current logical transaction is single-token and native:
+Those are Colibri reference-path facts. The planned production equivalents are conversion from the common higher-precision source into QuixiCore-XPU's NVFP4 E2M1-plus-E4M3-block-scale layout and qualified QuixiCore-XPU NVFP4 MoE execution.
+
+The planned one-token form of the production kernel transaction is native and uses the NVFP4 artifact:
 
 ```text
 activation       [2048] FP32 host input
 expert IDs       [routes] int32
 routing weights  [routes] FP32
-    -> B70 GS64 ESIMD expert execution
+    -> B70 NVFP4 MoE expert execution
 weighted partial [2048] FP32 host output
 ```
 
-The observed roughly `56–100 µs` one-token issue/take range and other Colibri throughput results are reference measurements. They do not establish production vLLM throughput, continuous-batch behavior, grouped prefill performance, graph compatibility, or PyTorch-XPU provider overhead.
+The observed roughly `56–100 µs` one-token issue/take range and other Colibri throughput results are reference measurements. They do not establish production vLLM throughput, continuous-batch behavior, grouped prefill performance, graph compatibility, or production provider overhead.
 
 The planned production transaction is batched and runtime-neutral:
 
@@ -310,7 +312,7 @@ activation       [M_remote, hidden] FP16/BF16
 expert IDs       [M_remote, topk] int32
 routing weights  [M_remote, topk] FP32/FP16
 route mask, token_row_map into [M], layer, sequence, and generation metadata
-    -> isolated persistent llm-scaler B70 provider
+    -> isolated persistent QuixiCore-XPU B70 provider
 weighted partial [M_remote, hidden] FP16/FP32
 completion and recovery metadata; CUDA scatter target [M, hidden]
 ```
@@ -322,8 +324,10 @@ Colibri therefore supplies the correctness, transport, placement, and failure ba
 | Repository | Architecture role | Production status and boundary |
 |---|---|---|
 | `vllm/` | CUDA state owner: scheduler, continuous batching, attention/KV/GDN, canonical router/top-k, CUDA experts, residual, LM head, sampling, serving | Selected production host; keep the B70 adapter narrow, out-of-tree, and Qwen-scoped |
-| `intel-xpu/llm-scaler/` | Qualified tiny/batched/prefill ESIMD operator source for B70 | Selected initial provider kernel lineage; use inside the isolated PyTorch-XPU process, not as the CUDA host |
-| `intel-xpu/vllm-xpu/vllm-xpu-kernels/` | Independently versioned XPU kernel dependency/binding surface | Validate operator signatures, layouts, shapes, safety fixes, and numerics for each pinned provider release |
+| `QuixiCore-XPU/` | Native SYCL NVFP4 MoE kernel library for B70 with a framework-neutral C++ ABI and PyTorch binding | Selected primary B70 provider kernel source; MIT-licensed purpose-built fused/split NVFP4 MoE accepts preselected routes |
+| `intel-xpu/llm-scaler/` | ESIMD INT4 kernel-design reference | Secondary INT4 alternative if NVFP4 quality is insufficient; its vLLM patch is not the CUDA host |
+| `intel-xpu/vllm-xpu/vllm-xpu-kernels/` | Independently versioned XPU kernel dependency | Secondary INT4 W4A16 fallback path; qualify signatures, layouts, shapes, safety fixes, and numerics before use |
+| `sonar/` | vLLM/Aphrodite fork with XPU platform support and a modular MoE seam | AGPL-3.0 protocol-design reference only; its XPU kernels are external through the same `vllm-xpu-kernels` wheel, and it is not the production host |
 | `colibri-variants/colibri-qwen36/` | Native GS64 CUDA+B70 correctness, transport, placement, failure, and latency reference | Proven comparator; not the production model host |
 | `exllamav3-quant-inference/` | Pinned-ring and CUDA stream-memory optimization ideas | Reference only after the process-ring contract works |
 | `lucebox/` | Traffic-derived hot/cold placement concepts | Later policy reference; immutable static ownership is first |
@@ -383,6 +387,7 @@ The active architecture does not:
 
 - use Colibri as the production serving host;
 - apply llm-scaler's complete vLLM 0.21 patch to upstream vLLM 0.26+;
+- treat llm-scaler as the primary B70 kernel source; QuixiCore-XPU is the selected primary source;
 - put Intel XPU libraries in the CUDA state-owner process;
 - represent the B70 as a fake NCCL/XCCL expert-parallel rank;
 - call XPU-dispatch operators with CUDA tensors;

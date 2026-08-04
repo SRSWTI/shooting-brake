@@ -9,9 +9,9 @@ The project has **proven a Colibri-based CUDA+B70 reference path**. It has **not
 | Area | Status | Meaning |
 |---|---|---|
 | Colibri CUDA+B70 reference | Proven for the recorded single-token Qwen3.6 GS64 path | Establishes transport, residency, selected-route compute, placement, exact recovery, and end-to-end feasibility. |
-| Native B70 comparator | Proven for the recorded shapes and tests | Provides a Torch-free correctness/latency baseline derived from llm-scaler ESIMD kernels. |
+| Native B70 comparator | Proven for the recorded shapes and tests | Provides a Torch-free correctness/latency baseline derived from QuixiCore-XPU NVFP4 MoE kernels. |
 | Upstream vLLM 0.26+ CUDA state owner | Planned, not integrated | The inspected checkout and injection seams are known; no production `HybridMoERunner` path is complete. |
-| Isolated persistent PyTorch-XPU/llm-scaler B70 provider | Planned, not implemented | The intended batched decode/prefill provider does not yet exist. |
+| Isolated persistent QuixiCore-XPU B70 provider | Planned, not implemented | The intended primary NVFP4 batched decode/prefill provider does not yet exist; llm-scaler remains a secondary INT4 fallback. |
 | Versioned batched pinned-memory request ring | Planned, not implemented | The current Colibri transaction is single-token and not the production protocol. |
 | Qwen-scoped out-of-tree adapter | Planned, not implemented | Canonical vLLM routing, local/remote partition, weighted-partial join, and eager parity remain to be built. |
 | Phase 0–10 production qualification | Not complete | No phase gate should be inferred from the Colibri evidence. |
@@ -26,8 +26,9 @@ upstream vLLM 0.26+ on RTX 5090
     |- CUDA local routed experts and shared expert
     `- Qwen-scoped HybridMoERunner / HybridRoutedExperts
           -> versioned pinned-memory request ring
-          -> isolated persistent PyTorch-XPU B70 provider
-          -> qualified llm-scaler tiny/batched/prefill ESIMD kernels
+          -> isolated persistent QuixiCore-XPU B70 provider
+          -> qualified QuixiCore-XPU tiny/batched/prefill NVFP4 MoE kernels
+          -> secondary llm-scaler INT4 / vllm-xpu-kernels fallback
           -> weighted [M_remote, hidden] wire partial plus token_row_map
           -> asynchronous CUDA join
 ```
@@ -37,15 +38,17 @@ The CPU performs orchestration, placement, queue management, telemetry, and exac
 The inspected production baselines are:
 
 - upstream CUDA host checkout: `vllm/` at `v0.26.1rc0-285-g1c0d20791`;
-- B70 kernel/provider source: `intel-xpu/llm-scaler/`, latest inspected vLLM release `intel/llm-scaler-vllm:0.21.0-b1`;
+- primary B70 kernel/provider source: `QuixiCore-XPU/`, native MIT-licensed SYCL NVFP4 MoE library with a framework-neutral C++ ABI and PyTorch binding;
+- secondary B70 kernel alternative: `intel-xpu/llm-scaler/`, ESIMD INT4 kernel-design reference and fallback if NVFP4 quality is insufficient; latest inspected vLLM release `intel/llm-scaler-vllm:0.21.0-b1`;
+- protocol-design reference: `sonar/`, an AGPL-3.0 vLLM/Aphrodite XPU fork with a modular MoE seam whose XPU kernels remain external; it is not adopted as the production host;
 - mechanics reference: ExLlamaV3 pinned ring and CUDA stream-memory coordination only;
 - proven behavioral reference: `colibri-variants/colibri-qwen36/`.
 
-The llm-scaler vLLM 0.21.0 patch is not the production CUDA host and must not be applied unchanged to vLLM 0.26+.
+The llm-scaler vLLM 0.21.0 patch remains a reference-only secondary INT4 alternative; it is not the production CUDA host and must not be applied unchanged to vLLM 0.26+. Selecting that patch instead of primary QuixiCore-XPU would reintroduce the same host-version divergence.
 
 ## Completed Colibri+B70 reference evidence
 
-Everything in this section is **Colibri reference evidence**, not proof of the planned production runtime.
+Except for the explicitly labeled QuixiCore-XPU benchmark evidence, this section records **Colibri reference evidence**, not proof of the planned production runtime. The QuixiCore-XPU results prove only the measured provider kernels, not the production integration.
 
 ### Reference model and path
 
@@ -81,13 +84,27 @@ These values support host-staged feasibility for the measured path. They are not
 
 ### Native B70 kernel and worker
 
-- Built the llm-scaler custom ESIMD MoE extension and exercised its router/small-MoE test inputs on B70.
+- Inspected and built QuixiCore-XPU on the actual B70, then passed its correctness smoke gate for all operations, including `nvfp4_moe` fused and split execution.
 - Established that Colibri signed-S4 GS64 weights cannot be reinterpreted as GS128 without changing scale semantics.
 - Preserved signed S4 values and group size 64; converted scales to FP16; converted gate/up and down projections once during expert upload.
 - Implemented a Torch-free SYCL/ESIMD shared library with persistent expert storage, compact `(layer, expert) -> slot` mapping, pinned/USM buffers, separate issue/take entry points, asynchronous exception propagation, and exact failed-route masks.
 - Fixed an early cross-layer slot aliasing bug.
 
-| Native reference measurement | Result |
+#### QuixiCore-XPU NVFP4 MoE benchmark evidence
+
+QuixiCore-XPU `nvfp4_moe` was benchmarked on B70 on 2026-08-04 after the correctness gate passed. All operations passed, including fused and split `nvfp4_moe`; maximum absolute error was approximately $10^{-9}$.
+
+| Split `nvfp4_moe` workload | Median latency | Effective weight bandwidth |
+|---|---:|---:|
+| `M=1` | 46.5 µs | 270 GB/s |
+| `M=2` | 61.5 µs | 409 GB/s |
+| `M=4` | 60–215 µs | 233 GB/s |
+| `M=8` | 173.8 µs | 579 GB/s |
+| `M=16` | 343.3 µs | 586 GB/s |
+
+This is direct provider-kernel evidence, not an implemented or qualified upstream-vLLM production path.
+
+| Colibri native GS64 reference measurement | Result |
 |---|---:|
 | Deterministic one-route worker test | 39.0 µs |
 | Deterministic eight-route worker test | 46.0 µs total |
@@ -200,13 +217,13 @@ Historical oneMKL/Python workers remain investigative artifacts and are not the 
 | Phase | Status | Work still required |
 |---|---|---|
 | 0 — Freeze baselines and compatibility contracts | **Not complete** | Freeze exact host/provider/dependency versions, source checkpoint and both artifact fingerprints, fixed correctness/performance workloads, all-CUDA vLLM eager/graph baselines, versioned provider protocol, and model/provider capability schemas. |
-| 1 — Isolated llm-scaler B70 provider | **Not implemented** | Build the persistent PyTorch-XPU process, explicit device selection, grow-only tensors, load/issue/take/health API, kernel policy, and direct `M=1`, `M=2..32`, and prefill qualification. |
+| 1 — Isolated QuixiCore-XPU B70 provider | **Not implemented** | Build the persistent isolated provider around qualified QuixiCore-XPU NVFP4 MoE operators, explicit device selection, grow-only tensors, load/issue/take/health API, kernel policy, and direct `M=1`, `M=2..32`, and prefill qualification; retain llm-scaler INT4 only as a separately qualified secondary fallback. |
 | 2 — Batched pinned-memory protocol | **Not implemented** | Build multiple versioned ring slots, batch descriptors, token/route map, sequence and generation checks, acquire/release publication, per-route status, timeout, restart, and stale-reply rejection. |
 | 3 — Independent provider mathematics | **Not complete** | Validate weighted `[M_remote, hidden]` wire results and row maps over the full route/shape/failure matrix, verify CUDA scatter into `[M, hidden]`, and validate CUDA/B70 artifacts against one higher-precision source model. |
 | 4 — Upstream-vLLM adapter | **Not implemented** | Add Qwen-scoped `HybridMoERunner`, `HybridRoutedExperts`, and provider client; prove all-CUDA adapter parity before remote routes. |
 | 5 — Compact expert ownership | **Not implemented in vLLM** | Load immutable CUDA/B70 compact banks from a validated placement manifest; prove exactly one normal owner and no inference-time weight movement. |
 | 6 — Eager hybrid execution | **Not implemented** | Partition canonical vLLM routes, overlap local CUDA and remote B70 execution, copy/add the remote partial before final reduction, and validate layer/logit/generation agreement. |
-| 7 — Continuous-batch decode and grouped prefill | **Not implemented** | Aggregate scheduler-step rows into one layer request and qualify tiny/grouped/prefill llm-scaler paths across mixed scheduling and cancellation. |
+| 7 — Continuous-batch decode and grouped prefill | **Not implemented** | Aggregate scheduler-step rows into one layer request and qualify tiny/grouped/prefill QuixiCore-XPU NVFP4 MoE paths across mixed scheduling and cancellation, with llm-scaler INT4 / vllm-xpu-kernels retained only as the secondary fallback. |
 | 8 — Piecewise CUDA graphs | **Not implemented** | Add an explicit break around the external provider and remove exposed waits/device-wide synchronization. ExLlama stream-memory mechanics are only an optimization reference. |
 | 9 — Failure/restart operations | **Not implemented** | Add heartbeat, bounded timeouts/queues, provider restart and generation bump, exact batched failed-route recovery, rollback, and structured telemetry. |
 | 10 — Controlled production benchmark | **Not run** | Compare stock all-CUDA vLLM, CUDA+B70, CUDA+CPU cold experts, reduced-CUDA control, and native comparator with identical source/workload settings and full correctness/capacity/tail accounting. |
@@ -218,7 +235,7 @@ No row is marked complete merely because an analogous behavior works in Colibri.
 Work proceeds in the Phase 0–10 order from [`../plan.md`](../plan.md). The immediate deliverables are:
 
 1. **Phase 0 frozen contract package:** exact upstream vLLM and provider dependency fingerprints; source checkpoint plus CUDA/B70 artifact fingerprints; fixed correctness prompts and production workload; stock all-CUDA vLLM eager and supported graph baselines; versioned request/completion schema; model, weight, placement, and provider capability manifests with fail-closed startup validation.
-2. **Phase 1 isolated provider:** a persistent PyTorch-XPU B70 process importing only qualified llm-scaler operators, with explicit B70 selection, resident compact weights, grow-only buffers, capability/load/issue/take/health/shutdown operations, and measured kernel selection for `M=1`, batched decode, and prefill.
+2. **Phase 1 isolated provider:** a persistent isolated B70 provider using only qualified QuixiCore-XPU NVFP4 MoE operators for the primary path, with explicit B70 selection, resident compact weights, grow-only buffers, capability/load/issue/take/health/shutdown operations, and measured kernel selection for `M=1`, batched decode, and prefill; llm-scaler INT4 / vllm-xpu-kernels remains a separately qualified secondary fallback if NVFP4 quality is insufficient.
 3. **Phase 2 versioned batched ring:** multiple pinned slots, token/route maps, request and provider generations, stale-completion rejection, per-route failure status, bounded capacities, and stress coverage for wraparound, concurrency, restart, and injected failure.
 4. **Phase 3 provider oracle matrix:** batched weighted-partial comparisons for mixed ownership, duplicate/non-sorted experts, repeated experts across tokens, boundary IDs, near-zero weights, already-staged rows whose valid remote subset becomes empty, invalid generations, and failures.
 5. **Phase 4 all-CUDA adapter parity:** Qwen-scoped out-of-tree `HybridMoERunner` / `HybridRoutedExperts` installed in upstream vLLM, with stock-equivalent all-CUDA behavior before any B70 route is enabled.

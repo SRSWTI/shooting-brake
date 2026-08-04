@@ -4,11 +4,11 @@
 
 This document defines evidence, benchmark configurations, metrics, and production acceptance for the one-RTX-5090 plus one-isolated-B70 design in [`../plan.md`](../plan.md). Correctness requirements are detailed in [`correctness.md`](correctness.md); topology and scheduling contracts are in [`hardware.md`](hardware.md) and [`scheduling.md`](scheduling.md).
 
-This is a measurement contract, not a claim that the upstream-vLLM 0.26+ `HybridMoERunner`/`HybridRoutedExperts` adapter or batched PyTorch-XPU/llm-scaler provider has been implemented or qualified.
+This is a measurement contract, not a claim that the upstream-vLLM 0.26+ `HybridMoERunner`/`HybridRoutedExperts` adapter or batched QuixiCore-XPU B70 provider has been implemented or qualified.
 
 ## Evidence classes
 
-- **Production measurement:** reproduced with the pinned upstream-vLLM CUDA state owner, isolated llm-scaler provider, versioned ring, qualified model/provider manifest, and controlled workload in this contract.
+- **Production measurement:** reproduced with the pinned upstream-vLLM CUDA state owner, isolated QuixiCore-XPU provider, versioned ring, qualified model/provider manifest, and controlled workload in this contract.
 - **Colibri reference evidence:** observed with the proven native GS64 Colibri path. It can establish a narrower transport, correctness, placement, or failure baseline but cannot be presented as production-vLLM performance.
 - **Upstream claim:** a vendor/project specification or code property, not local performance evidence.
 - **Derived bound:** arithmetic based on a claim or observation, not measured achievable latency.
@@ -33,7 +33,7 @@ Every comparable result records:
 
 - run ID, timestamp, repetition/rotation position, warmup, sample count, and exclusions;
 - upstream vLLM commit and eager/PIECEWISE/full-graph mode as applicable;
-- PyTorch XPU, llm-scaler, `vllm-xpu-kernels`, oneAPI, Level Zero, CUDA, and driver versions;
+- QuixiCore-XPU, oneAPI, Level Zero, CUDA, NVIDIA/Intel driver, and any selected provider-binding/runtime versions, plus llm-scaler and `vllm-xpu-kernels` versions when qualifying the secondary INT4 alternative;
 - model architecture, source checkpoint identity, and CUDA/B70 artifact fingerprints;
 - provider protocol and kernel-bundle versions;
 - dimensions, top-k, activation/output dtype, quantization/group-size/layout for both device artifacts;
@@ -52,13 +52,15 @@ A material manifest difference makes results non-comparable unless the differenc
 
 The proven Colibri GS64 native path has demonstrated persistent compact B70 ownership, FP16 activation staging, canonical selected IDs/weights, ESIMD expert execution, one routing-weighted hidden-size partial, asynchronous issue/take, exact failed-route recovery, CPU-reference numerical agreement, end-to-end CUDA+B70 generation with zero normal-path CPU expert fallback, and controlled hybrid throughput close to its corresponding all-CUDA Colibri expert configuration.
 
+Separately, direct QuixiCore-XPU `nvfp4_moe` testing on the B70 on 2026-08-04 passed the correctness smoke gate for all tested operations, including fused and split execution, with maximum absolute error approximately $10^{-9}$. Split-kernel medians were 46.5 µs at `M=1` (270 GB/s weight bandwidth), 61.5 µs at `M=2` (409 GB/s), approximately 60–215 µs at `M=4` (233 GB/s), 173.8 µs at `M=8` (579 GB/s), and 343.3 µs at `M=16` (586 GB/s). These are direct-kernel measurements, not evidence that the production provider process or end-to-end path is implemented or qualified.
+
 Historical observations include:
 
 - roughly 56–100 µs one-token B70 issue/take per active MoE layer;
 - an illustrative 56.8 µs × 40 layers = 2.27 ms/token serialized contribution; and
 - roughly 3.46 ms inter-token latency for a recorded fast all-5090 vLLM workload.
 
-These values establish neither expected hybrid-vLLM latency nor an acceptance target. Batching, process-ring overhead, llm-scaler dispatch, local/remote overlap, piecewise graph boundaries, and synchronization determine production performance.
+These values establish neither expected hybrid-vLLM latency nor an acceptance target. Batching, process-ring overhead, QuixiCore-XPU dispatch, local/remote overlap, piecewise graph boundaries, and synchronization determine production performance.
 
 The B70 608 GB/s figure is an upstream claim. An ideal 18 MiB W4 read gives a derived lower bound near 31 µs, excluding scales, dequantization, intermediates, elementwise work, launch, imbalance, transport, and join. Do not report it as measured kernel or layer time.
 
@@ -71,7 +73,8 @@ Interleave at least these configurations using the frozen manifest and workload:
 | Configuration | Purpose |
 |---|---|
 | Stock all-CUDA upstream vLLM | Throughput, TTFT, ITL, prefill, correctness, and latency ceiling |
-| CUDA hot experts + isolated B70 llm-scaler provider | Shooting Brake production result |
+| CUDA hot experts + isolated B70 QuixiCore-XPU NVFP4 provider | Shooting Brake selected primary production configuration |
+| CUDA hot experts + isolated B70 llm-scaler / `vllm-xpu-kernels` INT4 provider | Qualified secondary alternative if NVFP4 quality is insufficient |
 | CUDA hot experts + CPU cold experts | Explicit offload baseline only; not the production normal path |
 | Reduced CUDA budget without B70 | Capacity/control baseline |
 | Native Colibri B70 worker, where model shape and artifact are compatible | Provider/transport overhead comparator, clearly labeled reference evidence |
@@ -88,10 +91,10 @@ Exercise the isolated persistent provider with preselected IDs/weights and the e
 
 | Workload | Required cases | Expected family |
 |---|---|---|
-| Decode | `M=1` | tiny INT4 preselected-route |
-| Continuous decode | every representative `M=2..32` | tiny or small-batch INT4, selected by measured threshold |
-| Larger decode | representative negotiated `M>32` | grouped-route path |
-| Prefill | representative short/medium/large negotiated `M` | gather-v2, grouped up/down, activation, weighted accumulation |
+| Decode | `M=1` | qualified fused or split NVFP4 MoE, selected by measured threshold |
+| Continuous decode | every representative `M=2..32` | qualified fused or split NVFP4 MoE, selected by measured threshold |
+| Larger decode | representative negotiated `M>32` | qualified fused or split NVFP4 MoE for the negotiated shape |
+| Prefill | representative short/medium/large negotiated `M` | qualified fused or split NVFP4 MoE for the negotiated shape |
 
 For every direct-provider class cover all staged routes remote, mixed local/remote semantic subsets, duplicate/non-sorted IDs, multiple tokens selecting one expert, unequal and near-zero weights, boundary IDs, and compact-slot remapping. Measure provider dispatch, H2D/D2H, remap, up, activation, down, weighted accumulation, complete device-local partial, first-call compilation, allocation count, memory growth, power, clocks, and p50/p95/p99. Exercise zero-remote layers only at the adapter/ring/end-to-end gate, where they must produce no provider dispatch and a zero CUDA remote lane.
 
@@ -185,7 +188,7 @@ Across at least three interleaved runs, report median and range plus appropriate
 - prefill throughput;
 - CUDA/B70 route shares and remote-bearing token rows;
 - B70 submissions per active layer/step, required to be zero or one;
-- provider queue, copies, kernel family/time, and exposed wait;
+- provider queue, copies, QuixiCore-XPU NVFP4 MoE kernel family/time, and exposed wait;
 - CUDA local routed and shared-expert time, overlap, join/add time, and graph mode;
 - CPU recovery count/time and cause;
 - cancellation, timeout, restart, backpressure, and stale/discarded completions;

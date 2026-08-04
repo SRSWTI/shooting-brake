@@ -4,9 +4,9 @@
 
 This document defines the source-checkpoint, provider-artifact, compact-ownership, and capability-manifest contract for the architecture in [`../plan.md`](../plan.md).
 
-The production deployment derives separate CUDA and B70 artifacts from one identical higher-precision BF16/FP16 source checkpoint. Provider formats are not interchangeable. This is a normative design and qualification contract, not a claim that the planned llm-scaler production provider or its model artifacts have passed.
+The production deployment derives separate CUDA and B70 artifacts from one identical higher-precision BF16/FP16 source checkpoint. Provider formats are not interchangeable. This is a normative design and qualification contract, not a claim that the planned QuixiCore-XPU production provider or its model artifacts have passed.
 
-The existing Colibri signed-S4 GS64 native worker is proven reference evidence and remains a comparator. It does not make that native artifact the only production choice and does not prove a batched llm-scaler provider.
+The existing Colibri signed-S4 GS64 native worker is proven reference evidence and remains a comparator. Its reference artifact is distinct from the production NVFP4 contract, and it does not prove a batched QuixiCore-XPU provider or the secondary llm-scaler INT4 path.
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
@@ -18,7 +18,7 @@ identical BF16/FP16 higher-precision source checkpoint
     │     CUDA-owned routed experts in a qualified vLLM format
     │     all dense/router/shared-expert/attention/GDN/LM-head weights
     └── B70 artifact
-          B70-owned routed experts in a qualified signed-S4 ESIMD layout
+          B70-owned routed experts in a qualified NVFP4 (E2M1 weights + E4M3 block scales) layout
 ```
 
 The source checkpoint is the rebuild and semantic authority. Its model identity and exact tensor content MUST be fixed by provenance and cryptographic fingerprints. Both provider artifacts MUST name that same source identity. One artifact MUST NOT be derived by reinterpreting or requantizing the other provider's already-quantized bytes.
@@ -86,7 +86,7 @@ Every artifact MUST:
 - identify source model fingerprint and converter revision;
 - identify provider (`cuda-vllm` or `b70-xpu`) and kernel ABI/bundle;
 - identify architecture, semantic shapes, logical tensor identities, and ownership subset;
-- declare weight code mapping, group size, scale dtype/orientation, zero-point policy, physical layout, padding/alignment, and checksums;
+- declare weight code mapping, group or block size, scale dtype/orientation, zero-point policy, physical layout, padding/alignment, and checksums;
 - declare activation, route-weight, accumulator, and output dtypes;
 - identify the exact compact-slot map or CUDA-local map;
 - be reproducible without using another provider's quantized artifact as source;
@@ -115,24 +115,35 @@ The current native Colibri comparator has proven this contract for its supported
 weight codes:   signed S4
 group size:     64
 scale storage:  FP16
-layout:         K-major / marlin-derived native-worker layout
-execution:      ESIMD fused gate/up/SiLU/down
+layout:         K-major / marlin-derived native-worker layout (Colibri reference only)
+execution:      native fused gate/up/SiLU/down (Colibri reference only)
 input staging:  FP16
 result:         routing-weighted hidden-size partial
 ```
 
-The existing conversion is exact for Colibri's captured signed-S4 GS64 semantics and agrees numerically with its CPU reference. These are reference-path facts, not claims about llm-scaler batching, every Qwen shape, a GS128 kernel, or the production provider process.
+The existing conversion is exact for Colibri's captured signed-S4 GS64 semantics and agrees numerically with its CPU reference. These are reference-path facts only: GS64 is not the production B70 format, and this evidence does not qualify QuixiCore-XPU NVFP4 batching, every Qwen shape, an llm-scaler GS128 fallback, or the production provider process.
 
 ### Production B70 alternatives
 
-The production provider may use either:
+The production B70 formats are:
 
-1. a qualified batched kernel preserving the proven signed-S4 GS64 contract; or
-2. a separately quantized signed-S4 GS128 artifact for a qualified llm-scaler N-major batched path.
+1. **Primary — QuixiCore-XPU NVFP4:** packed E2M1 weight nibbles, E4M3 block scales with block size 16, and one FP32 global scale per expert. The selected `nvfp4_moe` fused or split operation MUST accept the canonical preselected routes; `multiply_router_weight` and asynchronous event chaining are provider capability facts, not claims that the production process is implemented.
+2. **Secondary — llm-scaler / vllm-xpu-kernels INT4 W4A16:** a separately converted signed-S4 GS128 artifact MAY be qualified only if primary NVFP4 quality is insufficient. It remains a fallback and MUST NOT become the CUDA host.
 
-GS64 and GS128 are different numerical/storage contracts: their scale counts and group boundaries differ. GS64 bytes or scales MUST NOT be reinterpreted as GS128. A GS128 artifact MUST be quantized offline or at initialization from the same BF16/FP16 higher-precision source used for the CUDA artifact, not from the GS64 artifact. Conversion or requantization MUST NOT occur on the token path.
+The primary QuixiCore-XPU physical records are:
 
-Kernel family, group size, scale dtype, layout, supported shapes, and precision tolerance are capability facts. The provider MUST NOT choose them by an undocumented model-name conditional.
+```text
+w13:                [E, 2I, K/2]  uint8 packed E2M1 nibbles
+w13_scales:         [E, 2I, K/16] uint8 E4M3 block scales
+w13_global_scales:  [E]            float32
+w2:                 [E, K, I/2]   uint8 packed E2M1 nibbles
+w2_scales:          [E, K, I/16]  uint8 E4M3 block scales
+w2_global_scales:   [E]            float32
+```
+
+NVFP4, GS64, and GS128 are different numerical and storage contracts. Their codes, scale counts, and boundaries MUST NOT be reinterpreted across formats. Every production or fallback B70 artifact MUST be quantized independently from the same BF16/FP16 higher-precision source used for the CUDA artifact, never from another provider's quantized artifact. Conversion or requantization MUST NOT occur on the token path.
+
+Kernel family, group or block size, scale dtype, layout, supported shapes, and precision tolerance are capability facts. The provider MUST NOT choose them by an undocumented model-name conditional.
 
 ## Quantized-format questions
 
@@ -183,7 +194,7 @@ A later match does not waive an earlier mismatch. Representation fields and iden
 
 Required cases include zero, small, saturating, seeded random, repeated, and changing inputs; `M=1`, `M=2..32`, and representative prefill `M`; changing/non-sorted/duplicate IDs under canonical semantics; multiple rows choosing one expert; unequal and near-zero weights; boundary compact slots; zero-row experts; and different supported shapes sequentially in one process.
 
-Bulk conversion is prohibited until the one-expert fixture passes for the chosen provider contract. No production llm-scaler artifact is recorded here as having passed.
+Passing the QuixiCore-XPU kernel correctness smoke gate does not qualify a converted production model artifact. Bulk conversion is prohibited until the one-expert fixture passes for the chosen provider contract. No production QuixiCore-XPU NVFP4 artifact or secondary llm-scaler INT4 artifact is recorded here as having passed that artifact gate.
 
 ## Model, placement, and provider manifests
 
@@ -210,7 +221,7 @@ source_model_fingerprint: <same source for both artifacts>
 converter_revision: <pinned>
 kernel_bundle: <pinned and qualified>
 weight_format: <explicit>
-group_size: <explicit>
+group_or_block_size: <explicit>
 scale_dtype: <explicit>
 scale_orientation: <explicit>
 layout: <explicit>
@@ -226,12 +237,13 @@ Minimum B70 provider/protocol facts additionally include:
 
 ```yaml
 provider_protocol: 1
-provider_backend: torch-xpu-llm-scaler
+provider_backend: quixicore-xpu-nvfp4
 device_identity: <qualified B70>
 supported_hidden_sizes: [...]
 supported_intermediate_sizes: [...]
 supported_top_k: [...]
-supported_group_sizes: [64] | [128] | [64, 128]
+supported_block_sizes: [16]
+secondary_int4_group_sizes: [] | [128]
 decode_kernels: [...]
 prefill_kernels: [...]
 max_tokens: <qualified>

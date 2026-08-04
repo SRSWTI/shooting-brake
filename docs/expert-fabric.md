@@ -2,7 +2,7 @@
 
 ## Purpose, authority, and status
 
-This document specifies the versioned pinned-memory protocol between the Qwen-scoped `HybridMoERunner`/`HybridRoutedExperts` adapter in upstream vLLM 0.26+ and one isolated, persistent PyTorch-XPU/llm-scaler B70 routed-expert provider. [`../plan.md`](../plan.md) is authoritative.
+This document specifies the versioned pinned-memory protocol between the Qwen-scoped `HybridMoERunner`/`HybridRoutedExperts` adapter in upstream vLLM 0.26+ and one isolated, persistent QuixiCore-XPU B70 routed-expert provider. [`../plan.md`](../plan.md) is authoritative.
 
 This is a normative production design, not a claim that the batched vLLM+B70 path has been implemented or measured. The existing Colibri native worker is the proven transport, correctness, placement, and failure-semantics comparator; it is not the production endpoint.
 
@@ -25,7 +25,7 @@ upstream vLLM CUDA worker on RTX 5090
         | fixed versioned pinned-memory request ring
         v
 isolated persistent B70 provider process
-  PyTorch XPU + qualified llm-scaler ESIMD operators
+  qualified QuixiCore-XPU NVFP4 MoE operators
   compact B70 expert bank, fixed XPU buffers, streams, kernel policy
         |
         `-> one weighted [M_remote, hidden] partial + route status
@@ -161,14 +161,16 @@ The provider MUST:
 
 If execution cannot prove which routes contributed after an error, the provider MUST mark the entire transaction's remote subset uncommittable. It MUST NOT return an ambiguous combined partial.
 
-The initial provider selects qualified llm-scaler families:
+The initial provider selects qualified QuixiCore-XPU NVFP4 MoE families:
 
 | Batch class | Provider-local policy |
 |---|---|
-| `M=1` decode | Tiny preselected-route INT4 path |
-| `1<M<=32` decode/continuous batch | Qualified tiny or small/grouped path |
-| Larger decode batch | Qualified grouped route path |
-| Prefill | Gather → grouped up → activation → grouped down → weighted accumulation |
+| `M=1` decode | Qualified NVFP4 MoE fused/split path |
+| `1<M<=32` decode/continuous batch | Qualified NVFP4 MoE batched path |
+| Larger decode batch | Qualified NVFP4 MoE grouped path |
+| Prefill | Qualified NVFP4 MoE grouped path |
+
+The selected primary is QuixiCore-XPU NVFP4. llm-scaler INT4 through `vllm-xpu-kernels` remains a qualified secondary alternative only if NVFP4 quality is insufficient and must pass the same capability, correctness, and performance gates before use.
 
 Thresholds are capability/benchmark facts owned by the provider, not model-name branches in vLLM. Full-fused functions that recompute router/top-k or shared-expert work are prohibited.
 
@@ -268,13 +270,14 @@ The Colibri native worker has proven:
 - persistent B70 weights and compact `(layer, expert) -> slot` ownership;
 - exact signed-S4 GS64 conversion into its native K-major/marlin-derived layout with FP16 scales;
 - FP16 activation/weight staging;
-- ESIMD gate/up/SiLU/down execution;
 - routing-weighted accumulation into one hidden-size partial;
 - asynchronous issue/take;
 - exact failed-route recovery; and
 - numerical agreement with its CPU reference.
 
-That worker remains a correctness/latency comparator. Its current logical transaction is single-token, one-pending-operation, fixed-scratch execution. It does not prove the production requirements for multi-slot continuous batching, aggregated decode, grouped prefill, per-route batched status, llm-scaler kernel qualification, or isolated-process vLLM integration.
+Separately, qualified QuixiCore-XPU kernels have proven NVFP4 fused gate/up/SiLU/down execution on B70.
+
+That worker remains a correctness/latency comparator. Its current logical transaction is single-token, one-pending-operation, fixed-scratch execution. It does not prove the production requirements for multi-slot continuous batching, aggregated decode, grouped prefill, per-route batched status, QuixiCore-XPU kernel qualification, or isolated-process vLLM integration.
 
 ## Hard gates
 

@@ -8,7 +8,7 @@ This document defines memory ownership, persistence, fixed-buffer boundaries, in
 
 1. Every allocation has one owner and one address domain. RTX 5090 VRAM, B70 VRAM, pinned host memory, pageable host memory, and NVMe are never described as unified VRAM.
 2. The upstream vLLM CUDA worker is the state owner. Active attention, KV/recurrent state, router/top-k, dense/shared paths, residual stream, local experts, sampling, and serving state stay on the RTX 5090.
-3. The isolated B70 provider owns only B70-resident routed-expert weights, stable XPU buffers, streams, and kernel execution.
+3. The isolated B70 provider owns only B70-resident routed-expert weights, stable XPU buffers, streams, and qualified provider-kernel execution: primary QuixiCore-XPU NVFP4, or the secondary llm-scaler INT4 fallback.
 4. Hot routed experts have immutable CUDA ownership; cold/overflow routed experts have immutable B70 ownership for the loaded placement generation. There is no foreground weight migration.
 5. CPU memory and compute are orchestration and exact emergency recovery only. CPU matrix compute is absent from the normal path.
 6. NVMe supplies validated artifacts at startup or recovery. Ordinary warmed inference never synchronously loads an expert from storage.
@@ -20,7 +20,7 @@ This document defines memory ownership, persistence, fixed-buffer boundaries, in
 | Domain | Resident contents | Owner and lifetime | Normal-path rule |
 |---|---|---|---|
 | RTX 5090 VRAM | embeddings, attention, KV/recurrent machinery, dense layers, router, shared expert, LM head, and hot routed experts | upstream vLLM CUDA worker; immutable for the loaded model/placement generation | stock-compatible CUDA execution; reserve space for KV, runtime scratch, copy/join buffers, and safety headroom |
-| B70 VRAM | compact cold/overflow routed-expert bank in the provider-qualified signed-S4/INT4 layout | isolated B70 provider; loaded once and immutable for the weight/placement generation | execute only B70-owned selected routes; no router, shared expert, attention, or sampling |
+| B70 VRAM | compact cold/overflow routed-expert bank in the provider-qualified NVFP4 layout | isolated B70 provider; loaded once and immutable for the weight/placement generation | execute only B70-owned selected routes; no router, shared expert, attention, or sampling |
 | Host memory | manifest/configuration, control state, pinned ring, telemetry, and any explicitly admitted exact recovery representation | CPU orchestration/recovery owner | no normal-path matrix multiplication and no normal expert tier |
 | NVMe | source checkpoint, CUDA artifact, B70 artifact, provider bundle, and recovery material | durable artifact store | startup/provider restart/recovery only |
 
@@ -98,7 +98,7 @@ The control plane persists:
 
 - immutable `(layer, global expert) -> CUDA local slot | B70 compact slot` ownership;
 - placement and weight generations plus artifact fingerprints;
-- provider protocol and kernel-bundle versions;
+- provider protocol and primary/secondary kernel-bundle versions;
 - supported dimensions, dtypes, top-k values, group sizes, layouts, maximum tokens/routes, slots, and streams;
 - route frequency and measured service/queue distributions used to choose the hot CUDA set;
 - ring capacity and address-stability guarantees; and
@@ -121,7 +121,7 @@ NVMe may restore a provider after failure, but a foreground request must not wai
 
 The proven Colibri GS64 native path demonstrates persistent B70 weights, compact expert slots, FP16 staging, a routing-weighted hidden-size partial, asynchronous issue/take, exact failure recomputation, and zero normal-path CPU expert fallback. Those facts justify the ownership and lifecycle shape above.
 
-They do not prove the production batched buffers, fixed multi-slot process ring, llm-scaler tiny/grouped/prefill kernels, upstream-vLLM memory behavior, production graph stability, or capacity gain. Those are measured under [`benchmarking.md`](benchmarking.md).
+They do not prove the production batched buffers, fixed multi-slot process ring, QuixiCore-XPU tiny/grouped/prefill NVFP4 MoE kernels, the secondary llm-scaler INT4 fallback, upstream-vLLM memory behavior, production graph stability, or capacity gain. Those are measured under [`benchmarking.md`](benchmarking.md).
 
 ## Cross-plane lifecycle
 

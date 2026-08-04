@@ -4,7 +4,7 @@
 
 This document specifies the production routed-expert ownership policy for one RTX 5090 CUDA state owner and one isolated B70 provider. It follows [`../plan.md`](../plan.md) and the boundaries in [architecture.md](architecture.md), [memory.md](memory.md), [scheduling.md](scheduling.md), and [benchmarking.md](benchmarking.md).
 
-This is a design and qualification contract. The current Colibri implementation is reference evidence for compact ownership, correctness, and failure semantics; it is not evidence that the upstream-vLLM plus batched llm-scaler production placement is implemented or qualified.
+This is a design and qualification contract. The current Colibri implementation is reference evidence for compact ownership, correctness, and failure semantics; it is not evidence that the upstream-vLLM plus batched QuixiCore-XPU NVFP4 primary placement or llm-scaler INT4 secondary/fallback placement is implemented or qualified.
 
 ## Normative ownership invariants
 
@@ -34,7 +34,7 @@ The two mappings partition the routed experts admitted for normal service. The m
 - source checkpoint and CUDA/B70 artifact fingerprints;
 - architecture, layer count, hidden/intermediate dimensions, expert count, and top-k;
 - CUDA and B70 physical quantization/layout contracts;
-- provider protocol, dependency/kernel-bundle versions, and weight generation;
+- provider protocol, dependency, and primary/secondary kernel-bundle versions;
 - placement generation and ownership fingerprint;
 - actual packed bytes and slot per expert;
 - supported decode/prefill kernel families and shape capacities; and
@@ -134,7 +134,7 @@ Recovery does not make CPU a normal placement tier. Recovery count must be zero 
 
 The proven Colibri GS64 native path demonstrates persistent compact `(layer, expert) -> slot` B70 ownership, canonical route metadata, weighted-partial return, exact failed-route recomputation, and end-to-end CUDA+B70 generation without normal-path CPU expert fallback. Its placement evidence supports keeping high-traffic experts on CUDA while using B70 for substantial resident capacity.
 
-Those results are reference/baseline evidence only. They do not validate the production Qwen-scoped out-of-tree adapter, llm-scaler batched provider, continuous batching, grouped prefill, immutable production manifest, actual capacity gain, or comparison with stock all-CUDA upstream vLLM.
+Those results are reference/baseline evidence only. They do not validate the production Qwen-scoped out-of-tree adapter, batched QuixiCore-XPU NVFP4 primary provider, llm-scaler INT4 secondary/fallback provider, continuous batching, grouped prefill, immutable production manifest, actual capacity gain, or comparison with stock all-CUDA upstream vLLM.
 
 ## Placement qualification
 

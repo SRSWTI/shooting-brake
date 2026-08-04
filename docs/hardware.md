@@ -2,7 +2,7 @@
 
 ## Purpose and status
 
-This document defines the production hardware boundary, topology checks, transport baseline, and safety gates for the Shooting Brake design in [`architecture.md`](architecture.md). It follows the active plan in [`../plan.md`](../plan.md). It is a design and qualification contract, not a claim that the upstream-vLLM plus llm-scaler production path is implemented or qualified.
+This document defines the production hardware boundary, topology checks, transport baseline, and safety gates for the Shooting Brake design in [`architecture.md`](architecture.md). It follows the active plan in [`../plan.md`](../plan.md). It is a design and qualification contract, not a claim that the upstream-vLLM plus QuixiCore-XPU production path is implemented or qualified.
 
 Evidence terms are strict:
 
@@ -16,7 +16,7 @@ Evidence terms are strict:
 The supported production topology is one local PCIe host containing:
 
 - one NVIDIA RTX 5090, owned exclusively by the upstream vLLM CUDA worker;
-- one Intel B70, owned exclusively by one isolated persistent PyTorch-XPU/llm-scaler provider process;
+- one Intel B70, owned exclusively by one isolated persistent QuixiCore-XPU provider process;
 - host CPU and memory for orchestration, the fixed pinned-memory request ring, telemetry, and exact emergency recovery only; and
 - NVMe for model artifacts, startup, provider restart, and recovery, never ordinary foreground expert execution.
 
@@ -24,7 +24,7 @@ The CUDA worker owns serving, scheduling, continuous batching, attention, KV and
 
 These are separate memory and bandwidth domains. The RTX 5090 and B70 are not unified VRAM, and their peak bandwidths must not be added as if every byte were locally accessible. The CPU is not a normal expert tier and performs no normal-path matrix multiplication. See [`memory.md`](memory.md) and [`placement.md`](placement.md).
 
-CUDA and Intel dependencies remain process-isolated. The versioned pinned-memory protocol is the compatibility boundary between the upstream-vLLM CUDA state owner and the separately pinned PyTorch-XPU/llm-scaler provider environment.
+CUDA and Intel dependencies remain process-isolated. The versioned pinned-memory protocol is the compatibility boundary between the upstream-vLLM CUDA state owner and the separately pinned QuixiCore-XPU B70 provider environment. A qualified secondary llm-scaler INT4 provider environment remains independently pinned behind the same boundary.
 
 ## Required physical-topology audit
 
@@ -40,7 +40,7 @@ Before production performance claims, record the following for the RTX 5090 and 
 | Transfers | Sustained CUDA↔pinned-host and pinned-host↔B70 bandwidth plus p50/p95/p99 latency |
 | Concurrency | Independent DMA and expert compute while the CUDA state path and B70 provider are active |
 | Stability | Errors, retries, queue stalls, stale completions, and completion correctness during a soak |
-| Environment | Exact CUDA, NVIDIA driver, PyTorch XPU, oneAPI, Level Zero, llm-scaler, and kernel-bundle versions |
+| Environment | Exact CUDA, NVIDIA driver, QuixiCore-XPU, oneAPI, Level Zero, Intel driver, and selected binding/runtime versions; when the secondary INT4 path is exercised, also llm-scaler and `vllm-xpu-kernels` versions |
 | Operating envelope | Temperatures, clocks, power state, throttling indicators, and steady-state duration |
 
 Enumeration or a topology diagram is descriptive only. It does not establish negotiated width, NUMA locality, DMA overlap, tail latency, or stable simultaneous execution.
@@ -62,8 +62,8 @@ Direct NVIDIA-to-Intel peer memory is not assumed. CUDA P2P does not establish C
 ```text
 upstream vLLM CUDA worker
     ↕ fixed versioned pinned-memory request/completion ring
-isolated persistent PyTorch-XPU B70 provider
-    └── qualified llm-scaler tiny/batched/prefill ESIMD kernels
+isolated persistent QuixiCore-XPU B70 provider
+    └── qualified QuixiCore-XPU tiny/batched/prefill NVFP4 MoE kernels
 ```
 
 The ring must:
@@ -99,7 +99,7 @@ Pinned staging is the required baseline, not proof of adequate performance. Ordi
 The native worker in `colibri-variants/colibri-qwen36/c/b70_moe_sycl.cpp` has already demonstrated, for the proven Colibri GS64 path:
 
 - persistent B70 expert weights and compact `(layer, expert) -> slot` ownership;
-- signed-S4 GS64 conversion, FP16 activation staging, and ESIMD gate/up/SiLU/down execution;
+- Colibri-only signed-S4 GS64 conversion, FP16 activation staging, and ESIMD gate/up/SiLU/down execution;
 - canonical selected IDs and routing weights supplied to B70;
 - one routing-weighted hidden-size partial returned to the CUDA side;
 - asynchronous issue/take separation;
@@ -108,7 +108,7 @@ The native worker in `colibri-variants/colibri-qwen36/c/b70_moe_sycl.cpp` has al
 - end-to-end CUDA+B70 generation with zero normal-path CPU expert fallback; and
 - controlled hybrid throughput close to the corresponding all-CUDA Colibri expert configuration.
 
-Observed one-token B70 issue/take was roughly 56–100 µs per active MoE layer. This is a useful transport/correctness/latency baseline only. The native worker has one in-order queue, one pending operation, fixed single-token scratch, no continuous-batch aggregation, and no large-prefill grouped path. It does not prove the planned batched llm-scaler provider, process-ring overhead, upstream-vLLM integration, graph behavior, production throughput, or production tail latency.
+Observed one-token B70 issue/take was roughly 56–100 µs per active MoE layer. This is a useful transport/correctness/latency baseline only. The native worker has one in-order queue, one pending operation, fixed single-token scratch, no continuous-batch aggregation, and no large-prefill grouped path. It does not prove the planned batched QuixiCore-XPU provider, process-ring overhead, upstream-vLLM integration, graph behavior, production throughput, or production tail latency.
 
 The B70's 608 GB/s specification is an upstream claim. For an ideal 18 MiB W4 expert it implies a roughly 31 µs weight-read lower bound, but that omits scales, dequantization, launch, intermediates, imbalance, transport, and join. It must not be reported as measured latency.
 
@@ -121,7 +121,7 @@ Preserve raw samples sufficient for p50/p95/p99 and record topology, runtime ver
 | CUDA → pinned host | compact activation rows `[M_remote, hidden]` drawn from full scheduler batches `M=1`, `2..32`, larger decode, and prefill | bandwidth, p50/p95/p99, copy-stream overlap, no device-wide synchronization |
 | Pinned host → B70 and reverse | the same active `[M_remote, hidden]` rows plus route metadata and one `[M_remote, hidden]` wire partial | negotiated link under load, NUMA placement, p50/p95/p99, provider copy time |
 | Empty fixed-ring round trip | queue depths and slots through wraparound/backpressure | publication/completion time, stale-reply rejection, bounded CPU consumption |
-| Ring plus llm-scaler provider | tiny, small/grouped decode, and grouped prefill shapes | queue, copies, kernel, total remote path, exposed CUDA wait, errors/stalls |
+| Ring plus QuixiCore-XPU provider | tiny, small/grouped decode, and grouped prefill NVFP4 MoE shapes | queue, copies, kernel, total remote path, exposed CUDA wait, errors/stalls |
 | Concurrent CUDA+B70 layer | local CUDA routed/shared work overlapping the one B70 operation | branch overlap, critical path, join time, output agreement |
 | Recovery and restart | timeout, invalid generation, provider loss/restart, cancellation, work in flight | no stale acceptance or silent contribution loss; exact recovery or explicit failure |
 | NVMe artifact activity | startup/restart and separately induced background reads | foreground interference and confirmation of zero ordinary decode reads |

@@ -4,7 +4,7 @@
 
 This document defines the normative correctness contract for the architecture in [`../plan.md`](../plan.md). It is a design and qualification target, not a claim that the upstream-vLLM plus B70 production path has been implemented or passed.
 
-The production direction is one upstream vLLM 0.26+ CUDA state owner on the RTX 5090 and one isolated, persistent PyTorch-XPU/llm-scaler provider on the B70. The existing Colibri implementation is proven reference evidence for transport, placement, failure handling, and the signed-S4 GS64 native worker; it is not the production model host or proof of the planned batched provider.
+The production direction is one upstream vLLM 0.26+ CUDA state owner on the RTX 5090 and one isolated, persistent QuixiCore-XPU provider on the B70. The existing Colibri implementation is proven reference evidence for transport, placement, failure handling, and the signed-S4 GS64 native worker; it is not the production model host or proof of the planned batched provider.
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
@@ -167,7 +167,7 @@ Allowed numerical differences are only those covered by a declared precision con
 
 Tolerances MUST be fixed before observing results and MUST specify absolute/relative error, zero-reference handling, and NaN/Inf policy. Speed does not waive an unexplained mismatch. Route identity, ownership, generation, shape, and completion checks are exact even when tensor comparison uses a tolerance.
 
-The proven native Colibri comparator uses signed-S4, group size 64, FP16 scales, FP16 activation staging, ESIMD fused gate/up/SiLU/down execution, and a routing-weighted hidden-size partial, with numerical agreement against its CPU reference. Those facts validate the Colibri GS64 reference path only. The planned llm-scaler batched production provider, and any separately quantized GS128 alternative, require independent qualification.
+The proven native Colibri comparator uses signed-S4, group size 64, FP16 scales, FP16 activation staging, ESIMD fused gate/up/SiLU/down execution, and a routing-weighted hidden-size partial, with numerical agreement against its CPU reference. Those facts validate the Colibri GS64 reference path only. The planned QuixiCore-XPU batched production provider uses NVFP4 and requires independent qualification; the llm-scaler INT4 path remains a secondary alternative if NVFP4 quality is insufficient and requires its own independent qualification.
 
 ## Qualification hierarchy
 

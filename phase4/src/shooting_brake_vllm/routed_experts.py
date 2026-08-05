@@ -426,13 +426,12 @@ class HybridRoutedExperts(RoutedExperts):
             layer_idx=layer_idx,
             signal_host=self._signal_host,
             completion_host=self._completion_host,
-            pinned_hidden=self._b70_pinned_hidden.numpy(),
-            pinned_ids=self._pinned_b70_ids.numpy(),
-            pinned_weights=self._pinned_b70_weights.numpy(),
-            pinned_output=self._b70_pinned_output.numpy(),
+            pinned_hidden=self._b70_pinned_hidden,
+            pinned_ids=self._pinned_b70_ids,
+            pinned_weights=self._pinned_b70_weights,
+            pinned_output=self._b70_pinned_output,
         )
-        if not poller.is_alive():
-            poller.start()
+        poller.start()
         self._b70_poller = poller
         self._b70_poller_registered = True
         logger.info(
@@ -464,17 +463,18 @@ class HybridRoutedExperts(RoutedExperts):
         if self._b70_graph_mode and not self._b70_poller_registered:
             self._register_b70_poller(topk_ids)
         elif self._b70_poller is not None:
-            # A poller fault leaves stale data in the output buffer (the
-            # completion flag is raised regardless, to avoid wedging the
-            # GPU on an untimeoutable stream wait).  Replay runs no
-            # Python, so surface it here — the first eager forward after
-            # the fault — rather than returning silently wrong routes.
-            error = self._b70_poller.error
-            if error is not None:
+            # A failed dispatch leaves stale data in the output buffer:
+            # the poller raises the completion flag regardless, because
+            # the CUDA-side wait cannot time out and an unset flag wedges
+            # the device.  Replay runs no Python, so surface it here — on
+            # the first eager forward after the fault — instead of
+            # returning silently wrong routes.
+            errors = self._b70_poller.error_count
+            if errors:
                 raise RuntimeError(
-                    "Shooting Brake Tier 3: B70 poller faulted; routed-expert "
-                    "output is not trustworthy"
-                ) from error
+                    f"Shooting Brake Tier 3: {errors} B70 dispatch(es) "
+                    "failed; routed-expert output is not trustworthy"
+                )
         # Prefill (large M) always uses all-CUDA — B70 buffers are sized
         # for decode batches.  Decode (small M) uses hybrid/Tier 3.
         if self._all_cuda_passthrough or x.shape[0] > self._b70_max_batch:

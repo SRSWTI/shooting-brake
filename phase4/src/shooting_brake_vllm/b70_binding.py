@@ -74,6 +74,38 @@ class B70ProviderClient:
         lib.sb_b70_destroy.restype = None
         lib.sb_b70_destroy.argtypes = [ctypes.c_void_p]
 
+        lib.sb_b70_poll_create.restype = ctypes.c_void_p
+        lib.sb_b70_poll_create.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+
+        lib.sb_b70_poll_register.restype = ctypes.c_int
+        lib.sb_b70_poll_register.argtypes = [
+            ctypes.c_void_p, ctypes.c_size_t,
+            ctypes.c_void_p, ctypes.c_void_p,          # signal, completion
+            ctypes.c_void_p,                           # hidden (fp16)
+            ctypes.POINTER(ctypes.c_int32),            # ids
+            ctypes.POINTER(ctypes.c_float),            # weights
+            ctypes.POINTER(ctypes.c_float),            # output
+            ctypes.c_size_t,                           # topk
+        ]
+
+        lib.sb_b70_poll_start.restype = ctypes.c_int
+        lib.sb_b70_poll_start.argtypes = [ctypes.c_void_p]
+
+        lib.sb_b70_poll_stop.restype = None
+        lib.sb_b70_poll_stop.argtypes = [ctypes.c_void_p]
+
+        for counter in (
+            "sb_b70_poll_dispatch_count",
+            "sb_b70_poll_error_count",
+            "sb_b70_poll_service_ns",
+        ):
+            fn = getattr(lib, counter)
+            fn.restype = ctypes.c_uint64
+            fn.argtypes = [ctypes.c_void_p]
+
+        lib.sb_b70_poll_destroy.restype = None
+        lib.sb_b70_poll_destroy.argtypes = [ctypes.c_void_p]
+
     # -- lifecycle -------------------------------------------------------
 
     def load(
@@ -116,6 +148,19 @@ class B70ProviderClient:
     @property
     def loaded(self) -> bool:
         return self._loaded
+
+    @property
+    def lib(self) -> ctypes.CDLL:
+        """The loaded shared library, for callers that drive the C ABI
+        directly (the Tier 3 native poller)."""
+        return self._lib
+
+    @property
+    def handle(self) -> ctypes.c_void_p:
+        """The provider handle, for callers that drive the C ABI directly."""
+        if not self._handle:
+            raise B70ProviderError("provider not loaded")
+        return self._handle
 
     # -- compute ---------------------------------------------------------
 

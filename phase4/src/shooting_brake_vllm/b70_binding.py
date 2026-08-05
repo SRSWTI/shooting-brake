@@ -119,15 +119,19 @@ class B70ProviderClient:
 
     # -- compute ---------------------------------------------------------
 
-    def dispatch(
+    def issue(
         self,
         layer: int,
         hidden_fp16: np.ndarray,
         ids: np.ndarray,
         weights: np.ndarray,
         generation: int = 1,
-    ) -> np.ndarray:
-        """Issue one MoE dispatch and synchronously collect the result.
+    ) -> int:
+        """Submit one MoE dispatch to the B70 (non-blocking kernel launch).
+
+        The SYCL queue enqueues H2D copies + the NVFP4 kernel and returns
+        immediately.  Call :meth:`take` with the returned sequence number
+        to collect the result once the kernel is done.
 
         Args:
             layer: NVFP4 layer index (0-31).
@@ -137,7 +141,7 @@ class B70ProviderClient:
             generation: Placement generation id.
 
         Returns:
-            [M, 2048] float32 — the routing-weighted B70 partial per token.
+            The dispatch sequence number (monotonically increasing).
         """
         if not self._loaded or not self._handle:
             raise B70ProviderError("provider not loaded")
@@ -167,20 +171,69 @@ class B70ProviderClient:
             raise B70ProviderError(
                 f"sb_b70_issue failed (status={status}, layer={layer}, M={M})"
             )
+        return seq
 
-        output = np.empty((M, 2048), dtype=np.float32)
+    def take(
+        self,
+        sequence: int,
+        M: int,
+        generation: int = 1,
+        output: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Collect the result of a completed dispatch (blocks until ready).
+
+        Blocks on the SYCL ``kernel_end`` event.  If the B70 kernel finished
+        before this call (the common case when CUDA work ran between issue
+        and take), the event is already signaled and the call returns
+        immediately.
+
+        Args:
+            sequence: Sequence number returned by :meth:`issue`.
+            M: Number of token rows in the dispatch.
+            generation: Placement generation id.
+            output: Optional pre-allocated [M, 2048] float32 buffer to write
+                into (e.g. a pinned-memory numpy view).  If ``None`` a fresh
+                array is allocated.
+
+        Returns:
+            [M, 2048] float32 — the routing-weighted B70 partial per token.
+        """
+        if not self._loaded or not self._handle:
+            raise B70ProviderError("provider not loaded")
+
+        if output is None:
+            output = np.empty((M, 2048), dtype=np.float32)
+        elif not output.flags["C_CONTIGUOUS"] or output.dtype != np.float32:
+            output = np.ascontiguousarray(output, dtype=np.float32)
+
         status = self._lib.sb_b70_take(
             self._handle,
-            ctypes.c_uint64(generation), ctypes.c_uint64(seq),
+            ctypes.c_uint64(generation), ctypes.c_uint64(sequence),
             output.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ctypes.c_size_t(M * 2048),
         )
         if status != 0:
             raise B70ProviderError(
-                f"sb_b70_take failed (status={status}, layer={layer}, M={M})"
+                f"sb_b70_take failed (status={status}, seq={sequence}, M={M})"
             )
-
         return output
+
+    def dispatch(
+        self,
+        layer: int,
+        hidden_fp16: np.ndarray,
+        ids: np.ndarray,
+        weights: np.ndarray,
+        generation: int = 1,
+    ) -> np.ndarray:
+        """Issue one MoE dispatch and synchronously collect the result.
+
+        Convenience wrapper: :meth:`issue` + :meth:`take`.  Prefer the
+        separate methods when overlapping B70 compute with CUDA work.
+        """
+        seq = self.issue(layer, hidden_fp16, ids, weights, generation)
+        M = np.ascontiguousarray(hidden_fp16, dtype=np.float16).shape[0]
+        return self.take(seq, M, generation)
 
     # -- teardown --------------------------------------------------------
 

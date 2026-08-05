@@ -94,6 +94,20 @@ class HybridRoutedExperts(RoutedExperts):
         )
         self._device_map_cpu = build_device_map(self.shooting_brake_placement)
         self._b70_slot_map = _build_b70_slot_map(self.shooting_brake_placement)
+        # Phase 8a: pinned host buffers for async B70 overlap.
+        # Pre-allocated once and reused every step to avoid per-step
+        # allocation on the hot path.  Pinned memory enables DMA D2H/H2D.
+        self._b70_max_batch = int(
+            os.environ.get("SHOOTING_BRAKE_B70_MAX_BATCH", "128")
+        )
+        self._b70_pinned_hidden: torch.Tensor = torch.empty(
+            self._b70_max_batch, 2048, dtype=torch.float16,
+            pin_memory=True, device="cpu",
+        )
+        self._b70_pinned_output: torch.Tensor = torch.empty(
+            self._b70_max_batch, 2048, dtype=torch.float32,
+            pin_memory=True, device="cpu",
+        )
         self._layer_idx: int | None = None
         self._device_map_layer: torch.Tensor | None = None
         # Phase-6a partition statistics (per-layer, in-process).
@@ -210,26 +224,57 @@ class HybridRoutedExperts(RoutedExperts):
                 with open(hmarker, "w") as f:
                     json.dump({"layer": layer_idx, "b70_routes": n_remote}, f)
 
-        # Phase 6c/7: hybrid execution. When enabled and remote routes exist,
-        # zero B70-route weights for the CUDA call (CUDA computes only CUDA
-        # routes + shared expert), compute the B70-route partial, and add.
-        # With SHOOTING_BRAKE_B70_DEVICE=1 the B70 partial comes from the
-        # actual Intel Arc Pro B70 via the QuixiCore provider; otherwise it
-        # uses the CUDA kernel as a correctness reference (Phase 6c).
+        # Phase 6c/7/8a: hybrid execution. When enabled and remote routes
+        # exist, the routed-expert output is split: CUDA computes the
+        # CUDA-owned routes (+ shared expert), and the B70-owned routes are
+        # computed separately.  Three modes, selected by environment:
+        #
+        #   B70_DEVICE=1 + ASYNC (default):
+        #     Phase 8a — issue B70 BEFORE CUDA forward_modular so the B70
+        #     kernel overlaps with CUDA compute.  take() blocks only if the
+        #     B70 kernel hasn't finished by the time CUDA is done.
+        #
+        #   B70_DEVICE=1 + ASYNC=0:
+        #     Phase 7 — synchronous reference.  CUDA first, then B70.
+        #     Used for debugging / correctness isolation.
+        #
+        #   B70_DEVICE unset:
+        #     Phase 6c — B70 partial computed via CUDA kernel (no device).
         if (
             os.environ.get("SHOOTING_BRAKE_HYBRID") == "1"
             and has_remote
         ):
             cuda_weights = topk_weights * (~part.b70_mask).float()
-            y_cuda = super().forward_modular(
-                x, cuda_weights, topk_ids,
-                shared_experts, shared_experts_input,
-            )
-            if os.environ.get("SHOOTING_BRAKE_B70_DEVICE") == "1":
+            b70_device = os.environ.get("SHOOTING_BRAKE_B70_DEVICE") == "1"
+            b70_async = os.environ.get(
+                "SHOOTING_BRAKE_B70_ASYNC", "1"
+            ) != "0"
+
+            if b70_device and b70_async:
+                # Phase 8a: async overlap — B70 kernel runs during CUDA
+                seq, b70_M = self._b70_issue(
+                    x, topk_ids, topk_weights, part, layer_idx,
+                )
+                y_cuda = super().forward_modular(
+                    x, cuda_weights, topk_ids,
+                    shared_experts, shared_experts_input,
+                )
+                y_b70 = self._b70_take(seq, b70_M, x.device, x.dtype)
+            elif b70_device:
+                # Phase 7: synchronous B70 (correctness reference)
+                y_cuda = super().forward_modular(
+                    x, cuda_weights, topk_ids,
+                    shared_experts, shared_experts_input,
+                )
                 y_b70 = self._b70_partial(
-                    x, topk_ids, topk_weights, part, layer_idx
+                    x, topk_ids, topk_weights, part, layer_idx,
                 )
             else:
+                # Phase 6c: CUDA-kernel B70 partial (no device)
+                y_cuda = super().forward_modular(
+                    x, cuda_weights, topk_ids,
+                    shared_experts, shared_experts_input,
+                )
                 b70_weights = topk_weights * part.b70_mask.float()
                 y_b70 = super().forward_modular(x, b70_weights, topk_ids)
             return y_cuda + y_b70
@@ -273,6 +318,73 @@ class HybridRoutedExperts(RoutedExperts):
 
         # Result: FP32 CPU → BF16 CUDA
         return torch.from_numpy(output_np).to(x.device).to(x.dtype)
+
+    def _b70_issue(
+        self,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        part: RoutePartition,
+        layer_idx: int,
+    ) -> tuple[int, int]:
+        """Issue B70 dispatch — kernel starts asynchronously. Returns (seq, M).
+
+        First half of the Phase-8a async overlap:
+        1.  D2H the activation (BF16 CUDA → FP16 pinned host, DMA copy).
+        2.  D2H routing data and translate global IDs → B70 compact slots.
+        3.  Submit to the B70 provider (SYCL queue enqueues kernel, returns).
+
+        After this returns, the caller should do CUDA work (the routed-
+        expert forward) and then call :meth:`_b70_take` to collect.
+        """
+        provider = _get_b70_provider(self.shooting_brake_placement)
+        M = x.shape[0]
+
+        # D2H activation: BF16 CUDA → FP16 pinned host buffer.
+        # Small tensor (M × 2048 × 2 B = 4 KB–512 KB); the sync is fast.
+        x_fp16 = x.detach().to(torch.float16)
+        pinned_hidden = self._b70_pinned_hidden[:M]
+        pinned_hidden.copy_(x_fp16, non_blocking=True)
+        torch.cuda.current_stream().synchronize()
+
+        # D2H routing data (tiny: M × 8 × 4 B).
+        ids_np = topk_ids.detach().cpu().numpy()
+        wts_np = topk_weights.detach().cpu().numpy()
+
+        # Translate global expert IDs → B70 compact slots, zero CUDA routes.
+        b70_ids = self._b70_slot_map[ids_np]
+        b70_weights = wts_np * (b70_ids >= 0).astype(np.float32)
+
+        # Submit — SYCL kernel starts on B70, returns immediately.
+        seq = provider.issue(
+            layer=layer_idx,
+            hidden_fp16=pinned_hidden.numpy(),
+            ids=b70_ids,
+            weights=b70_weights,
+        )
+        return seq, M
+
+    def _b70_take(
+        self,
+        sequence: int,
+        M: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Collect B70 result. Blocks only if the kernel is still running.
+
+        Second half of the Phase-8a async overlap.  By the time this is
+        called (after CUDA forward_modular), the B70 kernel has typically
+        already finished — ``sb_b70_take`` returns immediately.
+
+        Writes into the pre-allocated pinned output buffer, then does a
+        non-blocking H2D copy (pinned source enables DMA) + dtype cast.
+        """
+        provider = _get_b70_provider(self.shooting_brake_placement)
+        pinned_output = self._b70_pinned_output[:M]
+        provider.take(sequence, M, output=pinned_output.numpy())
+        # H2D from pinned (DMA) + cast FP32 → model dtype on GPU.
+        return pinned_output.to(device, non_blocking=True).to(dtype)
 
     def _shadow_validate(
         self,

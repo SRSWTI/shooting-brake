@@ -10,6 +10,11 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.logger import init_logger
+try:
+    from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+except ImportError:
+    def eager_break_during_capture(fn):  # type: ignore[misc]
+        return fn
 
 from .config import require_qualified_config
 from .partition import (
@@ -134,6 +139,17 @@ class HybridRoutedExperts(RoutedExperts):
             or os.environ.get("SHOOTING_BRAKE_SHADOW") == "1"
             or os.environ.get("SHOOTING_BRAKE_VRAM_SURGERY") == "1"
         )
+        # Cache B70 env decisions (hot-path reads are expensive during graph replay).
+        self._b70_device_cached = (
+            os.environ.get("SHOOTING_BRAKE_B70_DEVICE") == "1"
+        )
+        self._hybrid_env = os.environ.get("SHOOTING_BRAKE_HYBRID") == "1"
+        self._b70_async_cached = (
+            os.environ.get("SHOOTING_BRAKE_B70_ASYNC", "1") != "0"
+        )
+        # Static output buffer for breakable CUDA graph compatibility.
+        # Allocated lazily on first forward (needs hidden_dim from weights).
+        self._static_output: torch.Tensor | None = None
         self.shooting_brake_provider = ShootingBrakeExpertProviderClient(
             qualified_model=qualified_model,
             layer_name=self.layer_name,
@@ -334,31 +350,53 @@ class HybridRoutedExperts(RoutedExperts):
         shared_experts: Any = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Partition routes via the manifest, validate, then run stock CUDA.
+        """Dispatch to hybrid or CUDA-only forward.
 
-        In all-CUDA mode (no B70 device, no surgery, no shadow), this is
-        a pure pass-through to ``super().forward_modular()`` with zero
-        Python logic on the hot path — making it compatible with CUDA
-        graph capture and replay.
+        In all-CUDA mode (no hybrid features), this is a pure pass-through
+        to ``super().forward_modular()`` — CUDA graph compatible.
+
+        In hybrid mode, dispatches to ``_hybrid_forward_modular`` which is
+        decorated with ``@eager_break_during_capture`` to create a graph
+        break point for the B70 dispatch.
         """
-        # Graph-compatible fast path: when no hybrid features are active,
-        # skip ALL Python logic and call super() directly. This branch is
-        # taken during CUDA graph capture and the super() call's kernel
-        # launches are recorded into the graph. During replay, only the
-        # recorded kernels execute — this Python line does not re-run.
         if self._all_cuda_passthrough:
             return super().forward_modular(
                 x, topk_weights, topk_ids,
                 shared_experts, shared_experts_input,
             )
+        return self._hybrid_forward_modular(
+            x, topk_weights, topk_ids,
+            shared_experts, shared_experts_input,
+        )
+
+    @eager_break_during_capture
+    def _hybrid_forward_modular(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any = None,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Hybrid MoE forward — breakable CUDA graph eager break point.
+
+        When ``VLLM_USE_BREAKABLE_CUDAGRAPH=1``, this method breaks the
+        CUDA graph capture: the graph segment before this call is
+        finalized, this method runs eagerly (B70 dispatch + CUDA kernel),
+        and a new graph segment starts after it returns.
+
+        During replay, graph segments replay at full speed while this
+        method re-executes its Python + CUDA kernels eagerly.
+
+        Output is written to ``self._static_output`` to ensure a stable
+        address across replays (required by the breakable graph protocol).
+        """
         layer_idx, dml = self._ensure_layer_device_map(topk_ids)
         self._maybe_perform_vram_surgery(layer_idx)
         part = partition_routes(topk_ids, topk_weights, dml, layer_idx)
         validate_partition(
             part, self.shooting_brake_placement.b70_capable_layers
         )
-        # After VRAM surgery, CUDA topk_ids must be remapped to compact
-        # local IDs.  B70 issue/take still use the original global IDs.
         cuda_topk_ids = (
             self._cuda_remap[topk_ids]
             if self._cuda_remap is not None
@@ -384,7 +422,6 @@ class HybridRoutedExperts(RoutedExperts):
                     n_remote,
                     topk_ids.shape[0],
                 )
-                # Deterministic cross-process marker for the 6a gate.
                 marker = os.environ.get("SHOOTING_BRAKE_PARTITION_MARKER")
                 if marker:
                     import json
@@ -394,9 +431,7 @@ class HybridRoutedExperts(RoutedExperts):
                             "b70_routes": n_remote,
                             "M": topk_ids.shape[0],
                         }) + "\n")
-        # Phase 6b: shadow validation of the split-merge math (once).
-        # Skip when VRAM surgery is active — B70 experts are no longer in
-        # the CUDA weight tensor, so the three-way comparison is invalid.
+        # Phase 6b: shadow validation (once, skip during surgery).
         if (
             not self._shadow_done
             and has_remote
@@ -406,9 +441,8 @@ class HybridRoutedExperts(RoutedExperts):
             self._shadow_done = True
             self._shadow_validate(x, topk_weights, topk_ids, part)
 
-        # Phase 6c marker: confirm the hybrid path was exercised.
         if (
-            os.environ.get("SHOOTING_BRAKE_HYBRID") == "1"
+            self._hybrid_env
             and has_remote
             and stats.get("hybrid_steps", 0) == 0
         ):
@@ -419,34 +453,12 @@ class HybridRoutedExperts(RoutedExperts):
                 with open(hmarker, "w") as f:
                     json.dump({"layer": layer_idx, "b70_routes": n_remote}, f)
 
-        # Phase 6c/7/8a: hybrid execution. When enabled and remote routes
-        # exist, the routed-expert output is split: CUDA computes the
-        # CUDA-owned routes (+ shared expert), and the B70-owned routes are
-        # computed separately.  Three modes, selected by environment:
-        #
-        #   B70_DEVICE=1 + ASYNC (default):
-        #     Phase 8a — issue B70 BEFORE CUDA forward_modular so the B70
-        #     kernel overlaps with CUDA compute.  take() blocks only if the
-        #     B70 kernel hasn't finished by the time CUDA is done.
-        #
-        #   B70_DEVICE=1 + ASYNC=0:
-        #     Phase 7 — synchronous reference.  CUDA first, then B70.
-        #     Used for debugging / correctness isolation.
-        #
-        #   B70_DEVICE unset:
-        #     Phase 6c — B70 partial computed via CUDA kernel (no device).
-        if (
-            os.environ.get("SHOOTING_BRAKE_HYBRID") == "1"
-            and has_remote
-        ):
+        # Hybrid execution: split CUDA/B70 routes and combine.
+        if self._hybrid_env and has_remote:
             cuda_weights = topk_weights * (~part.b70_mask).float()
-            b70_device = os.environ.get("SHOOTING_BRAKE_B70_DEVICE") == "1"
-            b70_async = os.environ.get(
-                "SHOOTING_BRAKE_B70_ASYNC", "1"
-            ) != "0"
 
-            if b70_device and b70_async:
-                # Phase 8a: async overlap — B70 kernel runs during CUDA
+            if self._b70_device_cached and self._b70_async_cached:
+                # Phase 8a: async overlap — B70 kernel runs during CUDA.
                 seq, b70_M = self._b70_issue(
                     x, topk_ids, topk_weights, part, layer_idx,
                 )
@@ -455,8 +467,8 @@ class HybridRoutedExperts(RoutedExperts):
                     shared_experts, shared_experts_input,
                 )
                 y_b70 = self._b70_take(seq, b70_M, x.device, x.dtype)
-            elif b70_device:
-                # Phase 7: synchronous B70 (correctness reference)
+            elif self._b70_device_cached:
+                # Phase 7: synchronous B70 (correctness reference).
                 y_cuda = super().forward_modular(
                     x, cuda_weights, cuda_topk_ids,
                     shared_experts, shared_experts_input,
@@ -465,7 +477,7 @@ class HybridRoutedExperts(RoutedExperts):
                     x, topk_ids, topk_weights, part, layer_idx,
                 )
             else:
-                # Phase 6c: CUDA-kernel B70 partial (no device)
+                # Phase 6c: CUDA-kernel B70 partial (no device).
                 y_cuda = super().forward_modular(
                     x, cuda_weights, cuda_topk_ids,
                     shared_experts, shared_experts_input,
@@ -474,11 +486,36 @@ class HybridRoutedExperts(RoutedExperts):
                 y_b70 = super().forward_modular(
                     x, b70_weights, cuda_topk_ids,
                 )
-            return y_cuda + y_b70
+            return self._write_static_output(y_cuda + y_b70)
 
-        return super().forward_modular(
+        return self._write_static_output(super().forward_modular(
             x, topk_weights, cuda_topk_ids, shared_experts, shared_experts_input
-        )
+        ))
+
+    def _write_static_output(self, result: torch.Tensor) -> torch.Tensor:
+        """Copy result into static buffer for stable address across replays.
+
+        Required by ``@eager_break_during_capture``: the output tensor's
+        address must not change between capture and replay, or downstream
+        graph segments read from a stale address.
+        """
+        M = result.shape[0]
+        if (
+            self._static_output is None
+            or self._static_output.shape[0] < M
+            or self._static_output.dtype != result.dtype
+            or self._static_output.device != result.device
+        ):
+            max_b = max(
+                M,
+                int(os.environ.get("SHOOTING_BRAKE_B70_MAX_BATCH", "128")),
+            )
+            self._static_output = torch.empty(
+                max_b, result.shape[1],
+                dtype=result.dtype, device=result.device,
+            )
+        self._static_output[:M].copy_(result)
+        return self._static_output[:M]
 
     def _b70_partial(
         self,

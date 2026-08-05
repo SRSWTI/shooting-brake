@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shooting-brake-vllm"
+version = "0.1.0"
+description = "Qwen-scoped all-CUDA adapter for Shooting Brake"
+requires-python = ">=3.12"
+dependencies = ["vllm==0.26.0"]
+
+[project.entry-points."vllm.general_plugins"]
+shooting_brake_vllm = "shooting_brake_vllm:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]

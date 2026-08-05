@@ -1,0 +1,337 @@
+"""Qualified routed-expert container with Phase-5/6a ownership + partitioning."""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import numpy as np
+import torch
+from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.logger import init_logger
+
+from .config import require_qualified_config
+from .partition import (
+    RoutePartition,
+    build_device_map,
+    partition_routes,
+    validate_partition,
+)
+from .placement import Device, Placement, build_for_qualified
+from .provider import ShootingBrakeExpertProviderClient
+
+logger = init_logger(__name__)
+
+
+def _placement_policy_name() -> str:
+    """Placement policy spec from the environment (default: all-CUDA)."""
+    return os.environ.get("SHOOTING_BRAKE_PLACEMENT", "all-cuda")
+
+def _build_b70_slot_map(placement: Placement) -> np.ndarray:
+    """[num_experts] int32: B70 compact slot for each global expert, -1 for CUDA.
+
+    All B70-capable layers share the same resident set (guaranteed by the
+    SplitPolicy / InterleavedPolicy placement families), so layer 0 is
+    representative.
+    """
+    slot_map = np.full(placement.num_experts, -1, dtype=np.int32)
+    for expert_id, owner in enumerate(placement.owners[0]):
+        if owner.device is Device.B70:
+            slot_map[expert_id] = owner.slot
+    return slot_map
+
+
+_b70_provider_singleton: Any = None
+
+
+def _get_b70_provider(placement: Placement) -> Any:
+    """Lazily create and cache the in-process B70 provider singleton."""
+    global _b70_provider_singleton
+    if _b70_provider_singleton is not None:
+        return _b70_provider_singleton
+
+    from .b70_binding import B70ProviderClient
+
+    lib_path = os.environ.get(
+        "SHOOTING_BRAKE_B70_LIB", "phase7/libsb_b70_provider.so"
+    )
+    bank_path = os.environ.get(
+        "SHOOTING_BRAKE_B70_BANK", "phase1/expert_bank.bin"
+    )
+    resident = sorted(
+        e for e in range(placement.num_experts)
+        if placement.owners[0][e].device is Device.B70
+    )
+    resident_np = np.array(resident, dtype=np.int32)
+    max_batch = int(os.environ.get("SHOOTING_BRAKE_B70_MAX_BATCH", "128"))
+
+    logger.info(
+        "Shooting Brake Phase-7: initializing B70 provider "
+        "(%d resident experts/layer)...", len(resident)
+    )
+    provider = B70ProviderClient(lib_path)
+    provider.load(bank_path, generation=1, resident_experts=resident_np,
+                  max_batch=max_batch)
+    _b70_provider_singleton = provider
+    logger.info(
+        "Shooting Brake Phase-7: B70 provider ready "
+        "(resident_per_layer=%d)", provider.resident_per_layer
+    )
+    return provider
+
+
+class HybridRoutedExperts(RoutedExperts):
+    """Stock routed experts plus compact ownership and route partitioning."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        qualified_model = require_qualified_config(get_current_vllm_config())
+        super().__init__(*args, **kwargs)
+        self.shooting_brake_qualified_model = qualified_model
+        self.shooting_brake_placement: Placement = build_for_qualified(
+            qualified_model,
+            policy_name=_placement_policy_name(),
+        )
+        self._device_map_cpu = build_device_map(self.shooting_brake_placement)
+        self._b70_slot_map = _build_b70_slot_map(self.shooting_brake_placement)
+        self._layer_idx: int | None = None
+        self._device_map_layer: torch.Tensor | None = None
+        # Phase-6a partition statistics (per-layer, in-process).
+        self.shooting_brake_partition_stats: dict[str, int] = {
+            "steps": 0,
+            "remote_steps": 0,
+            "remote_routes": 0,
+            "max_remote_per_step": 0,
+        }
+        self._shadow_done = False
+        self.shooting_brake_provider = ShootingBrakeExpertProviderClient(
+            qualified_model=qualified_model,
+            layer_name=self.layer_name,
+            placement=self.shooting_brake_placement,
+        )
+        # Phase-6a diagnostic: verify env vars + code path in EngineCore.
+        _init_marker = os.environ.get("SHOOTING_BRAKE_PARTITION_MARKER")
+        if _init_marker:
+            import json as _json
+            with open(_init_marker, "a") as _f:
+                _f.write(_json.dumps({
+                    "init": True,
+                    "layer_name": self.layer_name,
+                    "policy": _placement_policy_name(),
+                    "b70_count": self.shooting_brake_placement.b70_count(),
+                    "is_monolithic": self.quant_method.is_monolithic,
+                }) + "\n")
+
+    def _ensure_layer_device_map(
+        self, topk_ids: torch.Tensor
+    ) -> tuple[int, torch.Tensor]:
+        """Lazily resolve this layer's index and cache its device-map row."""
+        if self._layer_idx is None:
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            self._layer_idx = extract_layer_index(self.layer_name)
+        if (
+            self._device_map_layer is None
+            or self._device_map_layer.device != topk_ids.device
+        ):
+            self._device_map_layer = self._device_map_cpu[
+                self._layer_idx
+            ].to(topk_ids.device)
+        return self._layer_idx, self._device_map_layer
+
+    def forward_modular(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any = None,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Partition routes via the manifest, validate, then run stock CUDA.
+
+        Phase 6a: the partition is computed and its invariants asserted on
+        every step, but execution is unchanged — the parent receives the
+        original unmodified ``topk_ids`` / ``topk_weights``.
+        """
+        layer_idx, dml = self._ensure_layer_device_map(topk_ids)
+        part = partition_routes(topk_ids, topk_weights, dml, layer_idx)
+        validate_partition(
+            part, self.shooting_brake_placement.b70_capable_layers
+        )
+
+        stats = self.shooting_brake_partition_stats
+        stats["steps"] += 1
+        has_remote = part.has_remote()
+        if has_remote:
+            stats["remote_steps"] += 1
+            n_remote = part.num_b70_routes()
+            stats["remote_routes"] += n_remote
+            stats["max_remote_per_step"] = max(
+                stats["max_remote_per_step"], n_remote
+            )
+            if stats["remote_steps"] == 1:
+                logger.info(
+                    "Shooting Brake Phase-6a: layer %s first remote step "
+                    "(cuda=%d b70=%d routes, M=%d).",
+                    layer_idx,
+                    part.num_cuda_routes(),
+                    n_remote,
+                    topk_ids.shape[0],
+                )
+                # Deterministic cross-process marker for the 6a gate.
+                marker = os.environ.get("SHOOTING_BRAKE_PARTITION_MARKER")
+                if marker:
+                    import json
+                    with open(marker, "a") as f:
+                        f.write(json.dumps({
+                            "layer": layer_idx,
+                            "b70_routes": n_remote,
+                            "M": topk_ids.shape[0],
+                        }) + "\n")
+        # Phase 6b: shadow validation of the split-merge math (once, layer 0).
+        if (
+            not self._shadow_done
+            and has_remote
+            and os.environ.get("SHOOTING_BRAKE_SHADOW") == "1"
+        ):
+            self._shadow_done = True
+            self._shadow_validate(x, topk_weights, topk_ids, part)
+
+        # Phase 6c marker: confirm the hybrid path was exercised.
+        if (
+            os.environ.get("SHOOTING_BRAKE_HYBRID") == "1"
+            and has_remote
+            and stats.get("hybrid_steps", 0) == 0
+        ):
+            stats["hybrid_steps"] = 1
+            hmarker = os.environ.get("SHOOTING_BRAKE_HYBRID_MARKER")
+            if hmarker:
+                import json
+                with open(hmarker, "w") as f:
+                    json.dump({"layer": layer_idx, "b70_routes": n_remote}, f)
+
+        # Phase 6c/7: hybrid execution. When enabled and remote routes exist,
+        # zero B70-route weights for the CUDA call (CUDA computes only CUDA
+        # routes + shared expert), compute the B70-route partial, and add.
+        # With SHOOTING_BRAKE_B70_DEVICE=1 the B70 partial comes from the
+        # actual Intel Arc Pro B70 via the QuixiCore provider; otherwise it
+        # uses the CUDA kernel as a correctness reference (Phase 6c).
+        if (
+            os.environ.get("SHOOTING_BRAKE_HYBRID") == "1"
+            and has_remote
+        ):
+            cuda_weights = topk_weights * (~part.b70_mask).float()
+            y_cuda = super().forward_modular(
+                x, cuda_weights, topk_ids,
+                shared_experts, shared_experts_input,
+            )
+            if os.environ.get("SHOOTING_BRAKE_B70_DEVICE") == "1":
+                y_b70 = self._b70_partial(
+                    x, topk_ids, topk_weights, part, layer_idx
+                )
+            else:
+                b70_weights = topk_weights * part.b70_mask.float()
+                y_b70 = super().forward_modular(x, b70_weights, topk_ids)
+            return y_cuda + y_b70
+
+        return super().forward_modular(
+            x, topk_weights, topk_ids, shared_experts, shared_experts_input
+        )
+
+    def _b70_partial(
+        self,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        part: RoutePartition,
+        layer_idx: int,
+    ) -> torch.Tensor:
+        """Compute the B70-device partial for B70-owned routes.
+
+        Translates global expert IDs to B70 compact slots, converts the
+        activation BF16 → FP16 for the B70 kernel, dispatches via the
+        in-process QuixiCore provider, and returns the weighted partial
+        as a BF16 CUDA tensor ready for addition.
+        """
+        provider = _get_b70_provider(self.shooting_brake_placement)
+
+        # Compact ID translation: global expert → B70 slot, CUDA routes → -1
+        ids_np = topk_ids.detach().cpu().numpy()
+        wts_np = topk_weights.detach().cpu().numpy()
+        b70_ids = self._b70_slot_map[ids_np]          # [M, topk]
+        b70_weights = wts_np * (b70_ids >= 0).astype(np.float32)
+
+        # Activation: BF16 CUDA → FP16 CPU for the B70 NVFP4 kernel
+        hidden_fp16 = x.detach().to(torch.float16).cpu().numpy()
+
+        output_np = provider.dispatch(
+            layer=layer_idx,
+            hidden_fp16=hidden_fp16,
+            ids=b70_ids,
+            weights=b70_weights,
+        )
+
+        # Result: FP32 CPU → BF16 CUDA
+        return torch.from_numpy(output_np).to(x.device).to(x.dtype)
+
+    def _shadow_validate(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        part: RoutePartition,
+    ) -> None:
+        """Validate Y_cuda_routed + Y_b70_routed ≈ Y_full_routed.
+
+        Computes the routed-expert output (shared expert excluded) three
+        ways using the stock CUDA kernel with different weight masks:
+          * all routes (original weights)
+          * CUDA routes only (B70-route weights zeroed)
+          * B70 routes only (CUDA-route weights zeroed)
+
+        Since 0 * E_k(x) == 0 exactly, the only source of difference is
+        BF16 summation reordering. The gate confirms the split-merge
+        identity that Phase 6c will rely on. (The B70 device kernel's
+        own accuracy was independently validated in Phase 3.)
+        """
+        cuda_w = topk_weights * (~part.b70_mask).float()
+        b70_w = topk_weights * part.b70_mask.float()
+
+        with torch.no_grad():
+            y_full = super().forward_modular(x, topk_weights, topk_ids)
+            y_cuda = super().forward_modular(x, cuda_w, topk_ids)
+            y_b70 = super().forward_modular(x, b70_w, topk_ids)
+
+        y_sum = y_cuda + y_b70
+        diff = (y_sum - y_full)
+        max_abs = float(diff.abs().max())
+        mean_abs = float(diff.abs().mean())
+        y_norm = float(y_full.float().norm())
+        rel_rmse = float(diff.float().norm()) / max(y_norm, 1e-12)
+        cos = float(
+            torch.dot(
+                y_sum.float().flatten(), y_full.float().flatten()
+            )
+            / (y_sum.float().norm() * y_full.float().norm() + 1e-12)
+        )
+        has_nan = bool(torch.isnan(y_sum).any() or torch.isnan(y_full).any())
+
+        logger.info(
+            "Shooting Brake Phase-6b shadow: max_abs=%.6f mean_abs=%.6f "
+            "rel_rmse=%.6f cosine=%.8f nan=%s",
+            max_abs, mean_abs, rel_rmse, cos, has_nan,
+        )
+        marker = os.environ.get("SHOOTING_BRAKE_SHADOW_MARKER")
+        if marker:
+            import json
+            with open(marker, "w") as f:
+                json.dump({
+                    "max_abs": max_abs,
+                    "mean_abs": mean_abs,
+                    "rel_rmse": rel_rmse,
+                    "cosine": cos,
+                    "has_nan": has_nan,
+                    "M": topk_ids.shape[0],
+                    "b70_routes": part.num_b70_routes(),
+                    "gate_pass": (max_abs < 0.1 and cos > 0.999 and not has_nan),
+                }, f)

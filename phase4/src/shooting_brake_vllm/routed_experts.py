@@ -108,6 +108,10 @@ class HybridRoutedExperts(RoutedExperts):
             self._b70_max_batch, 2048, dtype=torch.float32,
             pin_memory=True, device="cpu",
         )
+        # Phase 8.5: VRAM surgery state. When enabled, B70-owned expert
+        # weights are removed from CUDA VRAM on the first forward call.
+        self._vram_surgery_done = False
+        self._cuda_remap: torch.Tensor | None = None
         self._layer_idx: int | None = None
         self._device_map_layer: torch.Tensor | None = None
         # Phase-6a partition statistics (per-layer, in-process).
@@ -153,6 +157,163 @@ class HybridRoutedExperts(RoutedExperts):
             ].to(topk_ids.device)
         return self._layer_idx, self._device_map_layer
 
+    def _maybe_perform_vram_surgery(self, layer_idx: int) -> None:
+        """Lazily remove B70-owned expert weights from CUDA VRAM.
+
+        Runs once per layer on the first ``forward_modular`` call, after
+        vLLM's ``process_weights_after_loading`` has set up all tensors.
+        Slices every per-expert weight and scale tensor to contain only
+        CUDA-owned experts, then updates the quant config's internal
+        references so the kernel's ``@property`` delegates see the smaller
+        tensors.
+
+        A global→local remap tensor is built so the CUDA kernel receives
+        compact local IDs (B70 routes map to expert 0 with zero weight,
+        producing zero contribution).  The real B70 results are added
+        separately in the hybrid path.
+
+        Requires ``SHOOTING_BRAKE_VRAM_SURGERY=1``.  Implicitly requires
+        ``B70_DEVICE=1`` and ``HYBRID=1`` because B70 experts are removed
+        from CUDA and must be computed on the B70 device.
+        """
+        if self._vram_surgery_done:
+            return
+        self._vram_surgery_done = True  # set early to prevent re-entry
+
+        if os.environ.get("SHOOTING_BRAKE_VRAM_SURGERY") != "1":
+            return
+        if os.environ.get("SHOOTING_BRAKE_B70_DEVICE") != "1":
+            logger.warning(
+                "SHOOTING_BRAKE_VRAM_SURGERY=1 requires "
+                "SHOOTING_BRAKE_B70_DEVICE=1; skipping surgery."
+            )
+            return
+
+        placement = self.shooting_brake_placement
+
+        # Skip layers with no B70 experts (e.g. FP8 layers 32-39).
+        b70_count = sum(
+            1 for owner in placement.owners[layer_idx]
+            if owner.device is Device.B70
+        )
+        if b70_count == 0:
+            return
+
+        # Determine CUDA-owned expert IDs (sorted ascending for contiguous
+        # index_select — even for interleaved placement this produces the
+        # correct compact-to-global mapping).
+        cuda_global_ids = sorted(
+            e for e in range(placement.num_experts)
+            if placement.owners[layer_idx][e].device is Device.CUDA
+        )
+        device = self.w13_weight.device
+        cuda_idx = torch.tensor(
+            cuda_global_ids, device=device, dtype=torch.long,
+        )
+        num_cuda = len(cuda_global_ids)
+
+        logger.info(
+            "Shooting Brake VRAM surgery: layer %d — slicing %d→%d "
+            "CUDA experts (freeing %d B70 experts)",
+            layer_idx, placement.num_experts, num_cuda, b70_count,
+        )
+
+        # --- Slice weight parameters (accessed by forward_modular) ---
+        self.w13_weight = torch.nn.Parameter(
+            self.w13_weight.data.index_select(0, cuda_idx).clone(),
+            requires_grad=False,
+        )
+        self.w2_weight = torch.nn.Parameter(
+            self.w2_weight.data.index_select(0, cuda_idx).clone(),
+            requires_grad=False,
+        )
+
+        # --- Slice per-block scale parameters ---
+        self.w13_weight_scale = torch.nn.Parameter(
+            self.w13_weight_scale.data.index_select(0, cuda_idx).clone(),
+            requires_grad=False,
+        )
+        self.w2_weight_scale = torch.nn.Parameter(
+            self.w2_weight_scale.data.index_select(0, cuda_idx).clone(),
+            requires_grad=False,
+        )
+
+        # --- Update quant config internal references ---
+        # All scale properties on FusedMoEExpertsModular delegate to
+        # quant_config._w1 / _w2 / _a1 / _a2 FusedMoEQuantDesc fields.
+        qconfig = self.quant_method.moe_quant_config
+
+        # w1_scale / w2_scale — point to the freshly sliced parameters.
+        qconfig._w1.scale = self.w13_weight_scale.data
+        qconfig._w2.scale = self.w2_weight_scale.data
+
+        # g1_alphas / g2_alphas (= w13/w2_weight_scale_2 after processing).
+        qconfig._w1.alpha_or_gscale = (
+            qconfig._w1.alpha_or_gscale.index_select(0, cuda_idx).clone()
+        )
+        qconfig._w2.alpha_or_gscale = (
+            qconfig._w2.alpha_or_gscale.index_select(0, cuda_idx).clone()
+        )
+
+        # a1_gscale / a2_gscale (derived from input scales).
+        qconfig._a1.alpha_or_gscale = (
+            qconfig._a1.alpha_or_gscale.index_select(0, cuda_idx).clone()
+        )
+        qconfig._a2.alpha_or_gscale = (
+            qconfig._a2.alpha_or_gscale.index_select(0, cuda_idx).clone()
+        )
+
+        # --- Sync layer attributes to match quant config ---
+        self.w13_weight_scale_2 = qconfig._w1.alpha_or_gscale
+        self.w2_weight_scale_2 = qconfig._w2.alpha_or_gscale
+        self.w13_input_scale = (
+            1.0 / qconfig._a1.alpha_or_gscale
+        ).clone()
+        self.w2_input_scale = (
+            1.0 / qconfig._a2.alpha_or_gscale
+        ).clone()
+
+        # --- Update metadata ---
+        self.local_num_experts = num_cuda
+
+        # --- Update expert object's per-expert attributes ---
+        expert_obj = self.quant_method.moe_kernel.fused_experts
+        expert_obj.num_experts = num_cuda
+        if (
+            hasattr(expert_obj, "gemm1_clamp_limit")
+            and expert_obj.gemm1_clamp_limit is not None
+        ):
+            expert_obj.gemm1_clamp_limit = (
+                expert_obj.gemm1_clamp_limit[:num_cuda].clone()
+            )
+
+        # --- Build global→local remap for forward_modular ---
+        # CUDA experts map to their compact local ID (0..num_cuda-1).
+        # B70 experts map to 0 (dummy — their routing weight is zeroed,
+        # so 0 * E_0(x) = 0 contribution, and the real result comes
+        # from the B70 device).
+        self._cuda_remap = torch.zeros(
+            placement.num_experts, dtype=torch.long, device=device,
+        )
+        for local_id, global_id in enumerate(cuda_global_ids):
+            self._cuda_remap[global_id] = local_id
+
+        # --- Reclaim freed VRAM ---
+        torch.cuda.empty_cache()
+
+        # --- Write VRAM marker for integration test ---
+        vram_marker = os.environ.get("SHOOTING_BRAKE_VRAM_MARKER")
+        if vram_marker:
+            vram_now = torch.cuda.memory_allocated() / (1024**3)
+            with open(vram_marker, "a") as vf:
+                vf.write(f"{layer_idx} {vram_now:.6f}\n")
+
+        logger.info(
+            "Shooting Brake VRAM surgery: layer %d done — %d CUDA experts "
+            "on device, remap ready (B70→dummy 0)",
+            layer_idx, num_cuda,
+        )
+
     def forward_modular(
         self,
         x: torch.Tensor,
@@ -168,9 +329,17 @@ class HybridRoutedExperts(RoutedExperts):
         original unmodified ``topk_ids`` / ``topk_weights``.
         """
         layer_idx, dml = self._ensure_layer_device_map(topk_ids)
+        self._maybe_perform_vram_surgery(layer_idx)
         part = partition_routes(topk_ids, topk_weights, dml, layer_idx)
         validate_partition(
             part, self.shooting_brake_placement.b70_capable_layers
+        )
+        # After VRAM surgery, CUDA topk_ids must be remapped to compact
+        # local IDs.  B70 issue/take still use the original global IDs.
+        cuda_topk_ids = (
+            self._cuda_remap[topk_ids]
+            if self._cuda_remap is not None
+            else topk_ids
         )
 
         stats = self.shooting_brake_partition_stats
@@ -202,11 +371,14 @@ class HybridRoutedExperts(RoutedExperts):
                             "b70_routes": n_remote,
                             "M": topk_ids.shape[0],
                         }) + "\n")
-        # Phase 6b: shadow validation of the split-merge math (once, layer 0).
+        # Phase 6b: shadow validation of the split-merge math (once).
+        # Skip when VRAM surgery is active — B70 experts are no longer in
+        # the CUDA weight tensor, so the three-way comparison is invalid.
         if (
             not self._shadow_done
             and has_remote
             and os.environ.get("SHOOTING_BRAKE_SHADOW") == "1"
+            and self._cuda_remap is None
         ):
             self._shadow_done = True
             self._shadow_validate(x, topk_weights, topk_ids, part)
@@ -256,14 +428,14 @@ class HybridRoutedExperts(RoutedExperts):
                     x, topk_ids, topk_weights, part, layer_idx,
                 )
                 y_cuda = super().forward_modular(
-                    x, cuda_weights, topk_ids,
+                    x, cuda_weights, cuda_topk_ids,
                     shared_experts, shared_experts_input,
                 )
                 y_b70 = self._b70_take(seq, b70_M, x.device, x.dtype)
             elif b70_device:
                 # Phase 7: synchronous B70 (correctness reference)
                 y_cuda = super().forward_modular(
-                    x, cuda_weights, topk_ids,
+                    x, cuda_weights, cuda_topk_ids,
                     shared_experts, shared_experts_input,
                 )
                 y_b70 = self._b70_partial(
@@ -272,15 +444,17 @@ class HybridRoutedExperts(RoutedExperts):
             else:
                 # Phase 6c: CUDA-kernel B70 partial (no device)
                 y_cuda = super().forward_modular(
-                    x, cuda_weights, topk_ids,
+                    x, cuda_weights, cuda_topk_ids,
                     shared_experts, shared_experts_input,
                 )
                 b70_weights = topk_weights * part.b70_mask.float()
-                y_b70 = super().forward_modular(x, b70_weights, topk_ids)
+                y_b70 = super().forward_modular(
+                    x, b70_weights, cuda_topk_ids,
+                )
             return y_cuda + y_b70
 
         return super().forward_modular(
-            x, topk_weights, topk_ids, shared_experts, shared_experts_input
+            x, topk_weights, cuda_topk_ids, shared_experts, shared_experts_input
         )
 
     def _b70_partial(

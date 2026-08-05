@@ -86,6 +86,37 @@ def _get_b70_provider(placement: Placement) -> Any:
     return provider
 
 
+_SURGERY_HOOK_ATTR = "_shooting_brake_surgery_hook"
+
+
+def _install_surgery_hook(quant_method: Any) -> None:
+    """Run VRAM surgery as soon as weights finish loading.
+
+    Timing is the whole point. vLLM sizes the KV cache from the *peak*
+    memory observed during its profiling forward. Freeing the B70-owned
+    expert weights inside or after that forward is too late: the peak
+    already counted them, so the freed VRAM is left unusable — the
+    capacity gain this architecture exists to deliver is silently lost,
+    and only shows up as a large "free" figure at the end of the run.
+
+    ``process_weights_after_loading`` is the last hook before profiling,
+    and it receives the layer, so one wrapper per quant method serves
+    every layer that shares it. The sentinel keeps a shared method from
+    being wrapped twice.
+    """
+    if getattr(quant_method, _SURGERY_HOOK_ATTR, False):
+        return
+    original = quant_method.process_weights_after_loading
+
+    def process_weights_after_loading(layer: Any) -> None:
+        original(layer)
+        if isinstance(layer, HybridRoutedExperts):
+            layer._maybe_perform_vram_surgery(layer.layer_index)
+
+    quant_method.process_weights_after_loading = process_weights_after_loading
+    setattr(quant_method, _SURGERY_HOOK_ATTR, True)
+
+
 class HybridRoutedExperts(RoutedExperts):
     """Stock routed experts plus compact ownership and route partitioning."""
 
@@ -159,7 +190,16 @@ class HybridRoutedExperts(RoutedExperts):
             and self._hybrid_env
         )
         self._b70_poller: Any = None
-        self._b70_poller_registered = False
+        self._first_forward_done = False
+        self._b70_stats = os.environ.get("SHOOTING_BRAKE_B70_STATS") == "1"
+        # [b70_routes, total_routes] accumulated on device.  Incrementing
+        # a device tensor needs no host sync, so it survives graph
+        # capture; read it between steps via collective_rpc.
+        self._route_counter: torch.Tensor | None = (
+            torch.zeros(2, dtype=torch.int64, device="cuda")
+            if self._b70_stats and self._b70_graph_mode
+            else None
+        )
         if self._b70_graph_mode:
             # CUDA-side slot map (for graph-compatible gather).
             self._b70_slot_map_cuda = torch.tensor(
@@ -209,23 +249,30 @@ class HybridRoutedExperts(RoutedExperts):
                     "b70_count": self.shooting_brake_placement.b70_count(),
                     "is_monolithic": self.quant_method.is_monolithic,
                 }) + "\n")
+        _install_surgery_hook(self.quant_method)
 
-    def _ensure_layer_device_map(
-        self, topk_ids: torch.Tensor
-    ) -> tuple[int, torch.Tensor]:
-        """Lazily resolve this layer's index and cache its device-map row."""
+    @property
+    def layer_index(self) -> int:
+        """Absolute layer index, parsed from ``layer_name``."""
         if self._layer_idx is None:
             from vllm.model_executor.models.utils import extract_layer_index
 
             self._layer_idx = extract_layer_index(self.layer_name)
+        return self._layer_idx
+
+    def _ensure_layer_device_map(
+        self, topk_ids: torch.Tensor
+    ) -> tuple[int, torch.Tensor]:
+        """Resolve this layer's index and cache its device-map row."""
+        layer_idx = self.layer_index
         if (
             self._device_map_layer is None
             or self._device_map_layer.device != topk_ids.device
         ):
-            self._device_map_layer = self._device_map_cpu[
-                self._layer_idx
-            ].to(topk_ids.device)
-        return self._layer_idx, self._device_map_layer
+            self._device_map_layer = self._device_map_cpu[layer_idx].to(
+                topk_ids.device
+            )
+        return layer_idx, self._device_map_layer
 
     def _maybe_perform_vram_surgery(self, layer_idx: int) -> None:
         """Lazily remove B70-owned expert weights from CUDA VRAM.
@@ -384,37 +431,21 @@ class HybridRoutedExperts(RoutedExperts):
             layer_idx, num_cuda,
         )
 
-    def _register_b70_poller(self, topk_ids: torch.Tensor) -> None:
-        """Bind this layer's flags + pinned buffers to the shared poller.
-
-        Deferred out of ``__init__`` for two reasons:
-
-        * the layer's real index is only resolvable from ``layer_name``
-          via ``_ensure_layer_device_map`` (the B70 expert bank is indexed
-          by NVFP4 layer, so a wrong index silently computes with the
-          wrong experts);
-        * loading the provider (SYCL/oneAPI + 13.5 GiB bank) during model
-          construction races with CUDA context setup and starves weight
-          loading of CPU.
-
-        Starting the thread here — on the first forward, i.e. the warmup
-        pass — guarantees the provider is fully live before any CUDA graph
-        capture begins.
+    def _register_b70_poller(self, layer_idx: int) -> None:
+        """Bind this layer's flags and pinned buffers to the shared poller.
 
         Layers outside the NVFP4 bank (FP8 layers 32-39) own no B70
-        experts.  Under Tier 3 they become pure CUDA passthrough: the
-        partition/validate path would otherwise run ``.any()`` on every
-        forward, and a device-to-host sync is not capture-compatible.
-        Their route math is unchanged — with zero B70-owned experts the
-        partition produces no remote routes anyway.
+        experts, so under Tier 3 they become pure CUDA passthrough: the
+        partition/validate path runs ``.any()`` on every forward, and
+        that device-to-host sync is not capture-compatible.  Their route
+        math is unchanged — with zero B70-owned experts the partition
+        produces no remote routes anyway.
         """
         from .b70_poller import get_b70_poller
 
-        layer_idx, _ = self._ensure_layer_device_map(topk_ids)
         if not self.shooting_brake_placement.is_b70_capable(layer_idx):
             self._b70_graph_mode = False
             self._all_cuda_passthrough = True
-            self._b70_poller_registered = True
             logger.info(
                 "Shooting Brake Tier 3: layer %d has no B70 experts — "
                 "all-CUDA passthrough", layer_idx,
@@ -433,11 +464,30 @@ class HybridRoutedExperts(RoutedExperts):
         )
         poller.start()
         self._b70_poller = poller
-        self._b70_poller_registered = True
         logger.info(
             "Shooting Brake Tier 3: layer %d registered with B70 poller",
             layer_idx,
         )
+
+    def _first_forward_setup(self, topk_ids: torch.Tensor) -> None:
+        """One-time per-layer setup, run on the very first forward.
+
+        Only the poller binding lives here. It loads the 13.5 GiB expert
+        bank and creates the SYCL queue, which must happen neither during
+        model construction (it races CUDA context setup and starves
+        weight loading of CPU) nor during CUDA graph capture (it would
+        race an active stream capture). vLLM's first forward is the eager
+        profiling pass, which sits between the two.
+
+        VRAM surgery is deliberately *not* here: it runs earlier, off
+        ``process_weights_after_loading``, so the freed memory is already
+        reflected in the profiling peak vLLM sizes the KV cache from.
+        See :func:`_install_surgery_hook`.
+        """
+        self._ensure_layer_device_map(topk_ids)
+        if self._b70_graph_mode:
+            self._register_b70_poller(self.layer_index)
+        self._first_forward_done = True
 
     def forward_modular(
         self,
@@ -449,19 +499,15 @@ class HybridRoutedExperts(RoutedExperts):
     ) -> torch.Tensor:
         """Dispatch to hybrid or CUDA-only forward.
 
-        In all-CUDA mode (no hybrid features), this is a pure pass-through
+        In all-CUDA mode (no hybrid features) this is a pure pass-through
         to ``super().forward_modular()`` — CUDA graph compatible.
 
-        In hybrid mode, dispatches to ``_hybrid_forward_modular`` which is
-        decorated with ``@eager_break_during_capture`` to create a graph
-        break point for the B70 dispatch.
+        Under Tier 3, decode-sized batches take the graph-compatible B70
+        path; prefill stays all-CUDA because the pinned staging buffers
+        are sized for decode.
         """
-        # Tier 3: bind this layer to the shared B70 poller on its FIRST
-        # forward.  This runs during vLLM's profiling/warmup pass — well
-        # before CUDA graph capture — so the 13.5 GiB expert bank load and
-        # SYCL queue creation never race with an active stream capture.
-        if self._b70_graph_mode and not self._b70_poller_registered:
-            self._register_b70_poller(topk_ids)
+        if not self._first_forward_done:
+            self._first_forward_setup(topk_ids)
         elif self._b70_poller is not None:
             # A failed dispatch leaves stale data in the output buffer:
             # the poller raises the completion flag regardless, because
@@ -475,8 +521,9 @@ class HybridRoutedExperts(RoutedExperts):
                     f"Shooting Brake Tier 3: {errors} B70 dispatch(es) "
                     "failed; routed-expert output is not trustworthy"
                 )
-        # Prefill (large M) always uses all-CUDA — B70 buffers are sized
-        # for decode batches.  Decode (small M) uses hybrid/Tier 3.
+
+        # Prefill (large M) stays all-CUDA: the B70 staging buffers are
+        # sized for decode batches.
         if self._all_cuda_passthrough or x.shape[0] > self._b70_max_batch:
             return super().forward_modular(
                 x, topk_weights, topk_ids,
@@ -496,33 +543,38 @@ class HybridRoutedExperts(RoutedExperts):
         shared_experts: Any = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Hybrid MoE forward — breakable CUDA graph eager break point.
+        """Hybrid MoE forward.
 
-        When ``VLLM_USE_BREAKABLE_CUDAGRAPH=1``, this method breaks the
-        CUDA graph capture: the graph segment before this call is
-        finalized, this method runs eagerly (B70 dispatch + CUDA kernel),
-        and a new graph segment starts after it returns.
+        Two paths. Under Tier 3 the whole B70 dispatch is CUDA stream
+        operations, captured by a normal CUDA graph with no Python in the
+        replay. Otherwise the eager path partitions routes, validates the
+        split, and dispatches host-side.
 
-        During replay, graph segments replay at full speed while this
-        method re-executes its Python + CUDA kernels eagerly.
-
-        Output is written to ``self._static_output`` to ensure a stable
-        address across replays (required by the breakable graph protocol).
+        Per-layer setup (index resolution, VRAM surgery, poller binding)
+        has already run in ``forward_modular``; it must happen on the
+        profiling pass, which never reaches this method.
         """
         layer_idx, dml = self._ensure_layer_device_map(topk_ids)
-        self._maybe_perform_vram_surgery(layer_idx)
         if self._b70_graph_mode:
             # Tier 3: pure CUDA stream ops — no partition, validation,
             # stats, or any host-side sync.  Every op below is captured
             # by torch.cuda.graph() without modification.
             b70_ids = self._b70_slot_map_cuda[topk_ids]
-            cuda_weights = topk_weights * (b70_ids < 0).float()
+            b70_mask = b70_ids >= 0
+            # B70-owned routes contribute through the B70 partial, so
+            # zero their CUDA weight; CUDA-owned routes are untouched.
+            cuda_weights = topk_weights * (~b70_mask).to(topk_weights.dtype)
             cuda_topk_ids = (
                 self._cuda_remap[topk_ids]
                 if self._cuda_remap is not None
                 else topk_ids
             )
-            self._b70_issue_graph(x, topk_ids, topk_weights)
+            if self._route_counter is not None:
+                # Device-side accumulation: no host sync, so this stays
+                # inside the captured graph.  Read between steps.
+                self._route_counter[0] += b70_mask.sum()
+                self._route_counter[1] += b70_mask.numel()
+            self._b70_issue_graph(x, b70_ids, topk_weights)
             y_cuda = super().forward_modular(
                 x, cuda_weights, cuda_topk_ids,
                 shared_experts, shared_experts_input,
@@ -763,40 +815,47 @@ class HybridRoutedExperts(RoutedExperts):
         provider.take(sequence, M, output=pinned_output.numpy())
         # H2D from pinned (DMA) + cast FP32 → model dtype on GPU.
         return pinned_output.to(device, non_blocking=True).to(dtype)
+
     def _b70_issue_graph(
         self,
         x: torch.Tensor,
-        topk_ids: torch.Tensor,
+        b70_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> None:
         """Graph-compatible B70 issue — pure CUDA stream operations.
 
-        Replaces the eager-mode ``_b70_issue`` which uses .cpu().numpy()
-        and ctypes (not capture-compatible).  Every operation here is a
-        CUDA stream op captured by ``torch.cuda.graph()``:
+        Replaces the eager-mode ``_b70_issue``, which uses ``.cpu()``,
+        numpy, and ctypes and so cannot be captured.  Every operation
+        here is a CUDA stream op that ``torch.cuda.graph()`` records
+        unmodified:
 
-          1. dtype cast BF16→FP16 (CUDA)
+          1. dtype cast BF16 -> FP16 (CUDA)
           2. D2H copy activation to pinned (cudaMemcpyAsync)
-          3. CUDA gather for slot-map translation
-          4. D2H copy routing data to pinned (cudaMemcpyAsync)
-          5. cuStreamWriteValue32 signal flag = M (Driver API)
+          3. D2H copy routing data to pinned (cudaMemcpyAsync)
+          4. cuStreamWriteValue32 signal flag = M (Driver API)
+
+        Args:
+            x: [M, hidden] activation on CUDA.
+            b70_ids: [M, topk] compact B70 slots, -1 for CUDA-owned
+                routes.  Gathered by the caller, which already needs the
+                mask to zero CUDA weights.
+            topk_weights: [M, topk] routing weights, unmodified.
         """
         from .stream_signal import write_flag
         M = x.shape[0]
 
-        # 1-2. Activation: BF16→FP16, D2H to pinned.
-        x_fp16 = x.to(torch.float16)
-        self._b70_pinned_hidden[:M].copy_(x_fp16, non_blocking=True)
+        # 1-2. Activation: BF16 -> FP16, D2H to pinned.
+        self._b70_pinned_hidden[:M].copy_(
+            x.to(torch.float16), non_blocking=True,
+        )
 
-        # 3. Slot-map translation via CUDA gather.
-        b70_ids = self._b70_slot_map_cuda[topk_ids]
-        b70_weights = topk_weights * (b70_ids >= 0).float()
-
-        # 4. D2H routing data.
+        # 3. Routing data.  CUDA-owned routes carry slot -1 and are
+        # skipped by the kernel, so their weights are irrelevant; the
+        # weights go over as-is.
         self._pinned_b70_ids[:M].copy_(b70_ids, non_blocking=True)
-        self._pinned_b70_weights[:M].copy_(b70_weights, non_blocking=True)
+        self._pinned_b70_weights[:M].copy_(topk_weights, non_blocking=True)
 
-        # 5. Signal the poller.  The flag VALUE is M, so the poller
+        # 4. Signal the poller.  The flag VALUE is M, so the poller
         # dispatches exactly this batch instead of the whole buffer.
         # M is a constant at capture time (one graph per batch size),
         # so it is baked into the replayed write — no extra transfer.

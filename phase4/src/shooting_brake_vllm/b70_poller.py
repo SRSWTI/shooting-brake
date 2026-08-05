@@ -112,6 +112,10 @@ class B70Poller:
             return
         self._lib.sb_b70_poll_stop(self._handle)
         self._started = False
+        self.report()
+
+    def report(self) -> None:
+        """Log dispatch counts and mean service time."""
         logger.info(
             "Shooting Brake Tier 3 B70 poller: %d dispatches over %d layers, "
             "service mean=%.1fus, %d errors",

@@ -26,8 +26,7 @@ class HybridMoERunner(MoERunner):
     When ``VLLM_USE_BREAKABLE_CUDAGRAPH=1`` and hybrid features are active,
     ``_forward_impl`` is decorated with ``@eager_break_during_capture`` so the
     entire MoE forward (shared experts + routed experts + B70 dispatch) runs
-    as an eager break between CUDA graph segments.  Attention layers, router,
-    norms and embeddings stay in graph segments at full replay speed.
+    as an eager break between CUDA graph segments.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -36,6 +35,10 @@ class HybridMoERunner(MoERunner):
         if not isinstance(self.routed_experts, HybridRoutedExperts):
             raise RuntimeError("Phase-4 runner requires HybridRoutedExperts")
         self._static_runner_output: torch.Tensor | None = None
+        self._nan_diag_enabled = (
+            os.environ.get("SHOOTING_BRAKE_NAN_DIAG") == "1"
+        )
+        self._nan_diag_seen = False
 
     @eager_break_during_capture
     def _forward_impl(
@@ -45,25 +48,53 @@ class HybridMoERunner(MoERunner):
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self._nan_diag_enabled and not self._nan_diag_seen:
+            self._check_nan(hidden_states, router_logits, "INPUT")
+
         self.routed_experts.shooting_brake_provider.begin_all_cuda()
-        result = super()._forward_impl(
+        return super()._forward_impl(
             hidden_states,
             router_logits,
             shared_experts_input,
             input_ids,
         )
-        return self._stabilize_output(result)
 
-    def _stabilize_output(
-        self, result: Any,
-    ) -> Any:
-        """Copy result into a static buffer so the output address is stable
-        across CUDA graph capture and replay.
+    def _check_nan(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        stage: str,
+    ) -> None:
+        hs_nan = torch.isnan(hidden_states).any().item()
+        hs_inf = torch.isinf(hidden_states).any().item()
+        rl_nan = torch.isnan(router_logits).any().item()
+        if hs_nan or hs_inf or rl_nan:
+            layer = getattr(self.routed_experts, "layer_name", "?")
+            print(
+                f"🔍 [NaN-DIAG] {stage} layer={layer} "
+                f"hs_nan={hs_nan} hs_inf={hs_inf} "
+                f"hs_max={hidden_states.float().abs().max().item():.4f} "
+                f"rl_nan={rl_nan}"
+            )
+            self._nan_diag_seen = True
 
-        Required by ``@eager_break_during_capture``: a fresh tensor returned
-        each call would land at a different address and break downstream graph
-        segments that were captured reading from the capture-time address.
-        """
+    def _check_nan_result(self, result: Any, stage: str) -> None:
+        tensors = result if isinstance(result, torch.Tensor) else (
+            t for t in result if isinstance(t, torch.Tensor)
+        ) if isinstance(result, (tuple, list)) else []
+        for i, t in enumerate(tensors):
+            has_nan = torch.isnan(t).any().item()
+            has_inf = torch.isinf(t).any().item()
+            if has_nan or has_inf:
+                layer = getattr(self.routed_experts, "layer_name", "?")
+                print(
+                    f"🔍 [NaN-DIAG] {stage}[{i}] layer={layer} "
+                    f"nan={has_nan} inf={has_inf} "
+                    f"max={t.float().abs().max().item():.4f}"
+                )
+                self._nan_diag_seen = True
+
+    def _stabilize_output(self, result: Any) -> Any:
         if isinstance(result, torch.Tensor):
             return self._copy_to_static(result)
         if isinstance(result, (tuple, list)):

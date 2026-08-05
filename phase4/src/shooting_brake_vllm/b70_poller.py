@@ -5,8 +5,9 @@ is set by the CUDA stream (via ``cuStreamWriteValue32``), the thread:
 
   1. Reads activation + routing data from pinned host buffers
   2. Translates global expert IDs → B70 compact slots
-  3. Dispatches to the B70 provider via the C ABI (``sb_b70_issue`` +
-     ``sb_b70_take``)
+  3. Dispatches to the B70 provider via :class:`B70ProviderClient`
+     (the same in-process ctypes binding used by the eager Tier-1/2
+     path — proven working, correct ABI signatures)
   4. Writes the result to the pinned output buffer
   5. Sets the completion flag (detected by ``cuStreamWaitValue32``)
 
@@ -17,69 +18,16 @@ round-robin order.
 
 from __future__ import annotations
 
-import ctypes
-import os
 import threading
 import time
 from typing import Any
 
 import numpy as np
+from vllm.logger import init_logger
 
 from .stream_signal import read_flag, write_flag_host
 
-# B70 C ABI types (from phase7/b70_capi.h)
-_B70_LIB: ctypes.CDLL | None = None
-_B70_HANDLE: ctypes.c_void_p | None = None
-
-
-def _ensure_b70_loaded() -> None:
-    """Load the B70 C ABI library and expert bank."""
-    global _B70_LIB, _B70_HANDLE
-    if _B70_LIB is not None:
-        return
-    lib_path = os.environ.get(
-        "SHOOTING_BRAKE_B70_LIB",
-        "phase7/libsb_b70_provider.so",
-    )
-    bank_path = os.environ.get(
-        "SHOOTING_BRAKE_B70_BANK",
-        "phase1/expert_bank.bin",
-    )
-    _B70_LIB = ctypes.CDLL(lib_path)
-    # sb_b70_create() → sb_b70_provider*
-    _B70_LIB.sb_b70_create.restype = ctypes.c_void_p
-    _B70_LIB.sb_b70_create.argtypes = []
-    # sb_b70_load(provider, bank_path) → int (0=success)
-    _B70_LIB.sb_b70_load.restype = ctypes.c_int
-    _B70_LIB.sb_b70_load.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-    # sb_b70_issue(provider, layer, hidden, M, ids, weights, topk) → int (seq)
-    _B70_LIB.sb_b70_issue.restype = ctypes.c_int
-    _B70_LIB.sb_b70_issue.argtypes = [
-        ctypes.c_void_p, ctypes.c_int,
-        ctypes.POINTER(ctypes.c_uint16),  # fp16 hidden
-        ctypes.c_int,                      # M
-        ctypes.POINTER(ctypes.c_int32),    # ids [M, topk]
-        ctypes.POINTER(ctypes.c_float),    # weights [M, topk]
-        ctypes.c_int,                      # topk
-    ]
-    # sb_b70_take(provider, seq, M, output) → int (0=success)
-    _B70_LIB.sb_b70_take.restype = ctypes.c_int
-    _B70_LIB.sb_b70_take.argtypes = [
-        ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
-        ctypes.POINTER(ctypes.c_float),  # fp32 output [M, hidden]
-    ]
-    # sb_b70_shutdown(provider)
-    _B70_LIB.sb_b70_shutdown.restype = None
-    _B70_LIB.sb_b70_shutdown.argtypes = [ctypes.c_void_p]
-    _B70_LIB.sb_b70_destroy.restype = None
-    _B70_LIB.sb_b70_destroy.argtypes = [ctypes.c_void_p]
-
-    _B70_HANDLE = ctypes.c_void_p(_B70_LIB.sb_b70_create())
-    if not _B70_HANDLE.value:
-        raise RuntimeError("sb_b70_create returned NULL")
-    rc = _B70_LIB.sb_b70_load(_B70_HANDLE, bank_path.encode())
-    if rc != 0:
-        raise RuntimeError(f"sb_b70_load failed: {rc}")
+logger = init_logger(__name__)
 
 
 class B70PollerThread(threading.Thread):
@@ -88,14 +36,24 @@ class B70PollerThread(threading.Thread):
     Each NVFP4 layer registers its signal/completion flag pair and
     pinned buffers via :meth:`register_layer`.  The polling loop
     checks all layers in round-robin.
+
+    The B70 provider (SYCL/oneAPI, `libsb_b70_provider.so`) is loaded
+    lazily on the FIRST call to :meth:`run`, via the same
+    ``_get_b70_provider`` singleton the eager Tier-1/2 dispatch path
+    uses — this guarantees identical, ABI-correct loading logic and a
+    single shared provider instance across every layer's poller
+    registration (no duplicate/conflicting `sb_b70_create` handles).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, placement: Any) -> None:
         super().__init__(daemon=True, name="B70Poller")
-        self._layers: list[dict[str, Any]] = []
+        self._placement = placement
+        self._layers: tuple[dict[str, Any], ...] = ()
+        self._layers_lock = threading.Lock()
         self._running = False
         self._stop_event = threading.Event()
         self._dispatch_count = 0
+        self._error: BaseException | None = None
 
     def register_layer(
         self,
@@ -106,23 +64,25 @@ class B70PollerThread(threading.Thread):
         pinned_ids: np.ndarray,
         pinned_weights: np.ndarray,
         pinned_output: np.ndarray,
-        topk: int,
-        hidden_dim: int,
     ) -> None:
         """Register a layer's buffers for polling.
 
+        Shapes are read from the arrays themselves; only the active
+        ``[:M]`` prefix is dispatched, where M arrives as the signal
+        flag's value.
+
         Args:
-            layer_idx: NVFP4 layer index (0-31).
-            signal_host: Host-side signal flag pointer (from alloc_host_mapped_flag).
-            completion_host: Host-side completion flag pointer.
-            pinned_hidden: FP16 numpy array [max_batch, hidden_dim] (pinned).
-            pinned_ids: Int32 numpy array [max_batch, topk] (pinned).
-            pinned_weights: Float32 numpy array [max_batch, topk] (pinned).
-            pinned_output: Float32 numpy array [max_batch, hidden_dim] (pinned).
-            topk: Number of experts per token (8 for Qwen3.6).
-            hidden_dim: Hidden dimension (2048 for Qwen3.6).
+            layer_idx: NVFP4 layer index (0-31), indexes the B70 bank.
+            signal_host: Host view of the signal flag; the CUDA stream
+                writes M here to request a dispatch.
+            completion_host: Host view of the completion flag; set to 1
+                once the result is in ``pinned_output``.
+            pinned_hidden: FP16 [max_batch, hidden] activation (pinned).
+            pinned_ids: Int32 [max_batch, topk] compact B70 slots, -1 skips.
+            pinned_weights: FP32 [max_batch, topk] routing weights.
+            pinned_output: FP32 [max_batch, hidden] result target.
         """
-        self._layers.append({
+        entry = {
             "layer_idx": layer_idx,
             "signal": signal_host,
             "completion": completion_host,
@@ -130,12 +90,15 @@ class B70PollerThread(threading.Thread):
             "ids": pinned_ids,
             "weights": pinned_weights,
             "output": pinned_output,
-            "topk": topk,
-            "hidden_dim": hidden_dim,
-        })
+        }
+        # Layers register lazily (first forward of each layer), which can
+        # happen while the poll loop is already running.  Swapping in a
+        # fresh tuple makes the loop's snapshot read atomic — it never
+        # observes a partially built list.
+        with self._layers_lock:
+            self._layers = (*self._layers, entry)
 
     def start(self) -> None:
-        _ensure_b70_loaded()
         self._running = True
         super().start()
 
@@ -148,67 +111,124 @@ class B70PollerThread(threading.Thread):
     def dispatch_count(self) -> int:
         return self._dispatch_count
 
+    @property
+    def error(self) -> BaseException | None:
+        """First fault seen by the poller, if any.
+
+        Results produced after a fault are NOT trustworthy: the
+        completion flag is raised regardless so the CUDA side cannot
+        hang, which means a failed dispatch leaves stale data in the
+        output buffer.  Exact failed-route recovery is Phase 9.
+        """
+        return self._error
+
     def run(self) -> None:
-        assert _B70_LIB is not None and _B70_HANDLE is not None
-        n_layers = len(self._layers)
+        # Lazy, same-singleton load: identical code path as the eager
+        # Tier-1/2 dispatch (`_get_b70_provider`), correct ABI signatures.
+        from .routed_experts import _get_b70_provider
+
+        try:
+            provider = _get_b70_provider(self._placement)
+        except BaseException as exc:  # noqa: BLE001 - see _fail_open
+            self._fail_open(exc, "B70 provider load failed")
+            return
 
         while self._running:
-            for entry in self._layers:
+            layers = self._layers  # atomic snapshot; see register_layer
+            pending = False
+            for entry in layers:
                 if not self._running:
                     break
-                sig = read_flag(entry["signal"])
-                if sig != 1:
+                # The signal VALUE is the batch size M; 0 means idle.
+                # The CUDA side bakes M into the captured graph, so no
+                # extra host transfer is needed to size the dispatch.
+                M = read_flag(entry["signal"])
+                if M == 0:
                     continue
+                pending = True
 
-                # Reset signal immediately so next replay can signal again
+                # Reset immediately so the next replay can signal again.
                 write_flag_host(entry["signal"], 0)
 
-                # Determine M from the pinned hidden data
-                # (We stored M in the first element of pinned_ids as a hack,
-                #  or we can check for non-zero rows.)
-                hidden = entry["hidden"]
-                ids = entry["ids"]
-                weights = entry["weights"]
-                output = entry["output"]
-                topk = entry["topk"]
-                layer = entry["layer_idx"]
+                try:
+                    seq = provider.issue(
+                        entry["layer_idx"],
+                        entry["hidden"][:M],
+                        entry["ids"][:M],
+                        entry["weights"][:M],
+                    )
+                    provider.take(seq, M, output=entry["output"][:M])
+                except BaseException as exc:  # noqa: BLE001 - see below
+                    # Record and keep serving.  The completion flag is
+                    # still raised below: the GPU is blocked in
+                    # cuStreamWaitValue32, which has no timeout, so
+                    # leaving it unset wedges the device permanently and
+                    # the process stops responding to SIGKILL.
+                    self._record_error(
+                        exc, f"B70 dispatch failed "
+                             f"(layer={entry['layer_idx']}, M={M})",
+                    )
 
-                # Find M: count non-zero id rows
-                # (The CUDA side writes M rows; rows beyond M are stale.)
-                # We read M from the ids array sentinel: ids[M, 0] == -1
-                # Actually, we store M separately — use the pinned_ids shape
-                # and detect M by checking the first column for -1 sentinel.
-                # Simpler: we pre-set M via a separate pinned scalar.
-                # For now, use max_batch as M (decode is always M=1 or small).
-                # TODO: store M in a pinned scalar for exact batch size.
-                M = hidden.shape[0]  # Use full buffer size for now
-
-                # Dispatch to B70
-                seq = _B70_LIB.sb_b70_issue(
-                    _B70_HANDLE,
-                    layer,
-                    hidden.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
-                    M,
-                    ids.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
-                    weights.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                    topk,
-                )
-
-                # Wait for B70 kernel completion
-                _B70_LIB.sb_b70_take(
-                    _B70_HANDLE,
-                    seq, M,
-                    output.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                )
-
-                # Signal completion
                 write_flag_host(entry["completion"], 1)
-
                 self._dispatch_count += 1
 
-            # Small sleep to avoid burning CPU when no signals
-            if not any(read_flag(e["signal"]) == 1 for e in self._layers):
+            # Idle back-off only when this sweep found nothing, so a
+            # burst of layer signals is drained without sleeping.
+            if not pending:
                 time.sleep(0.00001)  # 10μs
 
+    # -- fault containment ------------------------------------------------
+    #
+    # The CUDA side waits on the completion flag inside a captured graph.
+    # That wait cannot time out and cannot be interrupted, so any poller
+    # fault MUST still release every waiter — otherwise the GPU hangs and
+    # the process becomes unkillable.  Errors are recorded and surfaced
+    # via :attr:`error`; exact failed-route recovery is Phase 9.
 
-__all__ = ["B70PollerThread"]
+    def _record_error(self, exc: BaseException, context: str) -> None:
+        if self._error is None:
+            self._error = exc
+        logger.exception("Shooting Brake Tier 3: %s", context)
+
+    def _fail_open(self, exc: BaseException, context: str) -> None:
+        """Record a fatal fault, then release every present and future
+        waiter so the CUDA side unblocks instead of hanging forever."""
+        self._record_error(exc, context)
+        self._running = False
+        while True:
+            layers = self._layers
+            for entry in layers:
+                write_flag_host(entry["completion"], 1)
+            # Layers registered after the fault would otherwise wait on a
+            # dead thread; keep releasing until the engine tears down.
+            time.sleep(0.001)
+            if self._stop_event.is_set():
+                return
+
+
+# --- Process-wide singleton -------------------------------------------
+#
+# There is exactly ONE physical B70.  A single SYCL queue serializes all
+# dispatches anyway, so one poller thread serves every NVFP4 layer:
+# 32 spinning threads would only add scheduler contention and fight over
+# the same device.  Layers register into the shared instance as their
+# real layer index becomes known (first forward).
+
+_poller_singleton: B70PollerThread | None = None
+_poller_lock = threading.Lock()
+
+
+def get_b70_poller(placement: Any) -> B70PollerThread:
+    """Return the shared poller thread, creating it on first use.
+
+    The thread is NOT started here — the caller starts it once all
+    registrations for the first forward pass have landed.
+    """
+    global _poller_singleton
+    with _poller_lock:
+        if _poller_singleton is None:
+            _poller_singleton = B70PollerThread(placement)
+        return _poller_singleton
+
+
+__all__ = ["B70PollerThread", "get_b70_poller"]

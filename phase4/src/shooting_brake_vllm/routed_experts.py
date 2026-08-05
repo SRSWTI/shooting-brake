@@ -150,6 +150,48 @@ class HybridRoutedExperts(RoutedExperts):
         # Static output buffer for breakable CUDA graph compatibility.
         # Allocated lazily on first forward (needs hidden_dim from weights).
         self._static_output: torch.Tensor | None = None
+        # Tier 3: graph-compatible B70 dispatch via CUDA stream signaling.
+        # When enabled, B70 dispatch uses cuStreamWriteValue32/WaitValue32
+        # (capture-compatible) instead of Python/ctypes (not capture-compatible).
+        self._b70_graph_mode = (
+            os.environ.get("SHOOTING_BRAKE_B70_GRAPH") == "1"
+            and self._b70_device_cached
+            and self._hybrid_env
+        )
+        self._b70_poller: Any = None
+        self._b70_poller_registered = False
+        if self._b70_graph_mode:
+            # CUDA-side slot map (for graph-compatible gather).
+            self._b70_slot_map_cuda = torch.tensor(
+                self._b70_slot_map, device="cuda", dtype=torch.int32,
+            )
+            # Pinned buffers for routing data (D2H targets).
+            self._pinned_b70_ids = torch.empty(
+                self._b70_max_batch, 8, dtype=torch.int32,
+                pin_memory=True, device="cpu",
+            )
+            self._pinned_b70_weights = torch.empty(
+                self._b70_max_batch, 8, dtype=torch.float32,
+                pin_memory=True, device="cpu",
+            )
+            # Device-side result buffers (pre-allocated, no torch.empty in forward).
+            self._dev_b70_fp32 = torch.empty(
+                self._b70_max_batch, 2048, dtype=torch.float32, device="cuda",
+            )
+            self._dev_b70_bf16 = torch.empty(
+                self._b70_max_batch, 2048, dtype=torch.bfloat16, device="cuda",
+            )
+            # Signal/completion flags (host-mapped, accessible from both sides).
+            from .stream_signal import alloc_host_mapped_flag
+            self._signal_host, self._signal_dev = alloc_host_mapped_flag(0)
+            self._completion_host, self._completion_dev = alloc_host_mapped_flag(0)
+            # One shared poller serves every NVFP4 layer (single physical
+            # B70).  Registration is deferred to the first forward, where
+            # `_ensure_layer_device_map` resolves this layer's real index.
+            logger.info(
+                "Shooting Brake Tier 3: graph-compatible B70 dispatch "
+                "enabled for layer %s", self.layer_name,
+            )
         self.shooting_brake_provider = ShootingBrakeExpertProviderClient(
             qualified_model=qualified_model,
             layer_name=self.layer_name,
@@ -342,6 +384,62 @@ class HybridRoutedExperts(RoutedExperts):
             layer_idx, num_cuda,
         )
 
+    def _register_b70_poller(self, topk_ids: torch.Tensor) -> None:
+        """Bind this layer's flags + pinned buffers to the shared poller.
+
+        Deferred out of ``__init__`` for two reasons:
+
+        * the layer's real index is only resolvable from ``layer_name``
+          via ``_ensure_layer_device_map`` (the B70 expert bank is indexed
+          by NVFP4 layer, so a wrong index silently computes with the
+          wrong experts);
+        * loading the provider (SYCL/oneAPI + 13.5 GiB bank) during model
+          construction races with CUDA context setup and starves weight
+          loading of CPU.
+
+        Starting the thread here — on the first forward, i.e. the warmup
+        pass — guarantees the provider is fully live before any CUDA graph
+        capture begins.
+
+        Layers outside the NVFP4 bank (FP8 layers 32-39) own no B70
+        experts.  Under Tier 3 they become pure CUDA passthrough: the
+        partition/validate path would otherwise run ``.any()`` on every
+        forward, and a device-to-host sync is not capture-compatible.
+        Their route math is unchanged — with zero B70-owned experts the
+        partition produces no remote routes anyway.
+        """
+        from .b70_poller import get_b70_poller
+
+        layer_idx, _ = self._ensure_layer_device_map(topk_ids)
+        if not self.shooting_brake_placement.is_b70_capable(layer_idx):
+            self._b70_graph_mode = False
+            self._all_cuda_passthrough = True
+            self._b70_poller_registered = True
+            logger.info(
+                "Shooting Brake Tier 3: layer %d has no B70 experts — "
+                "all-CUDA passthrough", layer_idx,
+            )
+            return
+
+        poller = get_b70_poller(self.shooting_brake_placement)
+        poller.register_layer(
+            layer_idx=layer_idx,
+            signal_host=self._signal_host,
+            completion_host=self._completion_host,
+            pinned_hidden=self._b70_pinned_hidden.numpy(),
+            pinned_ids=self._pinned_b70_ids.numpy(),
+            pinned_weights=self._pinned_b70_weights.numpy(),
+            pinned_output=self._b70_pinned_output.numpy(),
+        )
+        if not poller.is_alive():
+            poller.start()
+        self._b70_poller = poller
+        self._b70_poller_registered = True
+        logger.info(
+            "Shooting Brake Tier 3: layer %d registered with B70 poller",
+            layer_idx,
+        )
+
     def forward_modular(
         self,
         x: torch.Tensor,
@@ -359,7 +457,27 @@ class HybridRoutedExperts(RoutedExperts):
         decorated with ``@eager_break_during_capture`` to create a graph
         break point for the B70 dispatch.
         """
-        if self._all_cuda_passthrough:
+        # Tier 3: bind this layer to the shared B70 poller on its FIRST
+        # forward.  This runs during vLLM's profiling/warmup pass — well
+        # before CUDA graph capture — so the 13.5 GiB expert bank load and
+        # SYCL queue creation never race with an active stream capture.
+        if self._b70_graph_mode and not self._b70_poller_registered:
+            self._register_b70_poller(topk_ids)
+        elif self._b70_poller is not None:
+            # A poller fault leaves stale data in the output buffer (the
+            # completion flag is raised regardless, to avoid wedging the
+            # GPU on an untimeoutable stream wait).  Replay runs no
+            # Python, so surface it here — the first eager forward after
+            # the fault — rather than returning silently wrong routes.
+            error = self._b70_poller.error
+            if error is not None:
+                raise RuntimeError(
+                    "Shooting Brake Tier 3: B70 poller faulted; routed-expert "
+                    "output is not trustworthy"
+                ) from error
+        # Prefill (large M) always uses all-CUDA — B70 buffers are sized
+        # for decode batches.  Decode (small M) uses hybrid/Tier 3.
+        if self._all_cuda_passthrough or x.shape[0] > self._b70_max_batch:
             return super().forward_modular(
                 x, topk_weights, topk_ids,
                 shared_experts, shared_experts_input,
@@ -393,6 +511,24 @@ class HybridRoutedExperts(RoutedExperts):
         """
         layer_idx, dml = self._ensure_layer_device_map(topk_ids)
         self._maybe_perform_vram_surgery(layer_idx)
+        if self._b70_graph_mode:
+            # Tier 3: pure CUDA stream ops — no partition, validation,
+            # stats, or any host-side sync.  Every op below is captured
+            # by torch.cuda.graph() without modification.
+            b70_ids = self._b70_slot_map_cuda[topk_ids]
+            cuda_weights = topk_weights * (b70_ids < 0).float()
+            cuda_topk_ids = (
+                self._cuda_remap[topk_ids]
+                if self._cuda_remap is not None
+                else topk_ids
+            )
+            self._b70_issue_graph(x, topk_ids, topk_weights)
+            y_cuda = super().forward_modular(
+                x, cuda_weights, cuda_topk_ids,
+                shared_experts, shared_experts_input,
+            )
+            y_b70 = self._b70_take_graph(x.shape[0])
+            return y_cuda + y_b70
         part = partition_routes(topk_ids, topk_weights, dml, layer_idx)
         validate_partition(
             part, self.shooting_brake_placement.b70_capable_layers
@@ -457,7 +593,15 @@ class HybridRoutedExperts(RoutedExperts):
         if self._hybrid_env and has_remote:
             cuda_weights = topk_weights * (~part.b70_mask).float()
 
-            if self._b70_device_cached and self._b70_async_cached:
+            if self._b70_graph_mode:
+                # Tier 3: graph-compatible B70 dispatch (pure CUDA stream ops).
+                self._b70_issue_graph(x, topk_ids, topk_weights)
+                y_cuda = super().forward_modular(
+                    x, cuda_weights, cuda_topk_ids,
+                    shared_experts, shared_experts_input,
+                )
+                y_b70 = self._b70_take_graph(x.shape[0])
+            elif self._b70_device_cached and self._b70_async_cached:
                 # Phase 8a: async overlap — B70 kernel runs during CUDA.
                 seq, b70_M = self._b70_issue(
                     x, topk_ids, topk_weights, part, layer_idx,
@@ -619,6 +763,74 @@ class HybridRoutedExperts(RoutedExperts):
         provider.take(sequence, M, output=pinned_output.numpy())
         # H2D from pinned (DMA) + cast FP32 → model dtype on GPU.
         return pinned_output.to(device, non_blocking=True).to(dtype)
+    def _b70_issue_graph(
+        self,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> None:
+        """Graph-compatible B70 issue — pure CUDA stream operations.
+
+        Replaces the eager-mode ``_b70_issue`` which uses .cpu().numpy()
+        and ctypes (not capture-compatible).  Every operation here is a
+        CUDA stream op captured by ``torch.cuda.graph()``:
+
+          1. dtype cast BF16→FP16 (CUDA)
+          2. D2H copy activation to pinned (cudaMemcpyAsync)
+          3. CUDA gather for slot-map translation
+          4. D2H copy routing data to pinned (cudaMemcpyAsync)
+          5. cuStreamWriteValue32 signal flag = M (Driver API)
+        """
+        from .stream_signal import write_flag
+        M = x.shape[0]
+
+        # 1-2. Activation: BF16→FP16, D2H to pinned.
+        x_fp16 = x.to(torch.float16)
+        self._b70_pinned_hidden[:M].copy_(x_fp16, non_blocking=True)
+
+        # 3. Slot-map translation via CUDA gather.
+        b70_ids = self._b70_slot_map_cuda[topk_ids]
+        b70_weights = topk_weights * (b70_ids >= 0).float()
+
+        # 4. D2H routing data.
+        self._pinned_b70_ids[:M].copy_(b70_ids, non_blocking=True)
+        self._pinned_b70_weights[:M].copy_(b70_weights, non_blocking=True)
+
+        # 5. Signal the poller.  The flag VALUE is M, so the poller
+        # dispatches exactly this batch instead of the whole buffer.
+        # M is a constant at capture time (one graph per batch size),
+        # so it is baked into the replayed write — no extra transfer.
+        write_flag(self._signal_dev, M)
+
+    def _b70_take_graph(
+        self,
+        M: int,
+    ) -> torch.Tensor:
+        """Graph-compatible B70 take — pure CUDA stream operations.
+
+        Replaces the eager-mode ``_b70_take`` which uses ctypes and
+        .to(device).  Every operation here is captured by the graph:
+
+          1. cuStreamWaitValue32 completion flag (Driver API)
+          2. H2D copy FP32 result to device (cudaMemcpyAsync)
+          3. dtype cast FP32→BF16 (CUDA)
+          4. cuStreamWriteValue32 reset completion (Driver API)
+        """
+        from .stream_signal import wait_flag, write_flag
+
+        # 1. Wait for B70 thread to finish.
+        wait_flag(self._completion_dev, 1)
+
+        # 2-3. H2D copy + dtype cast.
+        self._dev_b70_fp32[:M].copy_(
+            self._b70_pinned_output[:M], non_blocking=True,
+        )
+        self._dev_b70_bf16[:M].copy_(self._dev_b70_fp32[:M])
+
+        # 4. Reset completion for next replay.
+        write_flag(self._completion_dev, 0)
+
+        return self._dev_b70_bf16[:M]
 
     def _shadow_validate(
         self,

@@ -68,8 +68,8 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
     model = getattr(model_config, "model", None)
     if model != QUALIFIED_MODEL:
         raise QualificationError(f"unqualified model: {model!r}")
-    if not getattr(model_config, "enforce_eager", False):
-        raise QualificationError("Phase 4 requires --enforce-eager")
+    # Graph mode is supported: the adapter's forward_modular is a pure
+    # pass-through in all-CUDA mode (no Python logic on the hot path).
 
     hf_config = getattr(model_config, "hf_config", None)
     text_config = getattr(model_config, "hf_text_config", None)

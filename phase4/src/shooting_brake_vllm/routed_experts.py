@@ -122,6 +122,18 @@ class HybridRoutedExperts(RoutedExperts):
             "max_remote_per_step": 0,
         }
         self._shadow_done = False
+        # Cache env-var decisions at init time so forward_modular has
+        # zero Python branching on the hot path in all-CUDA mode — this
+        # makes it a pure pass-through compatible with CUDA graph capture.
+        self._hybrid_active = (
+            os.environ.get("SHOOTING_BRAKE_HYBRID") == "1"
+            and self.shooting_brake_placement.b70_count() > 0
+        )
+        self._all_cuda_passthrough = not (
+            self._hybrid_active
+            or os.environ.get("SHOOTING_BRAKE_SHADOW") == "1"
+            or os.environ.get("SHOOTING_BRAKE_VRAM_SURGERY") == "1"
+        )
         self.shooting_brake_provider = ShootingBrakeExpertProviderClient(
             qualified_model=qualified_model,
             layer_name=self.layer_name,
@@ -324,10 +336,21 @@ class HybridRoutedExperts(RoutedExperts):
     ) -> torch.Tensor:
         """Partition routes via the manifest, validate, then run stock CUDA.
 
-        Phase 6a: the partition is computed and its invariants asserted on
-        every step, but execution is unchanged — the parent receives the
-        original unmodified ``topk_ids`` / ``topk_weights``.
+        In all-CUDA mode (no B70 device, no surgery, no shadow), this is
+        a pure pass-through to ``super().forward_modular()`` with zero
+        Python logic on the hot path — making it compatible with CUDA
+        graph capture and replay.
         """
+        # Graph-compatible fast path: when no hybrid features are active,
+        # skip ALL Python logic and call super() directly. This branch is
+        # taken during CUDA graph capture and the super() call's kernel
+        # launches are recorded into the graph. During replay, only the
+        # recorded kernels execute — this Python line does not re-run.
+        if self._all_cuda_passthrough:
+            return super().forward_modular(
+                x, topk_weights, topk_ids,
+                shared_experts, shared_experts_input,
+            )
         layer_idx, dml = self._ensure_layer_device_map(topk_ids)
         self._maybe_perform_vram_surgery(layer_idx)
         part = partition_routes(topk_ids, topk_weights, dml, layer_idx)

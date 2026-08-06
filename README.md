@@ -1,9 +1,9 @@
 # Shooting Brake
 
-![Shooting Brake](/Users/rohit/Downloads/shooting.webp)
+![Shooting Brake](assets/Indecent-Porsche-911-Shooting-Brake-1.webp)
+---
 
 A shooting brake was never for everyone — it's the rare machine that refuses to sacrifice speed for capacity, built in limited numbers for people who wanted both. Shooting Brake makes the same bet on silicon, and does it first: the industry's first heterogeneous NVIDIA-Intel inference build. An RTX 5090 leads (32GB GDDR7, ~1.7TB/s bandwidth, full PCIe5.0 x16), handling what NVIDIA does best — fast, compute-bound prefill. Behind it, an Intel Arc Pro B70 brings 32GB of VRAM at roughly a quarter the cost per card, expanding the usable memory pool rather than chasing raw speed.
----
 
 ## The problem
 

@@ -169,7 +169,7 @@ def apply_config_env(config: str, placement: str) -> None:
     os.environ.update(env)
 
 
-def build_engine(max_num_seqs: int) -> Any:
+def build_engine(max_num_seqs: int, max_model_len: int) -> Any:
     from vllm.engine.arg_utils import AsyncEngineArgs
     from vllm.plugins import load_general_plugins
     from vllm.v1.engine.async_llm import AsyncLLM
@@ -180,7 +180,7 @@ def build_engine(max_num_seqs: int) -> Any:
         enforce_eager=False,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.90,
-        max_model_len=8192,
+        max_model_len=max_model_len,
         max_num_seqs=max_num_seqs,
         dtype="bfloat16",
         trust_remote_code=True,
@@ -415,7 +415,7 @@ async def reset_stats(engine: Any) -> None:
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
-    engine = build_engine(args.max_num_seqs)
+    engine = build_engine(args.max_num_seqs, args.max_model_len)
     try:
         # Warm up: the first request pays graph capture and lazy init.
         await stream_one(engine, DECODE_PROMPT, 16)
@@ -426,6 +426,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "model": MODEL,
             "placement": os.environ.get("SHOOTING_BRAKE_PLACEMENT", "all-cuda"),
             "max_num_seqs": args.max_num_seqs,
+            "max_model_len": args.max_model_len,
         }
         result["correctness"] = await run_correctness(engine)
         result["single_stream"] = await run_single_stream(
@@ -466,6 +467,11 @@ def main() -> int:
         "--context-lengths", type=int, nargs="+",
         default=[512, 2048, 4096, 8192],
         help="prompt lengths for the context sweep and capacity frontier",
+    )
+    parser.add_argument(
+        "--max-model-len", type=int, default=8192,
+        help="vLLM admission cap; the model supports 262144 natively. "
+             "Raise it to exercise the hybrid's KV capacity at long context.",
     )
     args = parser.parse_args()
 

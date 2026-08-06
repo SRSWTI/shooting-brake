@@ -45,9 +45,15 @@ cd "$REPO_ROOT"
 PLACEMENTS="${PLACEMENTS:-subset:8:8 subset:16:8 subset:24:64 split:128}"
 DECODE_TOKENS="${DECODE_TOKENS:-400}"
 CONCURRENCY="${CONCURRENCY:-1 8 32}"
+# Engine admission cap. The offload tradeoff is visible at short context,
+# so 8192 is a fast default; raise to 32768/131072 to also see the KV
+# capacity difference at long context (slower cells).
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+# Seconds to idle the GPU between runs, so the card is not pinned at the
+# power cap for the whole sweep. Pair with gpu_power.sh cap <watts>.
+REST_BETWEEN="${REST_BETWEEN:-15}"
 OUT_DIR="${OUT_DIR:-$PWD/phase10/results/offload}"
 mkdir -p "$OUT_DIR"
-
 export VLLM_ALLOW_INSECURE_SERIALIZATION=1
 export PATH="$REPO_ROOT/.venv/bin:${PATH:-}"
 # oneAPI is needed even in-process: the B70 provider loads SYCL.
@@ -65,11 +71,14 @@ run_one () {
     --config "$config" \
     --placement "${placement:-split:128}" \
     --out "$out" \
+    --max-model-len "$MAX_MODEL_LEN" \
     --trials 2 \
     --decode-tokens "$DECODE_TOKENS" \
     --batch-tokens 128 \
     --concurrency $CONCURRENCY \
     --context-lengths 2048
+  # Let the card cool before the next process grabs the GPU.
+  sleep "$REST_BETWEEN"
 }
 
 # Baseline first — same adapter, all-CUDA placement, no B70.

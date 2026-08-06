@@ -1,9 +1,8 @@
 # Shooting Brake
 
-**Heterogeneous MoE inference: one NVIDIA GPU for the brain, Intel Arc GPUs for the muscle.**
+![Shooting Brake](/Users/rohit/Downloads/shooting.webp)
 
-A shooting brake is a car that combines the speed of a coupe with the cargo capacity of an estate wagon. This system does the same thing for LLM inference — it pairs a fast NVIDIA RTX 5090 (the coupe) with cheaper Intel Arc Pro B70 GPUs (the cargo bay) to run Mixture-of-Experts models that wouldn't fit on the NVIDIA card alone, at a fraction of the cost of buying more NVIDIA hardware.
-
+A shooting brake was never for everyone — it's the rare machine that refuses to sacrifice speed for capacity, built in limited numbers for people who wanted both. Shooting Brake makes the same bet on silicon, and does it first: the industry's first heterogeneous NVIDIA-Intel inference build. An RTX 5090 leads (32GB GDDR7, ~1.7TB/s bandwidth, full PCIe5.0 x16), handling what NVIDIA does best — fast, compute-bound prefill. Behind it, an Intel Arc Pro B70 brings 32GB of VRAM at roughly a quarter the cost per card, expanding the usable memory pool rather than chasing raw speed.
 ---
 
 ## The problem
@@ -45,7 +44,7 @@ The architecture has a clear division of labor. The NVIDIA GPU owns everything l
   │                  Intel Arc Pro B70 (32 GB)                │
   │                                                          │
   │   Native C++ poller ──► NVFP4 expert kernels            │
-  │   (spins on flag)      (QuixiCore-XPU, MIT)              │
+  │   (spins on flag)      (QuixiCore-XPU, custom)              │
   │                         │                                │
   │                    weighted partial                      │
   └────────────────────────┬─────────────────────────────────┘

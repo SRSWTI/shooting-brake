@@ -343,17 +343,83 @@ QuixiCore-XPU remains the selected primary B70 provider source, llm-scaler remai
 | 5 — Compact expert ownership | **Complete; placement gate passed (2026-08-05)** | Versioned manifest (`shooting_brake_vllm.placement`) maps every `(layer, expert)` to exactly one owner for all 10,240 experts. Layers 0–31 (NVFP4) are B70-capable; layers 32–39 (FP8) are CUDA-forced. Slots validated dense/gap-free; B70-owned experts cross-checked against the real bank header (32×256). Manifest carries a `generation` id and round-trips to JSON (swappable for a future predictive/speculative offloader). `phase5/placement_test.py` passes all invariants + negatives. Adapter holds the manifest; execution stays all-CUDA until Phase 6. B70 is not a fake EP rank. Next: eager hybrid execution (Phase 6). |
 | 6 — Eager hybrid execution | **Complete; hybrid gate passed (2026-08-05)** | 6a: runtime route partition + invariants validated every step. 6b: shadow split-merge `Y_cuda + Y_b70 ≈ Y_full` confirmed (max_abs=0.0015, cosine=0.99999). 6c: real hybrid under `SHOOTING_BRAKE_HYBRID=1` — B70-route CUDA weights zeroed, B70 partial computed separately and added; token output identical to all-CUDA (`[271,760,7308,1238,220,19,16,369]`), hybrid path exercised (layer 31, 27 B70 routes). B70 partial currently via CUDA kernel (correctness-first); Phase 7+ uses actual B70 device. |
 | 7 — Continuous-batch decode and grouped prefill | **Complete; real-B70 hybrid gate passed (2026-08-05)** | In-process ctypes binding (`phase7/b70_capi.cpp` + `b70_binding.py`) wires the Intel Arc Pro B70 into the live vLLM forward pass. SYCL+CUDA coexist in one process. Under `B70_DEVICE=1`, B70-owned routes compute on the real B70 via QuixiCore NVFP4 (BF16→FP16 activation, global→compact slot translation, issue/take, FP32→BF16 result). `phase7/hybrid_b70_test.py` passes with exact token parity. M ≤ 128 per dispatch. Remaining production hardening: CUDA/B70 overlap (Phase 8), failure/restart (Phase 9). |
-| 8 — Piecewise CUDA graphs and overlap | **Phase 8a + 8.5 complete** | **8a (async overlap):** issue/take split, B70 kernel overlaps CUDA compute. Three-way parity verified. **8.5 (VRAM surgery):** B70-owned expert weights physically removed from CUDA VRAM — 6.445 GB freed (measured per-layer). Slices all per-expert tensors (weights, block scales, global scales, input scales), updates FusedMoEQuantConfig references, builds global→local remap for topk_ids. `phase8/vram_surgery_test.py` passes with exact token parity. Investigation confirmed no NVFP4 backend supports expert_map for EP=1 — surgery bypasses this by working within the adapter. **8b (CUDA graphs):** Deferred. |
-| 9 — Failure/restart operations | **Not implemented** | Add heartbeat, bounded timeouts/queues, provider restart and generation bump, exact batched failed-route recovery, rollback, and structured telemetry. |
-| 10 — Controlled production benchmark | **Not run** | Compare stock all-CUDA vLLM, CUDA+B70, CUDA+CPU cold experts, reduced-CUDA control, and native comparator with identical source/workload settings and full correctness/capacity/tail accounting. |
+| 8 — Piecewise CUDA graphs and overlap | **8a + 8.5 complete; 8b complete with one open risk** | **8a (async overlap):** issue/take split, B70 kernel overlaps CUDA compute. Three-way parity verified. **8.5 (VRAM surgery):** B70-owned expert weights removed from CUDA VRAM. Surgery now runs off `process_weights_after_loading`, not the first forward — vLLM sizes the KV cache from the *peak* memory of its profiling pass, so freeing later leaves the capacity unusable (KV cache 1.89 GiB before the fix, 8.64 GiB after). **8b (Tier 3, graph-compatible B70 dispatch):** the entire B70 dispatch is now native CUDA stream operations captured by a normal CUDA graph — pinned D2H copies, `cuStreamWriteValue32` to signal, `cuStreamWaitValue32` to join, H2D result copy. No Python, ctypes, `.item()`, or device sync on the decode path. The host watcher is a native thread in `libsb_b70_provider.so` (`sb_b70_poll_*`): a Python poll loop costs ~55 µs per wakeup on this host, more than the B70 kernel, and a spinning one starves the engine thread of the GIL. Breakable CUDA graphs (the Phase-8 plan's step 2) were implemented and abandoned — they disable torch.compile by design (vLLM PR #50750, RFC #42770) and produce garbage under Qwen3.6's GDN attention in **stock vLLM with no adapter**, so the incompatibility is upstream. **Open risk:** prefill batches above `SHOOTING_BRAKE_B70_MAX_BATCH` bypass Tier 3 into an all-CUDA pass-through that does not account for B70 routes on layers whose experts were sliced out; observed at M=260/564/1104/1487/2048. |
+| 9 — Failure/restart operations | **Partial** | Tier 3 fault containment only: the CUDA-side `cuStreamWaitValue32` cannot time out, so a dead poller wedges the device and the process stops responding to SIGKILL. Failed dispatches therefore still raise the completion flag, are counted, and raise on the next eager forward. Still required: heartbeat, bounded timeouts/queues, provider restart and generation bump, exact batched failed-route recovery, rollback, structured telemetry. |
+| 10 — Controlled production benchmark | **First controlled run recorded (2026-08-05)** | `phase10/benchmark.py` + `compare.py`: single-stream and batched sweeps, per-token ITL/TTFT streamed through `AsyncLLM`, prefill throughput, device-side route shares, poller counters, KV capacity, and a token-agreement matrix. Results below. Not yet run: CPU-cold-expert offload baseline, reduced-CUDA control, native comparator, cancellation/restart behaviour. |
 
 No row is marked complete merely because an analogous behavior works in Colibri.
 
+### Phase 10 first controlled result (2026-08-05)
+
+`unsloth/Qwen3.6-35B-A3B-NVFP4`, RTX 5090 + Arc Pro B70, `gpu_memory_utilization=0.90`,
+`max_model_len=8192`, `max_num_seqs=64`, temperature 0. Baseline is the same adapter
+with an all-CUDA placement, so the comparison isolates the hybrid path rather than the
+presence of the plugin.
+
+| | all-CUDA | `split:128` | `subset:16:8` |
+|---|---|---|---|
+| single-stream | 247.9 tok/s | 157.5 (63%) | **186.3 (75%)** |
+| ITL p50 | 3.99 ms | 6.30 | 5.34 |
+| ITL p99 | 4.82 ms | — | 6.12 |
+| prefill (1487 tok) | 23,295 tok/s | 24,029 | 15,298 |
+| KV cache | 211,696 tok | 905,472 | 888,704 |
+| B70 route share | 0% | 50.9% | 97.3% |
+| poller service mean | — | 91.1 µs | 296.0 µs |
+| dispatch errors | — | 0 | 0 |
+
+Capacity is reported as KV cache tokens, not free VRAM: vLLM allocates up to
+`gpu_memory_utilization` either way, so free VRAM is near-identical between
+configurations and hides the result entirely. **KV capacity is 4.2x.**
+
+Getting there took three fixes, each worth more than any estimate:
+
+1. **Dispatch was submission-bound, not compute-bound.** The QuixiCore kernel measures
+   46.5 µs at M=1, but a dispatch cost 243.5 µs: two empty `single_task` kernels
+   bracketed the real one purely to produce `kernel_us`, the queue had profiling
+   enabled, and `take()` waited on the kernel before submitting the D2H copy instead of
+   pipelining it. The queue is in-order, so `issue()` now enqueues everything and
+   `take()` waits once — 243.5 µs -> 91.1 µs, 133 -> 158 tok/s.
+2. **A B70-active layer costs a fixed dispatch per token.** `split:128` spreads 4096
+   offloaded experts over all 32 capable layers and pays that cost 32 times;
+   `subset:16:8` puts 3968 experts — the same capacity — in 16 layers. 158 -> 186 tok/s
+   for 1.8% less KV cache.
+3. **Surgery timing.** See the Phase 8.5 row.
+
+Token agreement is not exact and should not be expected to be: the B70's NVFP4 kernel
+differs from CUDA's in the last bits, and greedy decoding turns any near-tie into a
+permanent fork. Under `split:128`, 6/8 prompts matched exactly and the two forks
+diverged at tokens 25 and 30; under `subset:16:8`, where 97.3% of routes are on B70,
+3/8 matched with mean agreement of 18.2 tokens. Every hybrid continuation was coherent
+and correct — the sharpest example is `aujourd'hui` vs `aujourd’hui`, a one-token
+apostrophe difference. `compare.py` reports the divergence index alongside exact-match
+count, because exact match is the wrong bar for a different kernel.
+
+Batched throughput degrades with concurrency (70% of baseline at 4, 44% at 16), because
+a single physical B70 with one SYCL queue serializes every layer's dispatch while the
+5090 scales. Single-stream decode and prefill are the regimes where the hybrid holds up.
+
 ## Next concrete deliverables
 
-Work proceeds in the Phase 0–10 order from [`../plan.md`](../plan.md). Phases 0 through 8.5 are complete (including VRAM surgery — 6.445 GB freed). The immediate deliverable is:
+Work proceeds in the Phase 0–10 order from [`../plan.md`](../plan.md). Phases 0
+through 8 are complete; Phase 10 has a first controlled result. In priority order:
 
-1. **Phase 9 failure/restart operations:** heartbeat, bounded timeouts/queues, provider restart and generation bump, exact batched failed-route recovery, rollback, and structured telemetry.
-2. **Phase 10 production benchmark:** controlled measurement of stock all-CUDA vs CUDA+B70 hybrid with identical source/workload, full correctness/capacity/tail-latency accounting. This quantifies the capacity win (freed VRAM → larger KV cache → more concurrent requests) and any remaining latency overhead.
+1. **Close the prefill pass-through gap.** Batches above
+   `SHOOTING_BRAKE_B70_MAX_BATCH` skip Tier 3 and do not add B70 partials on
+   surgered layers. Either raise the bound (the pinned staging buffers are
+   per-layer today and should be shared — only one layer is ever in flight,
+   because the CUDA stream serializes issue/take) or chunk prefill through the
+   Tier 3 path. Note a 424-token prefill still matched all-CUDA bit for bit,
+   which the code path does not explain; resolve that before trusting either.
+2. **Close the remaining latency gap.** At `subset:16:8`, ITL is 5.34 ms against
+   3.99 ms all-CUDA: 1.35 ms over 16 active layers, ~84 µs exposed per layer
+   against 296 µs of poller service. The kernel is 46.5 µs, so most of the
+   service time is still dispatch overhead — three H2D copies per dispatch could
+   be one if the staging buffers were contiguous.
+3. **Sweep the placement curve.** `subset:<K>:<N>` trades capacity against
+   active-layer count; only `split:128` and `subset:16:8` have been measured.
+4. **Phase 9 proper:** heartbeat, bounded timeouts, provider restart and
+   generation bump, exact batched failed-route recovery, rollback, telemetry.
+5. **Phase 10 remaining arms:** CPU-cold-expert offload baseline, reduced-CUDA
+   control, native comparator, cancellation/restart behaviour.
 
 Only after Phase 4 and the subsequent ownership/hybrid gates pass may CUDA scatter/join, layer/logit/generation parity, continuous batching/prefill, piecewise graphs, operational recovery, or the Phase 10 production benchmark be described as active or complete.

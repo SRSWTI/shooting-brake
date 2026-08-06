@@ -156,7 +156,7 @@ class HybridRoutedExperts(RoutedExperts):
         # Phase 8.5: VRAM surgery state. When enabled, B70-owned expert
         # weights are removed from CUDA VRAM on the first forward call.
         self._vram_surgery_done = False
-        self._passthrough_warned = False
+        self._passthrough_seen: set[int] = set()
         self._cuda_remap: torch.Tensor | None = None
         self._layer_idx: int | None = None
         self._device_map_layer: torch.Tensor | None = None
@@ -538,16 +538,19 @@ class HybridRoutedExperts(RoutedExperts):
         # Prefill (large M) stays all-CUDA: the B70 staging buffers are
         # sized for decode batches.
         if self._all_cuda_passthrough or x.shape[0] > self._b70_max_batch:
-            if self._cuda_remap is not None and not self._passthrough_warned:
-                # This layer had its B70-owned experts sliced out of the
+            M = x.shape[0]
+            if self._cuda_remap is not None and M not in self._passthrough_seen:
+                # This layer's B70-owned experts were sliced out of the
                 # CUDA weights, so a raw pass-through cannot account for
-                # B70 routes. Report it rather than return quietly wrong
-                # routed output.
-                self._passthrough_warned = True
+                # B70 routes. Report it rather than quietly return
+                # incomplete routed output. Reported per distinct batch
+                # size, so the profiling pass (which is expected here)
+                # is distinguishable from real prefill (which is not).
+                self._passthrough_seen.add(M)
                 logger.warning(
                     "Shooting Brake: layer %d took the all-CUDA path with "
                     "M=%d after VRAM surgery — B70 routes are unaccounted",
-                    self.layer_index, x.shape[0],
+                    self.layer_index, M,
                 )
             return super().forward_modular(
                 x, topk_weights, topk_ids,

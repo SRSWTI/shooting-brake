@@ -72,4 +72,5 @@ exec "$REPO_ROOT/.venv/bin/vllm" serve "$MODEL" \
   --max-num-seqs "$MAX_NUM_SEQS" \
   --dtype bfloat16 \
   --trust-remote-code \
-  --disable-log-requests
+  --enable-mfu-metrics \
+  --kv-cache-metrics

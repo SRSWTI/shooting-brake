@@ -1,189 +1,334 @@
 # Shooting Brake
 
-Shooting Brake is a heterogeneous Mixture-of-Experts inference system for one NVIDIA RTX 5090 and one Intel Arc Pro B70. Upstream vLLM 0.26+ is the CUDA state owner and production serving runtime. A separate persistent native C++ provider uses qualified QuixiCore-XPU NVFP4 kernels as the primary B70 compute path; llm-scaler INT4 remains a qualified secondary fallback. The completed process-facing boundary exchanges activations, canonical post-top-k route metadata, and weighted hidden-size partials through a protocol-v2 pinned-memory request ring; expert weights do not move on the foreground path. The upstream-vLLM adapter is not yet connected to that boundary.
+**Heterogeneous MoE inference: one NVIDIA GPU for the brain, Intel Arc GPUs for the muscle.**
 
-[`plan.md`](plan.md) is the sole authoritative active architecture and implementation plan. Documents under `docs/` explain its contracts and evidence, but do not define a second delivery sequence.
+A shooting brake is a car that combines the speed of a coupe with the cargo capacity of an estate wagon. This system does the same thing for LLM inference — it pairs a fast NVIDIA RTX 5090 (the coupe) with cheaper Intel Arc Pro B70 GPUs (the cargo bay) to run Mixture-of-Experts models that wouldn't fit on the NVIDIA card alone, at a fraction of the cost of buying more NVIDIA hardware.
 
-> **Status:** Phase 0, Phase 1, Phase 2, and Phase 3 are complete. The frozen vLLM/CUDA baseline and compatibility package are recorded under `phase0/`; the native QuixiCore-XPU provider core and direct B70 gate are implemented under `phase1/`; the fixed-layout process ring, transport probe, isolated B70 ring server, and real-device integration gate are implemented under `phase2/`; and the independent source/artifact/provider mathematics gate is implemented under `phase3/`. Phase 3 evidence is generated and authenticated by `phase3/generate_reference.py`, frozen in `phase3/reference_fixture.bin`, and exercised on the physical B70 by `phase3/provider_math_test`. Phase 4—the Qwen-scoped upstream-vLLM out-of-tree adapter—is next. The adapter and end-to-end production hybrid path remain later work.
+---
 
-## Production architecture
+## The problem
 
-```mermaid
-flowchart LR
-    Client[OpenAI-compatible client] --> V[vLLM 0.26+ on RTX 5090]
-    V --> R[CUDA router and canonical top-k]
-    R --> H[HybridMoERunner / HybridRoutedExperts]
-    H --> C[CUDA-local routed experts]
-    H --> Ring[Versioned pinned-memory ring]
-    Ring --> P[Persistent native C++ B70 provider]
-    P --> K[QuixiCore-XPU NVFP4 kernels primary / llm-scaler INT4 secondary]
-    K --> Ring
-    Ring --> J[CUDA asynchronous copy and addition]
-    C --> J
-    J --> V
+Modern MoE models are enormous. A 35-billion-parameter MoE like Qwen3.6-35B-A3B needs ~23 GB just for expert weights — and that's the *small* one. The models people actually want to serve (300B+ parameters) need 150+ GB. An RTX 5090 has 32 GB. You'd need five or six of them at $4,000 each to hold one model.
+
+But here's the thing: in a MoE model, a **small set of "hot" experts handles most tokens**, and the rest sit idle most of the time. You're paying $4,000 per 32 GB of NVIDIA VRAM to store experts that rarely fire. That's like buying a fleet of sports cars to use as storage units.
+
+**Shooting Brake asks: what if the hot experts live on the fast NVIDIA GPU, and the cold experts live on cheap Intel VRAM?**
+
+The Intel Arc Pro B70 gives you 32 GB for $900 — **$28 per GB versus $125 per GB for a 5090.** Same capacity class, one-quarter the price. The trade-off: it's a different vendor, different driver stack, and there's no direct peer-to-peer link between NVIDIA and Intel GPUs. Shooting Brake is the software fabric that bridges that gap.
+
+---
+
+## How it works
+
+The architecture has a clear division of labor. The NVIDIA GPU owns everything latency-critical; the Intel GPU is a specialized accelerator for one job — computing expert feed-forward networks.
+
+```
+  ┌─────────────────────────────────────────────────────────┐
+  │                    RTX 5090 (32 GB)                      │
+  │                                                         │
+  │   vLLM scheduler ──► attention ──► router/top-k ──┐     │
+  │         │                          │               │     │
+  │    KV cache                     hot experts      route   │
+  │    (842K tokens)               (CUDA, fast)     decision │
+  │                                                         │
+  └─────────────────────────────────────┬───────────────────┘
+                                        │  cold expert routes
+                                        │  (hidden states + indices)
+                                        ▼
+                              ┌──────────────────┐
+                              │  Pinned host DRAM │
+                              │  (shared memory)  │
+                              └────────┬─────────┘
+                                       │  flag signal
+                                       ▼
+  ┌────────────────────────────────────┴────────────────────┐
+  │                  Intel Arc Pro B70 (32 GB)                │
+  │                                                          │
+  │   Native C++ poller ──► NVFP4 expert kernels            │
+  │   (spins on flag)      (QuixiCore-XPU, MIT)              │
+  │                         │                                │
+  │                    weighted partial                      │
+  └────────────────────────┬─────────────────────────────────┘
+                           │  result via host DRAM
+                           ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │  RTX 5090: join partials ──► residual ──► next layer     │
+  └──────────────────────────────────────────────────────────┘
 ```
 
-The RTX 5090 owns:
+**Per decode step, for each layer that has cold experts on the B70:**
 
-- the vLLM scheduler, continuous batching, and serving API;
-- attention, KV cache, and DeltaNet/GDN recurrent state;
-- router logits and canonical top-k selection;
-- hot routed experts and the shared expert;
-- residual processing, LM head, sampling, and request state.
+1. The 5090 computes the router logits and selects the top-8 experts.
+2. Routes destined for hot experts execute locally on the 5090 (fast path).
+3. Routes destined for cold experts get written to a pinned host-memory buffer.
+4. A `cuStreamWriteValue32` flag signals the B70's native poller thread.
+5. The B70 reads the inputs, runs its NVFP4 expert kernels, writes back weighted partials.
+6. A completion flag signals the 5090, which reads the partials and joins them into the residual stream.
 
-The isolated B70 provider owns:
+No NCCL. No oneCCL. No RDMA. No cross-vendor P2P (it doesn't exist). Just pinned host DRAM and CUDA stream-value flags — the lowest-common-denominator communication that works across any vendor boundary.
 
-- a compact, persistent bank of B70-resident routed experts;
-- global-expert-to-compact-slot mapping from an explicit placement manifest;
-- preallocated activation, route, scratch, and output buffers;
-- split/fused NVFP4 routed-expert execution using qualified QuixiCore-XPU kernels; separately qualified llm-scaler INT4 kernels remain the fallback;
-- one weighted compact wire partial shaped `[M_remote, hidden]`, its `token_row_map` into the full scheduler batch, and completion/failure metadata.
+### Why a native C++ poller?
 
-The CPU orchestrates placement, queues, telemetry, provider lifecycle, and exact emergency recovery. It performs no normal-path matrix computation. CPU recovery must recompute exactly the failed routes or fail the request explicitly; it must never hide a lost expert contribution.
+A Python poll loop costs ~55 µs per wakeup under the GIL and starves the engine thread. Shooting Brake moved the host-side watcher into a **native C++ thread** (`phase7/b70_capi.cpp`) that spins on `_mm_pause()` and signals the SYCL queue with sub-microsecond latency. This is what makes the dispatch path compatible with CUDA graph capture — zero Python on the decode path.
 
-## What is proven and what is planned
+### Why mixed precision?
 
-### Proven Colibri reference
+The model runs in two precision regimes, aligned to hardware boundaries:
 
-`colibri-variants/colibri-qwen36/` has demonstrated, on the native single-token GS64 path:
+- **Layers 0–31: NVFP4** (4-bit float) — these experts live on the B70, which has qualified QuixiCore-XPU NVFP4 kernels.
+- **Layers 32–39: FP8** (8-bit float) — these stay on the 5090, forced to CUDA.
 
-- persistent CUDA and B70 expert residency with compact `(layer, expert) -> slot` ownership;
-- exact Colibri signed-S4 GS64 conversion into the B70 ESIMD layout;
-- asynchronous issue/take staging through pinned host memory;
-- B70 fused gate/up/SiLU/down execution and routing-weighted accumulation;
-- one hidden-size partial returned to the CUDA state owner;
-- numerical agreement with the CPU reference;
-- exact failed-route recovery rather than silent contribution loss;
-- end-to-end CUDA+B70 generation with zero normal-path CPU expert fallback.
+This isn't a workaround — it's a design choice. NVFP4 halves the weight footprint, letting the B70 hold twice as many experts per gigabyte. The precision split is configured in the placement manifest and is swappable.
 
-These results establish the transport, correctness, placement, and failure-semantics baseline. Measurements such as the observed roughly `56–100 µs` one-token B70 issue/take range are Colibri reference measurements, not predictions or acceptance evidence for production vLLM continuous batching.
+---
 
-### Completed Phase-1 provider
+## What's been built
 
-`phase1/` now provides:
+### Complete and measured
 
-- explicit Intel-vendor and B70-identity selection;
-- exact 60-byte header, shape, stride, and 14,495,580,220-byte bank validation;
-- one-time upload of all 8,192 NVFP4 experts into contiguous device planes;
-- fixed activation, ID, weight, scratch, and output USM buffers;
-- protocol-v1 capability plus provider-core load/issue/take/health/shutdown;
-- an isolated startup-load/control process exposing capability, health, and shutdown;
-- split dispatch for `M <= 32` and fused dispatch for `M > 32`;
-- generation/sequence, layer, ID, busy-state, and shutdown rejection;
-- direct `M=1`, `M=2..32`, duplicate top-8, and `M=128` correctness with unchanged post-load allocation count.
+| milestone | what it does |
+|---|---|
+| **B70 NVFP4 provider** (`phase1/`, `phase7/`) | Persistent C++ process that loads 8,192 NVFP4 experts into B70 VRAM and executes them via QuixiCore-XPU kernels. Pipelined SYCL dispatch: issue() enqueues all work, take() waits once. |
+| **vLLM adapter** (`phase4/`) | Out-of-tree plugin (`shooting_brake_vllm`) that hooks into vLLM's MoE layer. Routes experts to CUDA or B70 based on a versioned placement manifest. Transparent to vLLM — the scheduler doesn't know experts left the GPU. |
+| **Tier 3 graph-compatible dispatch** | The entire B70 round-trip is native CUDA stream operations, captured by `torch.cuda.graph()`. The 5090's decode graph includes D2H copies, flag signals, and H2D result joins — no graph breaks. |
+| **VRAM surgery** | After weight loading, Shooting Brake frees the 5090 VRAM occupied by offloaded expert weights. This runs as a `process_weights_after_loading` hook, before vLLM sizes the KV cache. Result: **6.4 GB freed → KV cache 4× larger** (211K → 842K tokens). |
+| **Layer-subset placement** | Instead of spreading B70 ownership across all 32 capable layers (more dispatches), the `subset:K:C` policy concentrates it into the last K capable layers. Same capacity, fewer dispatches per token. |
+| **Benchmark harness** (`benchmarks/`) | Two tracks: guidellm SLO matrix (live server, sweeps context × load) and in-process offload sweep (sweeps architecture). Plus GPU power management for repeatable measurement. |
 
-The process-facing activation/route data plane is intentionally the Phase-2 pinned ring; stdin is control-only.
+### Benchmark results
 
-### Completed Phase-3 provider mathematics
+Measured on Qwen3.6-35B-A3B-NVFP4, single-stream decode, 512 output tokens:
 
-`phase3/generate_reference.py` authenticates the full expert-bank SHA-256 and frozen NVFP4 shard manifest, byte-audits sampled bank records against the NVFP4 artifact, computes independent float64 BF16-source and NVFP4 expert outputs for layers 0 and 31 and experts 0, 1, 7, 63, 127, 191, 254, and 255 across eight deterministic FP16 inputs, and freezes and validates `phase3/reference_fixture.bin`. On the physical B70, `phase3/provider_math_test` passed zero-remote no-publication; the `M=1..128` one-remote-route sweep; all-remote duplicate, non-sorted, boundary, and \(2^{-12}\)-weight `M=4`; mixed sparse and interleaved ownership with local-route invariance; process-ring identity, status, and allocation accounting; split- and fused-path sequence-bound injected failures; unsupported `M=0` and `M=129`; trusted bank, placement, and weight-bootstrap negatives; and compact resident list `255,0,7,63,127,191,254,1` with canonical-to-local remapping. This proves the B70 wire partial before CUDA scatter and artifact/source agreement. It does not claim upstream-vLLM integration, CUDA scatter/join, layer/logit/generation parity, concurrency or throughput, or production acceptance.
-
-### Remaining production path
-
-Production still requires:
-
-- CUDA scatter/join of the qualified compact `[M_remote, hidden]` provider output into the full `[M, hidden]` batch through the upstream-vLLM adapter;
-- Qwen-scoped `HybridMoERunner` and `HybridRoutedExperts` integration in upstream vLLM;
-- eager hybrid correctness, then continuous-batch decode and grouped prefill;
-- piecewise CUDA graph restoration and removal of exposed synchronization;
-- provider restart, stale-reply rejection, bounded timeouts, and exact recovery;
-- controlled production benchmarks against the same stock all-CUDA vLLM workload.
-
-The native Colibri provider is a comparator and oracle. It is not the production endpoint: it is single-token, has one in-order pending operation and fixed scratch, and does not implement vLLM scheduler-step aggregation or grouped prefill.
-
-## Non-negotiable invariants
-
-1. The RTX 5090 remains the authoritative state owner.
-2. vLLM computes the canonical router logits, selected expert IDs, and routing weights; the B70 never recomputes routing or top-k.
-3. Local and remote masks partition the selected routes without changing their weights.
-4. Every selected route contributes exactly once, is recomputed exactly after failure, or causes an explicit request failure.
-5. The B70 returns a routing-weighted `[M_remote, hidden]` wire partial; CUDA scatters it into a zero-initialized `[M, hidden]` buffer, leaving zero contribution for unstaged tokens.
-6. The remote partial joins on CUDA before any final tensor/expert-parallel reduction.
-7. Normal inference moves activations and partials, never expert weights.
-8. The steady-state decode path performs no allocation, `.item()`, device-wide synchronization, or CPU matrix computation.
-9. Protocol, provider, model, quantization, shape, top-k, placement, and weight generations are checked explicitly at startup and per request where applicable.
-10. Unsupported models and shapes remain on stock vLLM CUDA; model support is never inferred solely from upstream availability.
-
-The complete numerical and route contract is in [`docs/correctness.md`](docs/correctness.md).
-
-## Repository roles
-
-| Directory | Role | Boundary |
+| metric | all-CUDA (baseline) | hybrid (subset:16:8) |
 |---|---|---|
-| `QuixiCore-XPU/` | Primary MIT-licensed B70 NVFP4 MoE kernel source | Imported through its framework-neutral native SYCL ABI; do not fork without measured need |
-| `phase1/` | Completed native provider core, control process, full-bank artifact tooling, oracle, and direct tests | Supplies the qualified persistent B70 compute core |
-| `phase2/` | Completed protocol-v2 ring, transport probe, isolated B70 server, and process integration tests | Supplies the process-facing activation/route/partial boundary |
-| `phase3/` | Completed independent source/artifact/provider mathematics fixture and physical-B70 gate | Proves the B70 wire partial before CUDA scatter; does not prove the upstream join |
-| `vllm/` | Upstream vLLM 0.26+ CUDA state owner and production serving host | Keep changes out-of-tree and Qwen-scoped; do not apply llm-scaler's vLLM 0.21 patch wholesale |
-| `intel-xpu/llm-scaler/` | Qualified secondary B70 INT4 fallback and kernel-design reference | Not the primary provider and never the CUDA host |
-| `intel-xpu/vllm-xpu/vllm-xpu-kernels/` | Independently versioned binding/kernel surface for the secondary fallback | Qualify shapes, layouts, safety fixes, and numerics per fallback release |
-| `colibri-variants/colibri-qwen36/` | Proven native GS64 CUDA+B70 transport, correctness, placement, and failure reference | Comparator and oracle, not the production model host |
-| `exllamav3-quant-inference/` | Pinned-ring and CUDA stream-memory optimization reference | Borrow mechanisms only after the process ring is correct |
-| `lucebox/` | Traffic-aware placement policy reference | Static ownership comes first; policy concepts do not replace the execution contract |
-| `cudnn-frontend/` | CUDA graph and backend integration reference | NVIDIA-only; does not define the cross-vendor protocol |
-| `intel-xpu/intel-xpu-backend-for-triton/` | Later alternative kernel research | MXFP4 is not a drop-in replacement for Colibri integer W4/GS64 |
-| `intel-xpu/vllm-xpu/Xe-Fuse/` | BF16 fused-expert and epilogue reference | Not the initial quantized provider |
-| `intel-xpu/vllm-xpu/Xe-Forge/` | Post-correctness kernel tuning reference | Generated kernels are candidates, not correctness authorities |
-| `intel-xpu/vllm-xpu/vllm-xpu-breakdown/` | XPU profiling and replay reference | Add Shooting Brake route, residency, transport, and placement semantics |
-| `intel-xpu/LLM.xpu/` | Async request/shared-buffer lifecycle reference | Not a MoE runtime or production host |
-| `playground/llama.cpp/` | Experiments and comparison tooling | Not the selected production host |
+| decode throughput | 248 tok/s | **170–186 tok/s** |
+| ITL p50 | 4.0 ms | 5.3–5.9 ms |
+| KV cache capacity | 211,696 tokens | **842,038 tokens (4×)** |
+| B70 route share | 0% | 97.3% |
+| dispatch errors | — | **0** |
 
-Exact source provenance and limitations are recorded in [`docs/research.md`](docs/research.md).
+At **65,536-token context** (where things get interesting):
 
-## Active delivery order
+| metric | value |
+|---|---|
+| TTFT (prefill) | 2.9 s |
+| prefill throughput | 22,800 tok/s |
+| decode throughput | 170 tok/s |
+| ITL p50 | 5.8 ms |
 
-The only active sequence is Phase 0 through Phase 10 in [`plan.md`](plan.md):
+Decode speed stays flat across context lengths — the B70 dispatch overhead is a fixed per-layer cost that doesn't grow with sequence length. That's the key property: **once the prompt is prefilled, decode is decode, whether the prompt was 1K or 65K tokens.**
 
-0. Freeze baselines and compatibility contracts. **Complete.**
-1. Build and directly qualify the isolated QuixiCore-XPU B70 provider. **Complete.**
-2. Implement the batched versioned pinned-memory protocol. **Complete.**
-3. Validate provider mathematics independently. **Complete.**
-4. Add the Qwen-scoped upstream-vLLM out-of-tree adapter.
-5. Load compact immutable expert ownership.
-6. Integrate eager hybrid execution.
-7. Add continuous-batch decode and grouped prefill.
-8. Restore piecewise CUDA graphs and remove exposed waits.
-9. Qualify failure, restart, recovery, and operations.
-10. Run the controlled production benchmark.
+The 32% single-stream speed gap versus all-CUDA is the expected cost of offloading. The 4× KV capacity gain is the payoff. At long context and high concurrency — where all-CUDA runs out of KV blocks and starts refusing requests — the hybrid keeps serving.
 
-[`docs/implementation-plan.md`](docs/implementation-plan.md) is a companion gate checklist for those phases. It defers to `plan.md` if wording diverges and contains no independent Stage or GLM-first sequence.
+### What was hard (and how we solved it)
 
-## Immediate next step
+These are the engineering decisions that made the system work. Details are in the linked docs; the headlines:
 
-Execute Phase 4: add the Qwen-scoped `HybridMoERunner`, `HybridRoutedExperts`, and `ShootingBrakeExpertProviderClient` as an out-of-tree upstream-vLLM adapter. First prove that all-CUDA mode through the adapter matches stock vLLM output and performance within measurement noise; only then enable B70 routes and implement the CUDA scatter/join of the already-qualified wire partial.
+- **Cross-vendor communication has no P2P.** NVIDIA and Intel GPUs share no address space. The only path is through host DRAM. We built a pinned-memory ring with `cuStreamWriteValue32`/`WaitValue32` flags as the signal mechanism — the lowest-friction cross-vendor handshake available. ([`docs/expert-fabric.md`](docs/expert-fabric.md))
+
+- **CUDA graphs can't cross vendor boundaries.** We made the B70 dispatch entirely native CUDA stream ops (D2H copies, flag writes) that get captured inside the 5090's own graph. The host watcher is a native C++ thread, so no Python runs during graph replay. ([`docs/architecture.md`](docs/architecture.md))
+
+- **vLLM sizes KV cache from profiling peak.** If VRAM surgery ran during profiling, the freed weights distorted the KV budget. We moved surgery to the `process_weights_after_loading` hook — before profiling, so vLLM sees the real peak and allocates correctly. This alone gave 4.6× more KV cache.
+
+- **Breakable CUDA graphs produce garbage with GDN attention.** Qwen3.6 uses Gated DeltaNet (GDN) hybrid attention (30 GDN + 10 full-attention layers). vLLM's breakable graph mode corrupts GDN state on replay — a known upstream bug (vLLM #51008). We route around this: Tier 3 dispatch works with normal (full) CUDA graphs, which are compatible with GDN.
+
+---
+
+## The hardware reality
+
+### The PCIe bottleneck we found
+
+The current dev machine (Intel Core Ultra 9 285K, Z890 motherboard) has a critical topology limitation:
+
+```
+  5090  ──► CPU direct PCIe 5.0 x16  =  64 GB/s    ✓ full speed
+  B70   ──► PCH (chipset) PCIe 3.0 x4 =  3.9 GB/s  ✗ 16× narrower
+```
+
+The consumer CPU has only 20 PCIe 5.0 lanes. The 5090 takes 16, the NVMe takes 4, and the B70 gets forced onto the chipset's PCIe 3.0 x4 port — a 3.9 GB/s straw. This is the dominant cost in dispatch overhead at batched sizes.
+
+At single-stream (M=1), payloads are tiny (~32 KB/layer), so PCIe **latency** matters more than bandwidth — the gap is modest. At concurrency (M=16+), payloads grow and the 3.9 GB/s ceiling becomes a hard wall.
+
+### What would help
+
+| change | impact | why |
+|---|---|---|
+| **HEDT platform** (Threadripper Pro / Xeon W, 128+ PCIe 5.0 lanes) | **the single biggest lever** | Moves the B70 from PCH (3.9 GB/s) to direct CPU PCIe 5.0 x16 (64 GB/s) — 16× more bandwidth. Also enables multiple B70s, each on direct lanes. |
+| Multi-queue B70 dispatch (software) | **high** | Breaks the single-SYCL-queue serialization that limits batched throughput. Biggest software win. |
+| Frequency-aware placement (software) | **high** | Routes experts to B70 by measured hotness — hot experts stay on the 5090, cold ones go to B70. Fewer dispatches for the same capacity. |
+| Merged H2D copies (software) | **medium** | Contiguous pinned staging buffer, one memcpy per dispatch. Lowers the 91 µs dispatch floor. |
+| NUMA pinning | **N/A on current machine** | Single socket, single NUMA node — no cross-socket penalty. Would matter on dual-socket EPYC. |
+| Faster DRAM | **negligible** | DRAM (~80 GB/s) is 20× overprovisioned vs the B70's PCIe path (3.9 GB/s). Never the bottleneck. |
+
+---
+
+## The economics
+
+For expert weight storage — the bulk of a large MoE — the metric that matters is **$ per GB of VRAM**:
+
+```
+  B70 (32 GB)     $900     →  $28 / GB
+  5080 (16 GB)    $1,250   →  $78 / GB
+  5090 (32 GB)    $4,000   →  $125 / GB
+```
+
+The B70 is **4.5× cheaper per GB** than the 5090. For cold expert storage (experts that rarely fire), this is the right hardware — you're paying for capacity, not speed.
+
+### Why you still need NVIDIA
+
+The NVIDIA GPU owns the parts the B70 **cannot do**:
+
+- **vLLM itself** — the scheduler, continuous batching, paged attention, CUDA graph capture. There is no vLLM for Intel GPU.
+- **Attention** — FlashAttention and the GDN/flash-linear-attention kernels are CUDA-only. The B70 has no attention implementation.
+- **KV cache** — random-access memory pattern needs the 5090's 1,792 GB/s bandwidth.
+- **Prefill** — compute-bound; tensor cores dominate.
+- **Hot experts** — the small set of experts that fire most often should stay on the fastest available silicon.
+
+The B70 does exactly one thing: **dense FFN/expert computation via NVFP4 kernels.** That happens to be where most of a MoE model's *parameters* live.
+
+---
+
+## The vision: 300B models on a budget
+
+The architecture extends naturally to larger models. A 300B-parameter MoE (13B active) in NVFP4 is ~150 GB of expert weights. The configurations:
+
+| config | NVIDIA side | B70 side | total VRAM | cost |
+|---|---|---|---|---|
+| **1× 5090 + 4× B70** | 32 GB (hot experts + attention + KV) | 128 GB (cold bank) | 160 GB | **$7,600** |
+| 1× 5090 + 5× B70 | 32 GB | 160 GB | 192 GB | $8,500 |
+| 5× 5090 (homogeneous) | 160 GB | — | 160 GB | **$20,000** |
+
+One 5090 plus four B70s delivers the same 160 GB at **2.6× lower cost** than five 5090s. The 5090 owns the hot path (attention, hot experts, KV cache); the B70s hold the cold expert bank. Shooting Brake's placement manifest routes tokens accordingly.
+
+This requires a HEDT platform (Threadripper Pro / Xeon W) to give each B70 a direct PCIe 5.0 connection — the consumer platform can't feed even one B70 at full speed today.
+
+---
+
+## Roadmap
+
+### Software optimizations (current hardware)
+
+These squeeze maximum value from the existing 3.9 GB/s B70 path:
+
+1. **Frequency-aware placement** — collect route frequencies during serving, build a hot/cold manifest, keep hot experts on the 5090. Highest-value optimization.
+2. **Multi-queue B70 dispatch** — break single-SYCL-queue serialization. Biggest throughput lift at concurrency.
+3. **Merged H2D copies** — one contiguous pinned staging buffer, one memcpy. Lowers dispatch floor.
+4. **Shared pinned buffers** — module-level singletons, raise max batch for prefill through Tier 3.
+
+### Hardware upgrades
+
+5. **HEDT platform** — Threadripper Pro or Xeon W with 128+ PCIe 5.0 lanes. Moves B70 from 3.9 GB/s to 64 GB/s. The single highest-impact change.
+6. **Multiple B70s** — scale the cold expert bank. Each B70 adds 32 GB at $900. Requires the HEDT platform for direct lanes.
+
+### Multi-GPU NVIDIA side
+
+7. **Tensor-parallel support** — the architecture's principle is agnostic to the CUDA GPU configuration (1× 5090 or 3× 5080), but the current implementation is single-CUDA-device. Supporting TP=2/3 across multiple NVIDIA cards needs:
+   - The adapter to work with vLLM's tensor-parallel execution model
+   - Coordinated B70 access from multiple CUDA workers
+   - Surgery/placement logic that accounts for distributed weights
+   
+   This is real engineering (estimated 2–3 weeks), not a config flip. The benefit: **3× RTX 5080 (48 GB, $3,750)** could replace one 5090 (32 GB, $4,000) for less money and more VRAM — but consumer cards lack NVLink, so all-reduce runs over PCIe, adding per-layer overhead. The trade works best when VRAM per NVIDIA card is the binding constraint.
+
+### Production hardening
+
+8. **Phase 9** — heartbeat monitoring, bounded timeouts, provider restart, generation bumping, batched failed-route recovery.
+9. **Full SLO benchmark** — complete the guidellm matrix across all context lengths (1K–127K) and load profiles (synchronous, concurrent, sweep).
+
+---
+
+## Quick start
+
+### Prerequisites
+
+```bash
+# One-time: build the B70 provider (needs oneAPI + icpx)
+source /opt/intel/oneapi/setvars.sh --force
+cd phase7 && make
+cd ../phase4 && uv pip install --python .venv/bin/python --no-deps -e .
+```
+
+### Serve the hybrid model
+
+```bash
+# Shell 1: launch the hybrid server (5090 + B70, subset:16:8 placement)
+bash benchmarks/serve_hybrid.sh
+
+# Verify it's up
+curl -s http://127.0.0.1:8000/health
+```
+
+### Run benchmarks
+
+```bash
+# Track A: SLO matrix against the live server (context × load profiles)
+bash benchmarks/run_matrix.sh
+
+# Track B: in-process offload sweep (no server needed, sweeps architecture)
+bash benchmarks/run_offload_sweep.sh
+
+# Compare all-CUDA vs hybrid
+python benchmarks/compare.py
+```
+
+Benchmark details, metrics, and the offload design space are in [`benchmarks/README.md`](benchmarks/README.md).
+
+---
+
+## Key environment variables
+
+| variable | default | purpose |
+|---|---|---|
+| `VLLM_PLUGINS` | `shooting_brake_vllm` | Load the Shooting Brake adapter |
+| `SHOOTING_BRAKE_HYBRID` | `0` | Enable B70 expert offload |
+| `SHOOTING_BRAKE_PLACEMENT` | `split:128` | Expert placement policy (`split:N`, `subset:K:C`, `all-cuda`) |
+| `SHOOTING_BRAKE_B70_DEVICE` | `1` | Intel GPU device index |
+| `SHOOTING_BRAKE_VRAM_SURGERY` | `0` | Free 5090 VRAM occupied by offloaded weights |
+| `SHOOTING_BRAKE_B70_GRAPH` | `0` | Enable Tier 3 graph-compatible dispatch |
+| `SHOOTING_BRAKE_MODEL` | — | HuggingFace model ID |
+
+---
+
+## Repository structure
+
+| directory | what's inside |
+|---|---|
+| `phase1/` | Native B70 NVFP4 provider core — expert bank, SYCL kernels, control process |
+| `phase4/` | vLLM out-of-tree adapter — routing, placement, hybrid forward, VRAM surgery |
+| `phase7/` | Native C++ poller and C ABI — `B70Poller` class, `sb_b70_*` functions |
+| `benchmarks/` | SLO matrix, offload sweep, comparison, GPU power management |
+| `QuixiCore-XPU/` | Primary MIT-licensed B70 NVFP4 MoE kernel source |
+| `colibri-variants/` | Proven CUDA+B70 reference (oracle/comparator) |
+| `docs/` | Detailed architecture, contracts, evidence, and progress docs |
+
+---
 
 ## Documentation
 
-`plan.md` is authoritative. The 13 documents in `docs/` provide the supporting architecture, contracts, evidence, and historical progress:
+For deep dives into specific areas:
 
-| Document | Scope |
+| document | scope |
 |---|---|
-| [`docs/architecture.md`](docs/architecture.md) | Production boundaries, data flow, ownership, repository roles, and non-goals |
-| [`docs/implementation-plan.md`](docs/implementation-plan.md) | Companion Phase 0–10 gates and evidence checklist; subordinate to `plan.md` |
-| [`docs/progress.md`](docs/progress.md) | Completed Phase-0/Phase-1 evidence plus remaining production status |
-| [`docs/correctness.md`](docs/correctness.md) | Exactly-once route semantics, numerical agreement, stale-work rejection, and recovery |
-| [`docs/hardware.md`](docs/hardware.md) | RTX 5090/B70 topology, host-staged transport, and hardware qualification |
-| [`docs/model-format.md`](docs/model-format.md) | Weight formats, conversion, provider prepack, and artifact manifests |
-| [`docs/expert-fabric.md`](docs/expert-fabric.md) | Provider API, versioned pinned ring, lifecycle, and weighted-partial contract |
-| [`docs/benchmarking.md`](docs/benchmarking.md) | Device-local, transport, hybrid, and end-to-end measurement rules |
-| [`docs/placement.md`](docs/placement.md) | Compact static ownership and later traffic-calibrated placement |
-| [`docs/scheduling.md`](docs/scheduling.md) | Decode, continuous batching, grouped prefill, deadlines, and join policy |
-| [`docs/memory.md`](docs/memory.md) | CUDA, B70, pinned-host, state, and recovery memory budgets |
-| [`docs/risk-register.md`](docs/risk-register.md) | Hard stops, failure modes, and unresolved feasibility risks |
-| [`docs/research.md`](docs/research.md) | Source provenance, inspected revisions, prior art, and build-versus-borrow decisions |
+| [`docs/architecture.md`](docs/architecture.md) | Production boundaries, data flow, ownership model |
+| [`docs/progress.md`](docs/progress.md) | Phase-by-phase completion evidence and current status |
+| [`docs/correctness.md`](docs/correctness.md) | Route semantics, numerical agreement, failure recovery |
+| [`docs/hardware.md`](docs/hardware.md) | GPU topology, host-staged transport, hardware qualification |
+| [`docs/expert-fabric.md`](docs/expert-fabric.md) | Provider API, pinned ring protocol, weighted-partial contract |
+| [`docs/placement.md`](docs/placement.md) | Static ownership, layer-subset policy, future frequency-aware routing |
+| [`docs/benchmarking.md`](docs/benchmarking.md) | Measurement rules and methodology |
+| [`docs/memory.md`](docs/memory.md) | CUDA, B70, pinned-host, and KV memory budgets |
+| [`benchmarks/README.md`](benchmarks/README.md) | Benchmark tracks, metrics, offload design space, optimization roadmap |
+| [`docs/research.md`](docs/research.md) | Source provenance, prior art, build-vs-borrow decisions |
+
+---
+
+## Model
+
+**Qwen3.6-35B-A3B-NVFP4** — 40 layers, 256 experts per layer (top-8 routing), hidden size 2048. 30 GDN (Gated DeltaNet) + 10 full-attention layers. Native context: 262,144 tokens.
+
+Expert bank: `phase1/expert_bank.bin` — 13.5 GB, 8,192 NVFP4 experts.
+
+---
 
 ## One-line definition
 
-> Shooting Brake keeps scheduling and sequential model state in upstream vLLM on one RTX 5090, while one isolated B70 provider executes qualified resident routed experts and returns versioned weighted partials without normal-path CPU matrix compute.
-
-## Reproducing the proven Colibri reference baseline
-
-This command reproduces an existing all-5090 Colibri comparison baseline; it does not run or validate the planned vLLM+B70 production path.
-
-```bash
-cd colibri-variants/colibri-qwen36/c
-SNAP="/home/shooting-brake007/.cache/huggingface/hub/models--Kreuzzelg--qwen36-35b-a3b-colibri-i4-gs64/snapshots/c619aa594ad1e70af82168fb6b4878427896e21c"
-TOK="$SNAP/tokenizer.json"
-COLI_CUDA=1 COLI_TIMERS=1 CUDA_EXPERT_GB=30 N_NEW=256 \
-  SNAP="$SNAP" TOK="$TOK" ./qwen36 256 4 /tmp/qwen_bench.txt
-```
+> Shooting Brake keeps scheduling, attention, and KV cache in upstream vLLM on one RTX 5090, while Intel Arc Pro B70 GPUs execute offloaded routed experts through pinned-memory dispatch — serving models that wouldn't fit on the NVIDIA card alone, at one-quarter the cost per gigabyte.

@@ -33,6 +33,7 @@ from shooting_brake_vllm.placement import (
     AllCudaPolicy,
     SplitPolicy,
     InterleavedPolicy,
+    LayerSubsetPolicy,
     build_placement,
     build_for_qualified,
     policy_from_name,
@@ -136,6 +137,63 @@ def main() -> None:
             p_split.owners[layer][e].device is Device.CUDA
             for layer in range(q.bank_layers, nl)
             for e in range(ne)
+        ),
+    )
+
+    # ---- subset: same capacity, fewer B70-active layers -----------------
+    # A B70-active layer costs one dispatch per token, and that cost is
+    # fixed regardless of how many routes it carries.  subset trades
+    # experts-per-layer against active-layer count to hold capacity while
+    # paying the fixed cost fewer times.
+    p_subset = build_placement(
+        LayerSubsetPolicy(active_layers=16, cuda_per_layer=8),
+        num_layers=nl, num_experts=ne, b70_capable=capable,
+    )
+    validate_placement(p_subset)
+    active = p_subset.b70_active_layers()
+    expect_ok("subset:16:8 -> 16 active layers", len(active) == 16)
+    expect_ok(
+        "subset active layers are the last capable ones",
+        active == tuple(range(16, 32)),
+    )
+    expect_ok(
+        "subset:16:8 -> 16 x 248 B70", p_subset.b70_count() == 16 * (ne - 8)
+    )
+    expect_ok(
+        "subset leaves early capable layers all-CUDA",
+        all(
+            p_subset.owners[layer][e].device is Device.CUDA
+            for layer in range(16)
+            for e in range(ne)
+        ),
+    )
+    expect_ok(
+        "subset inactive layer reports is_b70_active False",
+        not p_subset.is_b70_active(0) and p_subset.is_b70_active(31),
+    )
+    # Every active layer must offload the same expert ids: the provider
+    # uploads one resident set for the whole bank.
+    resident = tuple(
+        e for e in range(ne)
+        if p_subset.owners[active[0]][e].device is Device.B70
+    )
+    expect_ok(
+        "subset active layers share one resident set",
+        all(
+            tuple(
+                e for e in range(ne)
+                if p_subset.owners[layer][e].device is Device.B70
+            ) == resident
+            for layer in active
+        ),
+    )
+    bank_layers, bank_experts = read_bank_header()
+    expect_ok(
+        "subset covered by bank",
+        b70_bank_covers(
+            p_subset,
+            bank_layers=bank_layers,
+            bank_experts_per_layer=bank_experts,
         ),
     )
 

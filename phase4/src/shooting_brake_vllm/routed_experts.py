@@ -34,14 +34,18 @@ def _placement_policy_name() -> str:
     return os.environ.get("SHOOTING_BRAKE_PLACEMENT", "all-cuda")
 
 def _build_b70_slot_map(placement: Placement) -> np.ndarray:
-    """[num_experts] int32: B70 compact slot for each global expert, -1 for CUDA.
+    """[num_experts] int32: B70 compact slot per global expert, -1 for CUDA.
 
-    All B70-capable layers share the same resident set (guaranteed by the
-    SplitPolicy / InterleavedPolicy placement families), so layer 0 is
-    representative.
+    Every B70-active layer offloads the same expert ids, so one map
+    serves them all. Layer 0 is not necessarily one of them — a subset
+    policy may leave it entirely on CUDA — so read from the first layer
+    that actually owns B70 experts.
     """
     slot_map = np.full(placement.num_experts, -1, dtype=np.int32)
-    for expert_id, owner in enumerate(placement.owners[0]):
+    active = placement.b70_active_layers()
+    if not active:
+        return slot_map
+    for expert_id, owner in enumerate(placement.owners[active[0]]):
         if owner.device is Device.B70:
             slot_map[expert_id] = owner.slot
     return slot_map
@@ -64,9 +68,14 @@ def _get_b70_provider(placement: Placement) -> Any:
     bank_path = os.environ.get(
         "SHOOTING_BRAKE_B70_BANK", "phase1/expert_bank.bin"
     )
+    # Every B70-active layer offloads the same expert ids — one resident
+    # set covers the whole bank — but layer 0 is not necessarily active
+    # (a subset policy may leave it entirely on CUDA), so read the set
+    # from the first layer that actually owns B70 experts.
+    reference_layer = placement.b70_active_layers()[0]
     resident = sorted(
         e for e in range(placement.num_experts)
-        if placement.owners[0][e].device is Device.B70
+        if placement.owners[reference_layer][e].device is Device.B70
     )
     resident_np = np.array(resident, dtype=np.int32)
     max_batch = int(os.environ.get("SHOOTING_BRAKE_B70_MAX_BATCH", "128"))
@@ -147,6 +156,7 @@ class HybridRoutedExperts(RoutedExperts):
         # Phase 8.5: VRAM surgery state. When enabled, B70-owned expert
         # weights are removed from CUDA VRAM on the first forward call.
         self._vram_surgery_done = False
+        self._passthrough_warned = False
         self._cuda_remap: torch.Tensor | None = None
         self._layer_idx: int | None = None
         self._device_map_layer: torch.Tensor | None = None
@@ -434,20 +444,23 @@ class HybridRoutedExperts(RoutedExperts):
     def _register_b70_poller(self, layer_idx: int) -> None:
         """Bind this layer's flags and pinned buffers to the shared poller.
 
-        Layers outside the NVFP4 bank (FP8 layers 32-39) own no B70
-        experts, so under Tier 3 they become pure CUDA passthrough: the
-        partition/validate path runs ``.any()`` on every forward, and
-        that device-to-host sync is not capture-compatible.  Their route
-        math is unchanged — with zero B70-owned experts the partition
+        A layer that owns no B70 experts becomes pure CUDA passthrough.
+        That covers the FP8 layers 32-39, which the bank does not span,
+        and every layer a subset placement leaves on CUDA. The gate is
+        ownership, not bank capability: dispatching a layer with nothing
+        to compute still costs a full round trip per token, which is the
+        exact cost a subset placement exists to avoid.
+
+        Route math is unchanged — with no B70-owned experts the partition
         produces no remote routes anyway.
         """
         from .b70_poller import get_b70_poller
 
-        if not self.shooting_brake_placement.is_b70_capable(layer_idx):
+        if not self.shooting_brake_placement.is_b70_active(layer_idx):
             self._b70_graph_mode = False
             self._all_cuda_passthrough = True
             logger.info(
-                "Shooting Brake Tier 3: layer %d has no B70 experts — "
+                "Shooting Brake Tier 3: layer %d owns no B70 experts — "
                 "all-CUDA passthrough", layer_idx,
             )
             return
@@ -525,6 +538,17 @@ class HybridRoutedExperts(RoutedExperts):
         # Prefill (large M) stays all-CUDA: the B70 staging buffers are
         # sized for decode batches.
         if self._all_cuda_passthrough or x.shape[0] > self._b70_max_batch:
+            if self._cuda_remap is not None and not self._passthrough_warned:
+                # This layer had its B70-owned experts sliced out of the
+                # CUDA weights, so a raw pass-through cannot account for
+                # B70 routes. Report it rather than return quietly wrong
+                # routed output.
+                self._passthrough_warned = True
+                logger.warning(
+                    "Shooting Brake: layer %d took the all-CUDA path with "
+                    "M=%d after VRAM surgery — B70 routes are unaccounted",
+                    self.layer_index, x.shape[0],
+                )
             return super().forward_modular(
                 x, topk_weights, topk_ids,
                 shared_experts, shared_experts_input,

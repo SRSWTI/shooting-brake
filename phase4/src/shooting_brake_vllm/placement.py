@@ -93,6 +93,28 @@ class Placement:
     def is_b70_capable(self, layer: int) -> bool:
         return layer in self.b70_capable_layers
 
+    def layer_b70_count(self, layer: int) -> int:
+        return sum(
+            1 for owner in self.owners[layer] if owner.device is Device.B70
+        )
+
+    def b70_active_layers(self) -> tuple[int, ...]:
+        """Layers that actually own B70 experts.
+
+        Distinct from :attr:`b70_capable_layers`, which only says the
+        expert bank covers that layer. A policy may concentrate B70
+        ownership into a subset of capable layers — every active layer
+        costs a dispatch per token, so the count matters for latency,
+        while total B70-owned experts is what determines freed VRAM.
+        """
+        return tuple(
+            layer for layer in range(self.num_layers)
+            if self.layer_b70_count(layer)
+        )
+
+    def is_b70_active(self, layer: int) -> bool:
+        return self.layer_b70_count(layer) > 0
+
     # -- (de)serialization for data-driven swapping ----------------------
 
     SCHEMA = "shooting-brake.placement.v1"
@@ -262,6 +284,61 @@ class InterleavedPolicy:
         return tuple(rows)
 
 
+@dataclass(frozen=True)
+class LayerSubsetPolicy:
+    """Concentrate B70 ownership into the last ``active_layers`` capable
+    layers; every other layer stays entirely on CUDA.
+
+    Motivation is latency, not capacity. Each B70-active layer costs one
+    dispatch per token, and that dispatch has a fixed overhead that does
+    not shrink with the number of routes. Spreading a fixed number of
+    offloaded experts across all 32 capable layers therefore pays the
+    fixed cost 32 times; concentrating the same experts into K layers
+    pays it K times, for the same freed VRAM.
+
+    The last layers are chosen because early layers' routing is the more
+    load-bearing, and because it keeps the active set contiguous.
+
+    Every active layer offloads the same expert ids, which the provider
+    requires: one resident set is uploaded for the whole bank.
+    """
+
+    active_layers: int
+    cuda_per_layer: int
+    name: str = field(init=False, default="subset")
+
+    def __post_init__(self) -> None:
+        if self.active_layers < 1:
+            raise ValueError("LayerSubsetPolicy.active_layers must be >= 1")
+        object.__setattr__(
+            self, "name",
+            f"subset:active_layers={self.active_layers}"
+            f",cuda_per_layer={self.cuda_per_layer}",
+        )
+
+    def assign(
+        self,
+        num_layers: int,
+        num_experts: int,
+        b70_capable: frozenset[int],
+    ) -> tuple[tuple[ExpertOwner, ...], ...]:
+        active = set(sorted(b70_capable)[-self.active_layers:])
+        all_cuda = tuple(
+            ExpertOwner(Device.CUDA, e) for e in range(num_experts)
+        )
+        cuda_n = max(0, min(self.cuda_per_layer, num_experts))
+        offloaded = tuple(
+            ExpertOwner(Device.CUDA, e) for e in range(cuda_n)
+        ) + tuple(
+            ExpertOwner(Device.B70, e - cuda_n)
+            for e in range(cuda_n, num_experts)
+        )
+        return tuple(
+            offloaded if layer in active else all_cuda
+            for layer in range(num_layers)
+        )
+
+
 # --------------------------------------------------------------------------
 # Construction + validation
 # --------------------------------------------------------------------------
@@ -380,12 +457,14 @@ def b70_bank_covers(
 
 
 def policy_from_name(name: str) -> PlacementPolicy:
-    """Parse a placement-policy spec of the form ``<family>[:<arg>=<value>]``.
+    """Parse a placement-policy spec of the form ``<family>[:<arg>...]``.
 
     Supported:
-      * ``all-cuda``                  -> :class:`AllCudaPolicy`
-      * ``split:<N>``                 -> :class:`SplitPolicy`(cuda_per_layer=N)
-      * ``interleaved:<N>``           -> :class:`InterleavedPolicy`(period=N)
+      * ``all-cuda``            -> :class:`AllCudaPolicy`
+      * ``split:<N>``           -> :class:`SplitPolicy`(cuda_per_layer=N)
+      * ``interleaved:<N>``     -> :class:`InterleavedPolicy`(period=N)
+      * ``subset:<K>:<N>``      -> :class:`LayerSubsetPolicy`(K layers,
+                                   cuda_per_layer=N)
 
     This is the swappable seam a future predictive / speculative offloader
     plugs into: implement :class:`PlacementPolicy` and register a name here.
@@ -396,6 +475,16 @@ def policy_from_name(name: str) -> PlacementPolicy:
         return SplitPolicy(cuda_per_layer=int(name.split(":", 1)[1]))
     if name.startswith("interleaved:"):
         return InterleavedPolicy(period=int(name.split(":", 1)[1]))
+    if name.startswith("subset:"):
+        parts = name.split(":")
+        if len(parts) != 3:
+            raise PlacementError(
+                f"subset policy needs 'subset:<layers>:<cuda_per_layer>', "
+                f"got {name!r}"
+            )
+        return LayerSubsetPolicy(
+            active_layers=int(parts[1]), cuda_per_layer=int(parts[2])
+        )
     raise PlacementError(f"unknown placement policy: {name!r}")
 
 

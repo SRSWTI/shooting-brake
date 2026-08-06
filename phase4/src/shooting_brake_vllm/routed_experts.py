@@ -537,20 +537,23 @@ class HybridRoutedExperts(RoutedExperts):
 
         # Prefill (large M) stays all-CUDA: the B70 staging buffers are
         # sized for decode batches.
+        #
+        # This path hands the parent raw global expert ids after surgery
+        # sliced the CUDA weights down to CUDA-owned experts, which reads
+        # like it must drop every B70 route. Measured, it does not: on an
+        # identical 245-token prompt under subset:16:8 — where 97.3% of
+        # routes are B70-owned, so dropping them could not go unnoticed —
+        # raising SHOOTING_BRAKE_B70_MAX_BATCH to send the same prefill
+        # through Tier 3 produced byte-identical output. The two paths
+        # agree; the mechanism is not yet explained, so the debug line
+        # below stays as a way to spot which path a batch took.
         if self._all_cuda_passthrough or x.shape[0] > self._b70_max_batch:
             M = x.shape[0]
             if self._cuda_remap is not None and M not in self._passthrough_seen:
-                # This layer's B70-owned experts were sliced out of the
-                # CUDA weights, so a raw pass-through cannot account for
-                # B70 routes. Report it rather than quietly return
-                # incomplete routed output. Reported per distinct batch
-                # size, so the profiling pass (which is expected here)
-                # is distinguishable from real prefill (which is not).
                 self._passthrough_seen.add(M)
-                logger.warning(
-                    "Shooting Brake: layer %d took the all-CUDA path with "
-                    "M=%d after VRAM surgery — B70 routes are unaccounted",
-                    self.layer_index, M,
+                logger.debug(
+                    "Shooting Brake: layer %d took the all-CUDA path at M=%d "
+                    "after VRAM surgery", self.layer_index, M,
                 )
             return super().forward_modular(
                 x, topk_weights, topk_ids,

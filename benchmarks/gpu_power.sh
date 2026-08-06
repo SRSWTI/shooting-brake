@@ -22,12 +22,12 @@
 # will be prompted for your password exactly once per invocation.
 #
 # Usage:
-#   bash phase10/gpu_power.sh status          # current draw + limits
-#   bash phase10/gpu_power.sh cap 570         # cap TDP at 570 W
-#   bash phase10/gpu_power.sh cap 550
-#   bash phase10/gpu_power.sh reset           # back to 600 W default
-#   bash phase10/gpu_power.sh clocks 2400     # lock graphics clocks (MHz)
-#   bash phase10/gpu_power.sh unlock          # remove clock lock
+#   bash benchmarks/gpu_power.sh status          # current draw + limits
+#   bash benchmarks/gpu_power.sh cap 570         # cap TDP at 570 W
+#   bash benchmarks/gpu_power.sh cap 550
+#   bash benchmarks/gpu_power.sh reset           # back to 600 W default
+#   bash benchmarks/gpu_power.sh clocks 2400     # lock graphics clocks (MHz)
+#   bash benchmarks/gpu_power.sh unlock          # remove clock lock
 #
 set -euo pipefail
 

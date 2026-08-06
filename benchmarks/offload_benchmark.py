@@ -21,8 +21,8 @@ mismatch is a correctness failure, not a benchmark artifact.
 
 Usage::
 
-    python phase10/benchmark.py --config all-cuda --out results/all-cuda.json
-    python phase10/benchmark.py --config hybrid   --out results/hybrid.json
+    python benchmarks/offload_benchmark.py --config all-cuda --out results/all-cuda.json
+    python benchmarks/offload_benchmark.py --config hybrid   --out results/hybrid.json
 """
 
 from __future__ import annotations

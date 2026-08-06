@@ -27,18 +27,26 @@
 # the GPU is held only for the duration of each run.
 #
 # Usage:
-#   bash phase10/track_b_offload_sweep.sh
-#   PLACEMENTS="split:128 subset:16:8" bash phase10/track_b_offload_sweep.sh
+#   bash benchmarks/run_offload_sweep.sh
+#   PLACEMENTS="split:128 subset:16:8" bash benchmarks/run_offload_sweep.sh
 #
 # Env overrides:
 #   PLACEMENTS   space-separated offload policies (default: the curve below)
 #   DECODE_TOKENS=400  CONCURRENCY="1 8 32"
-#   OUT_DIR=$PWD/phase10/results/offload
+#   OUT_DIR=$PWD/benchmarks/results/offload
 #
-set -euo pipefail
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# oneAPI's setvars.sh terminates the sourcing shell under `set -e`, so
+# source it BEFORE enabling strict mode. The B70 provider loads SYCL.
+# shellcheck disable=SC1091
+source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+export PATH="$REPO_ROOT/.venv/bin:${PATH:-}"
+export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+
+# Strict mode only for our own logic below.
+set -euo pipefail
 
 # A spread across the two knobs: active-layer count rises 8 -> 16 -> 24,
 # and split:128 is the all-32-layers baseline policy.
@@ -52,13 +60,8 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 # Seconds to idle the GPU between runs, so the card is not pinned at the
 # power cap for the whole sweep. Pair with gpu_power.sh cap <watts>.
 REST_BETWEEN="${REST_BETWEEN:-15}"
-OUT_DIR="${OUT_DIR:-$PWD/phase10/results/offload}"
+OUT_DIR="${OUT_DIR:-$PWD/benchmarks/results/offload}"
 mkdir -p "$OUT_DIR"
-export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-export PATH="$REPO_ROOT/.venv/bin:${PATH:-}"
-# oneAPI is needed even in-process: the B70 provider loads SYCL.
-# shellcheck disable=SC1091
-source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
 
 run_one () {
   local config="$1" placement="$2" out="$3"
@@ -67,7 +70,7 @@ run_one () {
     return
   fi
   echo "[track_b] running $config ${placement:-(n/a)}"
-  "$REPO_ROOT/.venv/bin/python" phase10/benchmark.py \
+  "$REPO_ROOT/.venv/bin/python" benchmarks/offload_benchmark.py \
     --config "$config" \
     --placement "${placement:-split:128}" \
     --out "$out" \
@@ -90,4 +93,4 @@ for p in $PLACEMENTS; do
 done
 
 echo "[track_b] summarizing -> $OUT_DIR"
-"$REPO_ROOT/.venv/bin/python" phase10/track_b_summarize.py --dir "$OUT_DIR"
+"$REPO_ROOT/.venv/bin/python" benchmarks/offload_summarize.py --dir "$OUT_DIR"

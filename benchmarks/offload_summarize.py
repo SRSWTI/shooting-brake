@@ -32,7 +32,7 @@ def _load(path: Path) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--dir", type=Path, default=Path("phase10/results/offload"),
+        "--dir", type=Path, default=Path("benchmarks/results/offload"),
         help="directory of benchmark.py result JSON files",
     )
     args = parser.parse_args()

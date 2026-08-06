@@ -14,9 +14,9 @@
 # cannot.  Lower it for a strict head-to-head with the Phase 0 baseline.
 #
 # Usage:
-#   bash phase10/track_a_serve_hybrid.sh                 # 131k, subset:16:8
-#   MAX_MODEL_LEN=32768 bash phase10/track_a_serve_hybrid.sh
-#   PLACEMENT=split:128 PORT=8001 bash phase10/track_a_serve_hybrid.sh
+#   bash benchmarks/serve_hybrid.sh                 # 131k, subset:16:8
+#   MAX_MODEL_LEN=32768 bash benchmarks/serve_hybrid.sh
+#   PLACEMENT=split:128 PORT=8001 bash benchmarks/serve_hybrid.sh
 #
 # Env overrides (defaults shown):
 #   MODEL=unsloth/Qwen3.6-35B-A3B-NVFP4
@@ -28,10 +28,18 @@
 #
 # Stop with:  pkill -INT -f 'vllm serve'
 #
-set -euo pipefail
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# oneAPI's setvars.sh terminates the sourcing shell under `set -e`, so
+# source it BEFORE enabling strict mode. The SYCL runtime must be live in
+# this process before the B70 provider loads (lazily, on first forward).
+# shellcheck disable=SC1091
+source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+export PATH="$REPO_ROOT/.venv/bin:${PATH:-}"
+
+# Strict mode only for our own logic below.
+set -euo pipefail
 
 MODEL="${MODEL:-unsloth/Qwen3.6-35B-A3B-NVFP4}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
@@ -39,11 +47,6 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
 PLACEMENT="${PLACEMENT:-subset:16:8}"
 PORT="${PORT:-8000}"
-
-# oneAPI runtime must be in the server process before SYCL loads.
-# shellcheck disable=SC1091
-source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
-export PATH="$REPO_ROOT/.venv/bin:${PATH:-}"
 
 # Adapter switches.  VLLM_PLUGINS loads the out-of-tree adapter; the
 # SHOOTING_BRAKE_* vars select the hybrid path and the offload policy.

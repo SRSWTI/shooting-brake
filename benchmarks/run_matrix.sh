@@ -27,16 +27,16 @@
 # time so cooldowns land exactly where they should — a longer rest when
 # moving to a new context length, a shorter one between the three
 # profiles within a context.  Pair with a power cap:
-#   bash phase10/gpu_power.sh cap 575
+#   bash benchmarks/gpu_power.sh cap 575
 #
 # Prerequisites:
-#   1. Power cap set:  bash phase10/gpu_power.sh cap 575
-#   2. Server up:      bash phase10/track_a_serve_hybrid.sh  (own shell)
+#   1. Power cap set:  bash benchmarks/gpu_power.sh cap 575
+#   2. Server up:      bash benchmarks/serve_hybrid.sh  (own shell)
 #   3. Server ready:   curl -s http://127.0.0.1:8000/health
 #
 # Usage:
-#   bash phase10/track_a_guidellm_matrix.sh
-#   CONTEXTS=1024,4096,8192 COOLDOWN_CTX=60 bash phase10/track_a_guidellm_matrix.sh
+#   bash benchmarks/run_matrix.sh
+#   CONTEXTS=1024,4096,8192 COOLDOWN_CTX=60 bash benchmarks/run_matrix.sh
 #
 # Env overrides (defaults shown):
 #   TARGET=http://127.0.0.1:8000
@@ -54,7 +54,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MATRIX="$REPO_ROOT/benchmarks-vllm/guidellm/scripts/run_vllm_matrix.py"
+MATRIX="$REPO_ROOT/benchmarks/matrix_runner.py"
 
 TARGET="${TARGET:-http://127.0.0.1:8000}"
 METRICS="${TARGET}/metrics"
@@ -72,7 +72,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$PWD/bench-matrix/hybrid_131k_c6}"
 # Preflight: server healthy and exposing Prometheus metrics.
 if ! curl -sf "$TARGET/health" >/dev/null 2>&1; then
   echo "[track_a] server not healthy at $TARGET/health — start it first:" >&2
-  echo "[track_a]   bash phase10/track_a_serve_hybrid.sh" >&2
+  echo "[track_a]   bash benchmarks/serve_hybrid.sh" >&2
   exit 1
 fi
 if ! curl -sf "$METRICS" 2>/dev/null | grep -q '^vllm:'; then

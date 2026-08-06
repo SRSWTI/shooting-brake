@@ -7,7 +7,7 @@ comparison required by plan.md's Phase 10 gate.
 
 Usage::
 
-    python phase10/compare.py --out-dir phase10/results
+    python benchmarks/compare.py --out-dir benchmarks/results
 """
 
 from __future__ import annotations
@@ -246,7 +246,7 @@ def compare_capacity(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out-dir", type=Path, default=Path("phase10/results"))
+    parser.add_argument("--out-dir", type=Path, default=Path("benchmarks/results"))
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument(
         "--only", choices=CONFIGS, help="run one configuration and stop"

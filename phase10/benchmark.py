@@ -308,6 +308,94 @@ async def run_prefill(engine: Any, trials: int) -> dict[str, Any]:
     }
 
 
+def _context_prompt(target_tokens: int) -> str:
+    """A prompt close to ``target_tokens`` after tokenization.
+
+    Repeats a neutral sentence; the count is calibrated so the result
+    lands near the target without going over ``max_model_len``.
+    """
+    # ~13 tokens per sentence; keep a 64-token headroom for the question.
+    sentences = max(1, (target_tokens - 64) // 13)
+    body = (
+        "The quick brown fox jumps over the lazy dog. "
+    ) * sentences
+    return (
+        body
+        + "\nIgnore the text above. Question: what is 7 multiplied by 6? "
+        "Answer with the number only."
+    )
+
+
+async def run_context_sweep(
+    engine: Any, lengths: list[int], decode_tokens: int
+) -> list[dict[str, Any]]:
+    """Single-stream decode latency and throughput vs prompt length.
+
+    This is where the hybrid's KV-cache win should matter most: longer
+    contexts consume more KV, so the same request is more expensive on
+    the all-CUDA baseline, which has 4.2x less KV headroom.
+    """
+    rows = []
+    for length in lengths:
+        prompt = _context_prompt(length)
+        timing = await stream_one(engine, prompt, decode_tokens)
+        rows.append({
+            "target_prompt_tokens": length,
+            "actual_prompt_tokens": timing.prompt_tokens,
+            "output_tokens": timing.output_tokens,
+            "decode_tok_per_s": timing.decode_tok_per_s,
+            "ttft_ms": timing.ttft_s * 1e3,
+            "itl_p50_ms": _pct(timing.itls_s, 0.50) * 1e3,
+            "itl_p99_ms": _pct(timing.itls_s, 0.99) * 1e3,
+        })
+    return rows
+
+
+async def run_capacity_frontier(
+    engine: Any, lengths: list[int], decode_tokens: int
+) -> list[dict[str, Any]]:
+    """How many concurrent long-context requests the engine serves.
+
+    At each prompt length, issue requests in waves of growing size and
+    record the largest wave that completes without preemption or KV
+    rejection. The hybrid's KV capacity is 4.2x the baseline, so this
+    gap is the direct, structural payoff of moving experts to the B70.
+    """
+    waves = [1, 4, 8, 12, 16, 24, 32, 48, 64]
+    rows = []
+    for length in lengths:
+        prompt = _context_prompt(length)
+        last_ok: dict[str, Any] | None = None
+        for n in waves:
+            prompts = [prompt] * n
+            try:
+                timings, wall = await stream_many(
+                    engine, prompts, decode_tokens
+                )
+            except Exception:
+                break
+            if any(t.output_tokens == 0 for t in timings):
+                break
+            total_out = sum(t.output_tokens for t in timings)
+            last_ok = {
+                "target_prompt_tokens": length,
+                "concurrent_requests": n,
+                "total_output_tokens": total_out,
+                "output_tok_per_s": total_out / wall,
+                "itl_p50_ms": _pct(
+                    [v for t in timings for v in t.itls_s], 0.50
+                ) * 1e3,
+                "itl_p99_ms": _pct(
+                    [v for t in timings for v in t.itls_s], 0.99
+                ) * 1e3,
+            }
+        rows.append(last_ok or {
+            "target_prompt_tokens": length,
+            "concurrent_requests": 0,
+        })
+    return rows
+
+
 # --- worker telemetry --------------------------------------------------
 
 
@@ -347,6 +435,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             engine, args.concurrency, args.batch_tokens
         )
         result["prefill"] = await run_prefill(engine, args.trials)
+        result["context_sweep"] = await run_context_sweep(
+            engine, args.context_lengths, args.decode_tokens
+        )
+        result["capacity_frontier"] = await run_capacity_frontier(
+            engine, args.context_lengths, args.decode_tokens
+        )
         result["workers"] = await worker_stats(engine)
         return result
     finally:
@@ -367,6 +461,11 @@ def main() -> int:
     parser.add_argument(
         "--placement", default="split:128",
         help="placement policy for the hybrid config",
+    )
+    parser.add_argument(
+        "--context-lengths", type=int, nargs="+",
+        default=[512, 2048, 4096, 8192],
+        help="prompt lengths for the context sweep and capacity frontier",
     )
     args = parser.parse_args()
 
@@ -391,6 +490,30 @@ def main() -> int:
             f"ITL p50 {row['itl_p50_ms']:>6.2f} ms"
         )
     print(f"prefill: {result['prefill']['prefill_tok_per_s']:.0f} tok/s")
+    print("context sweep (single-stream decode by prompt length):")
+    for row in result["context_sweep"]:
+        print(
+            f"  {row['actual_prompt_tokens']:>5} tok prompt: "
+            f"{row['decode_tok_per_s']:>6.1f} tok/s  "
+            f"TTFT {row['ttft_ms']:>6.1f} ms  "
+            f"ITL p50 {row['itl_p50_ms']:>5.2f}  "
+            f"p99 {row['itl_p99_ms']:>5.2f} ms"
+        )
+    print("capacity frontier (largest concurrent wave that completed):")
+    for row in result["capacity_frontier"]:
+        n = row.get("concurrent_requests", 0)
+        if n:
+            print(
+                f"  {row['target_prompt_tokens']:>5} tok prompt: "
+                f"{n:>3} concurrent  "
+                f"{row['output_tok_per_s']:>8.1f} tok/s  "
+                f"ITL p50 {row['itl_p50_ms']:>6.2f}  "
+                f"p99 {row['itl_p99_ms']:>6.2f} ms"
+            )
+        else:
+            print(
+                f"  {row['target_prompt_tokens']:>5} tok prompt: none"
+            )
     for worker in result["workers"]:
         routes = worker.get("routes")
         if routes:

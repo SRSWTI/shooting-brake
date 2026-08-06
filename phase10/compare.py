@@ -142,6 +142,50 @@ def compare_throughput(
         f"  {_delta(pc['prefill_tok_per_s'], pb['prefill_tok_per_s'])}"
     )
 
+    if baseline.get("context_sweep") and candidate.get("context_sweep"):
+        print(f"\n{'=' * 70}\ncontext-length sweep (single-stream decode)\n{'=' * 70}")
+        print(
+            f"  {'prompt tok':>10} {'all-cuda':>14} {'hybrid':>14}   "
+            f"{'TTFT base':>9} {'TTFT hyb':>9}"
+        )
+        for rb, rc in zip(
+            baseline["context_sweep"], candidate["context_sweep"], strict=True
+        ):
+            print(
+                f"  {rb['actual_prompt_tokens']:>10} "
+                f"{rb['decode_tok_per_s']:>10.1f} t/s "
+                f"{rc['decode_tok_per_s']:>10.1f} t/s   "
+                f"{rb['ttft_ms']:>7.1f}ms {rc['ttft_ms']:>7.1f}ms"
+            )
+
+    if (
+        baseline.get("capacity_frontier")
+        and candidate.get("capacity_frontier")
+    ):
+        print(
+            f"\n{'=' * 70}\ncapacity frontier "
+            f"(largest concurrent wave that completed)\n{'=' * 70}"
+        )
+        print(
+            f"  {'prompt tok':>10} {'all-cuda conc':>13} {'hybrid conc':>11}   "
+            f"{'all-cuda t/s':>12} {'hybrid t/s':>10}"
+        )
+        for rb, rc in zip(
+            baseline["capacity_frontier"],
+            candidate["capacity_frontier"],
+            strict=True,
+        ):
+            bn = rb.get("concurrent_requests", 0)
+            cn = rc.get("concurrent_requests", 0)
+            bt = rb.get("output_tok_per_s")
+            ct = rc.get("output_tok_per_s")
+            bt_s = f"{bt:>8.1f} t/s" if bt else "       —    "
+            ct_s = f"{ct:>8.1f} t/s" if ct else "    —    "
+            print(
+                f"  {rb['target_prompt_tokens']:>10} "
+                f"{bn:>13} {cn:>11}   {bt_s:>12} {ct_s:>10}"
+            )
+
 
 def compare_capacity(
     baseline: dict[str, Any], candidate: dict[str, Any]

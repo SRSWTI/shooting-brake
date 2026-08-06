@@ -203,46 +203,40 @@ def _guidellm_command(
     context_len: int,
     output_dir: Path,
 ) -> list[str]:
+    # guidellm's CLI moved to config-based ``kind=...`` options. Every
+    # section (backend / profile / data / constraint / output) takes a
+    # ``kind`` plus inline key=value fields; per-section tuning that the
+    # CLI can't reach goes through ``--override``.
     command = [
-        sys.executable,
-        "-m",
-        "guidellm",
-        "benchmark",
-        "run",
-        "--target",
-        config.target,
-        "--model",
-        config.model,
-        "--request-format",
-        config.request_format,
-        "--profile",
-        profile,
+        sys.executable, "-m", "guidellm", "run",
+        "--backend",
+        (
+            "kind=openai_http,"
+            f"target={config.target},"
+            f"model={config.model},"
+            f"request_format={config.request_format}"
+        ),
+        "--profile", f"kind={profile}",
         "--data",
         (
             "kind=synthetic_text,"
             f"prompt_tokens={context_len},"
             f"output_tokens={config.output_tokens}"
         ),
-        "--output-dir",
-        str(output_dir),
-        "--outputs",
-        ",".join(config.outputs),
-        "--random-seed",
-        str(config.random_seed),
-        "--rampup",
-        str(config.rampup),
-        "--max-errors",
-        str(config.max_errors),
-        "--sample-requests",
-        "20",
     ]
 
-    # Scale the time budget with context length so large-context cells get
-    # enough wall time to complete the minimum requests for valid statistics.
-    #   ctx ≤ 8K   → base seconds (default 90s)
-    #   ctx ≤ 32K  → 2× base
-    #   ctx ≤ 128K → 4× base
-    #   ctx > 128K → 8× base
+    # Per-profile load shape. concurrent runs each rate as a fixed
+    # concurrency; sweep interpolates across strategies.
+    if profile == "concurrent":
+        command += [
+            "--override", "profile.streams",
+            ",".join(str(r) for r in config.concurrent_rates),
+        ]
+    elif profile == "sweep":
+        command += ["--override", "profile.sweep_size", str(config.sweep_steps)]
+
+    # Stop conditions. max_seconds is scaled by context length so large
+    # cells get enough wall time for valid statistics.
     if config.max_seconds is not None:
         if context_len > 128_000:
             scaled = config.max_seconds * 8
@@ -252,23 +246,19 @@ def _guidellm_command(
             scaled = config.max_seconds * 2
         else:
             scaled = config.max_seconds
-        command.extend(["--max-seconds", str(scaled)])
-    # GuideLLM sweep needs enough successful requests to infer the
-    # interpolated rates between baseline and peak throughput.
-    if config.max_requests is not None and (profile != "sweep" or config.max_requests >= 10):
-        command.extend(["--max-requests", str(config.max_requests)])
-    if config.warmup is not None:
-        command.extend(["--warmup", config.warmup])
-    if config.cooldown is not None:
-        command.extend(["--cooldown", config.cooldown])
+        command += ["--constraint", f"kind=max_duration,seconds={int(scaled)}"]
+    if config.max_requests is not None and (
+        profile != "sweep" or config.max_requests >= 10
+    ):
+        command += ["--constraint", f"kind=max_requests,count={config.max_requests}"]
+    command += ["--constraint", f"kind=max_errors,count={config.max_errors}"]
+
+    # One --output per requested format; each needs a full file path.
+    for fmt in config.outputs:
+        command += ["--output", f"kind={fmt},path={output_dir / f'report.{fmt}'}"]
+
     if config.disable_console:
         command.append("--disable-console")
-
-    if profile == "concurrent":
-        command.extend(["--rate", ",".join(str(rate) for rate in config.concurrent_rates)])
-    elif profile == "sweep":
-        command.extend(["--rate", str(config.sweep_steps)])
-
     return command
 
 

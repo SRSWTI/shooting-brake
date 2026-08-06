@@ -120,36 +120,50 @@ def _latency_summary(timings: list[StreamTiming]) -> dict[str, float]:
 # --- engine ------------------------------------------------------------
 
 
-def apply_config_env(config: str) -> None:
-    """Set adapter environment before vLLM imports anything.
+# Every adapter switch the benchmark controls. Both configurations clear
+# all of them and then set only what they need, so an inherited value
+# from the caller's shell cannot silently enable the hybrid path in the
+# baseline — which reads as a plausible but wrong all-CUDA number.
+ADAPTER_VARS = (
+    "SHOOTING_BRAKE_HYBRID",
+    "SHOOTING_BRAKE_B70_DEVICE",
+    "SHOOTING_BRAKE_VRAM_SURGERY",
+    "SHOOTING_BRAKE_B70_GRAPH",
+    "SHOOTING_BRAKE_B70_STATS",
+    "SHOOTING_BRAKE_PLACEMENT",
+)
+
+
+def apply_config_env(config: str, placement: str) -> None:
+    """Make the environment exactly describe ``config``.
 
     The adapter reads these at class-construction time, so this must run
     before the engine is built.
     """
+    for name in ADAPTER_VARS:
+        os.environ.pop(name, None)
+
     env = {
         "VLLM_PLUGINS": "shooting_brake_vllm",
         "SHOOTING_BRAKE_PHASE4": "all-cuda",
         "SHOOTING_BRAKE_MODEL": MODEL,
         # collective_rpc ships the telemetry callable to the workers.
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+        "SHOOTING_BRAKE_B70_STATS": "1",
     }
     if config == "hybrid":
         env.update({
-            "SHOOTING_BRAKE_PLACEMENT": os.environ.get(
-                "SHOOTING_BRAKE_PLACEMENT", "split:128"
-            ),
+            "SHOOTING_BRAKE_PLACEMENT": placement,
             "SHOOTING_BRAKE_HYBRID": "1",
             "SHOOTING_BRAKE_B70_DEVICE": "1",
             "SHOOTING_BRAKE_VRAM_SURGERY": "1",
             "SHOOTING_BRAKE_B70_GRAPH": "1",
-            "SHOOTING_BRAKE_B70_STATS": "1",
         })
     elif config == "all-cuda":
-        # The adapter is still installed, with an all-CUDA placement: no
-        # surgery, no B70, no Tier 3.  This isolates the hybrid path
+        # The adapter stays installed, with an all-CUDA placement: no
+        # surgery, no B70, no Tier 3. This isolates the hybrid path
         # rather than the presence of the plugin.
         env["SHOOTING_BRAKE_PLACEMENT"] = "all-cuda"
-        env["SHOOTING_BRAKE_B70_STATS"] = "1"
     else:
         raise SystemExit(f"unknown config: {config}")
     os.environ.update(env)
@@ -350,9 +364,13 @@ def main() -> int:
     parser.add_argument(
         "--concurrency", type=int, nargs="+", default=[1, 4, 16, 32, 64]
     )
+    parser.add_argument(
+        "--placement", default="split:128",
+        help="placement policy for the hybrid config",
+    )
     args = parser.parse_args()
 
-    apply_config_env(args.config)
+    apply_config_env(args.config, args.placement)
     result = asyncio.run(run(args))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -384,10 +402,12 @@ def main() -> int:
                 f"service mean {poller['service_mean_us']:.1f} us, "
                 f"{poller['errors']} errors"
             )
+        kv = worker["kv_cache"]
         mem = worker["cuda_memory"]
         print(
-            f"memory: {mem['allocated_gib']:.2f} GiB allocated, "
-            f"{mem['free_gib']:.2f} GiB free"
+            f"kv cache: {kv['max_tokens']:,} tokens "
+            f"({kv['num_gpu_blocks']:,} blocks); "
+            f"{mem['allocated_gib']:.2f} GiB allocated"
         )
     print(f"wrote {args.out}")
     return 0

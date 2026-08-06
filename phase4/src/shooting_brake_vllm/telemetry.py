@@ -78,14 +78,25 @@ def collect_worker_stats(worker: Any) -> dict[str, Any]:
         None,
     )
     if poller is not None:
-        dispatches = poller.dispatch_count
         stats["poller"] = {
-            "dispatches": dispatches,
+            "dispatches": poller.dispatch_count,
             "errors": poller.error_count,
             "service_mean_us": poller.service_mean_us,
         }
 
-    # --- memory ---------------------------------------------------------
+    # --- capacity -------------------------------------------------------
+    # KV cache size is the metric that matters: it is what the freed
+    # expert VRAM buys, and it caps how many requests can be in flight.
+    # "Free VRAM" says nothing, because vLLM allocates up to
+    # gpu_memory_utilization either way.
+    cache_config = worker.vllm_config.cache_config
+    num_blocks = cache_config.num_gpu_blocks or 0
+    stats["kv_cache"] = {
+        "num_gpu_blocks": num_blocks,
+        "block_size": cache_config.block_size,
+        "max_tokens": num_blocks * cache_config.block_size,
+    }
+
     free_b, total_b = torch.cuda.mem_get_info()
     stats["cuda_memory"] = {
         "allocated_gib": torch.cuda.memory_allocated() / 2**30,

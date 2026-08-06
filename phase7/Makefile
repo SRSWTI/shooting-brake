@@ -27,7 +27,8 @@ TARGET := libsb_b70_provider.so
 
 all: $(TARGET)
 
-$(TARGET): b70_capi.cpp b70_capi.h $(PHASE1)/b70_provider.hpp
+$(TARGET): b70_capi.cpp b70_capi.h \
+           $(PHASE1)/b70_provider.cpp $(PHASE1)/b70_provider.hpp
 	$(CXX) $(CXXFLAGS) -shared -o $(ROOT)/$(TARGET) \
 	    b70_capi.cpp $(PHASE1)/b70_provider.cpp \
 	    $(LDFLAGS)

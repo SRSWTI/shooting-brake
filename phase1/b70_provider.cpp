@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -38,6 +39,15 @@ constexpr std::size_t kW2Bytes = kHiddenSize * (kIntermediateSize / 2);
 constexpr std::size_t kS2Bytes = kHiddenSize * (kIntermediateSize / 16);
 constexpr std::size_t kExpertBytes =
     kW13Bytes + kS13Bytes + kW2Bytes + kS2Bytes + 2 * sizeof(float);
+
+// Per-dispatch profiling costs real latency: a profiled Level Zero
+// queue timestamps every command, and the kernel_us figure additionally
+// needs two empty marker kernels bracketing the real one, each a full
+// submission. Off by default; the isolated Phase 1 tests turn it on.
+bool profiling_requested() noexcept {
+  const char* value = std::getenv("SHOOTING_BRAKE_B70_PROFILE");
+  return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
 
 #pragma pack(push, 1)
 struct ExpertBankHeader {
@@ -160,6 +170,8 @@ struct B70Provider::Impl {
   std::optional<sycl::event> dispatch_begin;
   std::optional<sycl::event> kernel_begin;
   std::optional<sycl::event> kernel_end;
+  std::optional<sycl::event> copy_out;
+  bool profiling = false;
 
   std::uint64_t pending_generation = 0;
   std::uint64_t pending_sequence = 0;
@@ -257,6 +269,7 @@ struct B70Provider::Impl {
     dispatch_begin.reset();
     kernel_begin.reset();
     kernel_end.reset();
+    copy_out.reset();
   }
 
   void release_resources_locked(const bool mark_stopped) noexcept {
@@ -296,6 +309,7 @@ struct B70Provider::Impl {
     dispatch_begin.reset();
     kernel_begin.reset();
     kernel_end.reset();
+    copy_out.reset();
     queue.reset();
     try {
       std::lock_guard<std::mutex> async_lock(async_mutex);
@@ -495,10 +509,21 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
         [state = impl_.get()](sycl::exception_list errors) noexcept {
           state->capture_async_errors(std::move(errors));
         };
-    impl_->queue.emplace(
-        selected.device, std::move(async_handler),
-        sycl::property_list{sycl::property::queue::in_order(),
-                            sycl::property::queue::enable_profiling()});
+    // Profiling is opt-in. Level Zero timestamps every command on a
+    // profiled queue, and the two marker kernels that make kernel_us
+    // meaningful are themselves full submissions — together a
+    // significant share of dispatch latency at decode batch sizes,
+    // where the whole point is to finish inside the concurrent CUDA
+    // expert window. Set SHOOTING_BRAKE_B70_PROFILE=1 to get the
+    // per-dispatch kernel/total breakdown back.
+    impl_->profiling = profiling_requested();
+    sycl::property_list queue_properties =
+        impl_->profiling
+            ? sycl::property_list{sycl::property::queue::in_order(),
+                                  sycl::property::queue::enable_profiling()}
+            : sycl::property_list{sycl::property::queue::in_order()};
+    impl_->queue.emplace(selected.device, std::move(async_handler),
+                         queue_properties);
 
     impl_->config.max_batch = config.max_batch;
     impl_->config.top_k = config.top_k;
@@ -667,14 +692,16 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
       }
     }
 
-    impl_->dispatch_begin.emplace(impl_->queue->memcpy(
-        impl_->hidden, hidden, M * kHiddenSize * sizeof(sycl::half)));
+    sycl::event first = impl_->queue->memcpy(
+        impl_->hidden, hidden, M * kHiddenSize * sizeof(sycl::half));
     impl_->queue->memcpy(impl_->ids, ids,
                          route_elements * sizeof(std::int32_t));
     impl_->queue->memcpy(impl_->weights, weights,
                          route_elements * sizeof(float));
-
-    impl_->kernel_begin.emplace(impl_->queue->single_task([] {}));
+    if (impl_->profiling) {
+      impl_->dispatch_begin.emplace(std::move(first));
+      impl_->kernel_begin.emplace(impl_->queue->single_task([] {}));
+    }
 
     const std::size_t first_expert = layer * resident_experts;
     const std::uint8_t* layer_w13 = impl_->w13 + first_expert * kW13Bytes;
@@ -702,7 +729,18 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
     }
 
     impl_->pending_error.clear();
-    impl_->kernel_end.emplace(impl_->queue->single_task([] {}));
+    if (impl_->profiling) {
+      impl_->kernel_end.emplace(impl_->queue->single_task([] {}));
+    }
+
+    // Enqueue the result copy now rather than in take(). The queue is
+    // in-order, so it cannot start before the kernel finishes, and
+    // submitting it here keeps its latency off the critical path —
+    // take() would otherwise wait for the kernel, only then submit the
+    // copy, and wait again.
+    impl_->copy_out.emplace(impl_->queue->memcpy(
+        impl_->copyout_staging, impl_->output,
+        M * kHiddenSize * sizeof(float)));
 #ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
     if (impl_->armed_test_fault &&
         *impl_->armed_test_fault ==
@@ -783,8 +821,11 @@ ProviderStatus B70Provider::take(const std::uint64_t generation,
       return ProviderStatus::invalid_argument;
     }
 
-    impl_->kernel_end->wait_and_throw();
-    std::string asynchronous_error = impl_->consume_async_error();
+    // One wait. The queue is in-order and issue() already enqueued the
+    // H2D copies, the kernel, and the result copy, so waiting on the
+    // last of them covers the whole dispatch.
+    impl_->copy_out->wait_and_throw();
+    const std::string asynchronous_error = impl_->consume_async_error();
     if (!asynchronous_error.empty()) {
       impl_->pending_error =
           "provider dispatch failed asynchronously: " + asynchronous_error;
@@ -793,41 +834,29 @@ ProviderStatus B70Provider::take(const std::uint64_t generation,
       return ProviderStatus::device_error;
     }
 
-    sycl::event copy_out = impl_->queue->memcpy(
-        impl_->copyout_staging, impl_->output,
-        required_elements * sizeof(float));
-    copy_out.wait_and_throw();
-
-    asynchronous_error = impl_->consume_async_error();
-    if (!asynchronous_error.empty()) {
-      impl_->pending_error =
-          "provider copyout failed asynchronously: " + asynchronous_error;
-      impl_->set_error(impl_->pending_error);
-      impl_->retire_pending_locked();
-      return ProviderStatus::device_error;
-    }
-
-    const auto kernel_start =
-        impl_->kernel_begin->get_profiling_info<
-            sycl::info::event_profiling::command_end>();
-    const auto kernel_stop =
-        impl_->kernel_end->get_profiling_info<
-            sycl::info::event_profiling::command_start>();
-    const auto total_start =
-        impl_->dispatch_begin->get_profiling_info<
-            sycl::info::event_profiling::command_start>();
-    const auto total_stop =
-        copy_out.get_profiling_info<sycl::info::event_profiling::command_end>();
-
     DispatchResult completed_result;
     completed_result.generation = impl_->pending_generation;
     completed_result.sequence = impl_->pending_sequence;
     completed_result.M = impl_->pending_M;
     completed_result.kernel = impl_->pending_split ? "split" : "fused";
-    completed_result.kernel_us =
-        static_cast<double>(kernel_stop - kernel_start) * 1.0e-3;
-    completed_result.total_us =
-        static_cast<double>(total_stop - total_start) * 1.0e-3;
+    if (impl_->profiling) {
+      const auto kernel_start =
+          impl_->kernel_begin->get_profiling_info<
+              sycl::info::event_profiling::command_end>();
+      const auto kernel_stop =
+          impl_->kernel_end->get_profiling_info<
+              sycl::info::event_profiling::command_start>();
+      const auto total_start =
+          impl_->dispatch_begin->get_profiling_info<
+              sycl::info::event_profiling::command_start>();
+      const auto total_stop =
+          impl_->copy_out->get_profiling_info<
+              sycl::info::event_profiling::command_end>();
+      completed_result.kernel_us =
+          static_cast<double>(kernel_stop - kernel_start) * 1.0e-3;
+      completed_result.total_us =
+          static_cast<double>(total_stop - total_start) * 1.0e-3;
+    }
     *result = std::move(completed_result);
 
     impl_->health.last_error.clear();

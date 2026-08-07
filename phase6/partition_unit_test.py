@@ -112,32 +112,58 @@ def main() -> None:
     ok("padding b70=2", part_pad.num_b70_routes() == 2)     # 128, 200
 
     # ---- negatives ----------------------------------------------------
-    # double-owned (impossible from device_map, test directly)
+    # These build a RoutePartition directly because the device map cannot
+    # produce them: a gather assigns each route exactly one code. They exist
+    # to prove validate_partition still catches the states a hand-written or
+    # future policy-driven partition could reach.
+    zeros = torch.zeros(2, 8, dtype=torch.bool)
+    ones = torch.ones(2, 8, dtype=torch.bool)
+
+    # double-owned: CUDA and B70 both claim every route
     fake = RoutePartition(
-        5, ids, wts,
-        torch.ones(2, 8, dtype=torch.bool),  # all CUDA
-        torch.ones(2, 8, dtype=torch.bool),  # all B70 (double)
-        torch.ones(2, 8, dtype=torch.bool),
+        layer=5, topk_ids=ids, topk_weights=wts,
+        cuda_mask=ones, b70_mask=ones, cpu_mask=zeros, valid_mask=ones,
     )
     expect_raise("double-owned rejected", lambda: validate_partition(fake, CAPABLE))
 
-    # uncovered route
+    # uncovered: valid routes that no tier claims
     fake2 = RoutePartition(
-        5, ids, wts,
-        torch.zeros(2, 8, dtype=torch.bool),
-        torch.zeros(2, 8, dtype=torch.bool),
-        torch.ones(2, 8, dtype=torch.bool),
+        layer=5, topk_ids=ids, topk_weights=wts,
+        cuda_mask=zeros, b70_mask=zeros, cpu_mask=zeros, valid_mask=ones,
     )
     expect_raise("uncovered rejected", lambda: validate_partition(fake2, CAPABLE))
 
     # B70 in non-capable layer
     fake3 = RoutePartition(
-        35, ids, wts,
-        torch.zeros(2, 8, dtype=torch.bool),
-        torch.ones(2, 8, dtype=torch.bool),
-        torch.ones(2, 8, dtype=torch.bool),
+        layer=35, topk_ids=ids, topk_weights=wts,
+        cuda_mask=zeros, b70_mask=ones, cpu_mask=zeros, valid_mask=ones,
     )
     expect_raise("B70 in FP8 layer rejected", lambda: validate_partition(fake3, CAPABLE))
+
+    # CPU tier is held to the same layer restriction as the B70. Without
+    # this, an all-out placement could put expert compute on the CPU in a
+    # layer no offload path was validated against.
+    fake4 = RoutePartition(
+        layer=35, topk_ids=ids, topk_weights=wts,
+        cuda_mask=zeros, b70_mask=zeros, cpu_mask=ones, valid_mask=ones,
+    )
+    expect_raise("CPU in FP8 layer rejected", lambda: validate_partition(fake4, CAPABLE))
+
+    # A clean three-way split validates: each tier claims a disjoint third.
+    third = torch.zeros(2, 8, dtype=torch.bool)
+    third[:, 0:3] = True
+    mid = torch.zeros(2, 8, dtype=torch.bool)
+    mid[:, 3:6] = True
+    last = torch.zeros(2, 8, dtype=torch.bool)
+    last[:, 6:8] = True
+    ok3 = RoutePartition(
+        layer=5, topk_ids=ids, topk_weights=wts,
+        cuda_mask=third, b70_mask=mid, cpu_mask=last, valid_mask=ones,
+    )
+    validate_partition(ok3, CAPABLE)
+    ok("three-way split validates", True)
+    ok("three-way counts", (ok3.num_cuda_routes(), ok3.num_b70_routes(),
+                            ok3.num_cpu_routes()) == (6, 6, 4))
 
     print("\nPhase-6a partition unit-test PASS")
 

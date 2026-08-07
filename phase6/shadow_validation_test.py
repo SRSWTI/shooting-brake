@@ -34,6 +34,10 @@ def main() -> None:
 
         env = dict(os.environ)
         env.update(
+            # oneAPI's setvars.sh drops the venv from PATH, taking `ninja`
+            # with it and making vLLM's compile step die with
+            # FileNotFoundError.
+            PATH=f"{ROOT / '.venv' / 'bin'}:{env.get('PATH', '')}",
             VLLM_PLUGINS="shooting_brake_vllm",
             SHOOTING_BRAKE_PHASE4="all-cuda",
             SHOOTING_BRAKE_MODEL=MODEL,

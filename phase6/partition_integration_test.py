@@ -30,12 +30,23 @@ def run_case(
     placement: str, output_path: Path, marker_path: Path | None = None
 ) -> None:
     env = dict(os.environ)
+    # oneAPI's setvars.sh drops the venv from PATH, which strips `ninja` and
+    # makes vLLM's compile step die with FileNotFoundError. Re-prepend it so
+    # this gate runs the same whether or not the caller sourced setvars.
+    env["PATH"] = f"{ROOT / '.venv' / 'bin'}:{env.get('PATH', '')}"
     env["VLLM_PLUGINS"] = "shooting_brake_vllm"
     env["SHOOTING_BRAKE_PHASE4"] = "all-cuda"
     env["SHOOTING_BRAKE_MODEL"] = MODEL
     env["SHOOTING_BRAKE_PLACEMENT"] = placement
     if marker_path:
         env["SHOOTING_BRAKE_PARTITION_MARKER"] = str(marker_path)
+        # The partition only runs when something defeats the all-CUDA
+        # pass-through that Tier 3 introduced; without this the adapter
+        # returns straight from super().forward_modular() and the gate
+        # asserts on a code path that never executed. No B70_DEVICE, so the
+        # remote partial is computed by the CUDA kernel with masked weights
+        # — which is what this gate wants: partition math, not hardware.
+        env["SHOOTING_BRAKE_HYBRID"] = "1"
 
     code = f"""
 import json

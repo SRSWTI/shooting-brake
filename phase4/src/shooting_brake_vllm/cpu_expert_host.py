@@ -42,6 +42,16 @@ from pathlib import Path
 
 import torch
 
+try:
+    from vllm.logger import init_logger
+except ImportError:  # standalone use, outside a vLLM process
+    import logging
+
+    def init_logger(name: str):  # type: ignore[misc]
+        return logging.getLogger(name)
+
+logger = init_logger(__name__)
+
 _DEFAULT_LIB = "phase7/libsb_cpu_expert.so"
 
 
@@ -91,6 +101,10 @@ class CpuExpertHost:
                 f"intermediate={intermediate} max_experts={max_experts}"
             )
         self._handle = ctypes.c_void_p(handle)
+        # Set by pin_arena(); until then H2D copies out of the arena are
+        # staged through a bounce buffer rather than DMA'd.
+        self._pinned = False
+        self._pinned_bytes = 0
 
     # -- ctypes plumbing -------------------------------------------------
 
@@ -122,6 +136,15 @@ class CpuExpertHost:
             ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_float),
             ctypes.c_size_t, ctypes.c_size_t, ctypes.POINTER(ctypes.c_float),
         ]
+
+        lib.sb_cpu_expert_block.restype = ctypes.c_int
+        lib.sb_cpu_expert_block.argtypes = [
+            ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t),
+        ]
+
+        lib.sb_cpu_arena_base.restype = ctypes.c_void_p
+        lib.sb_cpu_arena_base.argtypes = [ctypes.c_void_p]
 
         for name in ("sb_cpu_arena_used", "sb_cpu_arena_capacity",
                      "sb_cpu_resident_count"):
@@ -297,6 +320,87 @@ class CpuExpertHost:
         if rc != 0:
             raise CpuExpertError(f"sb_cpu_moe_forward failed rc={rc}")
         return out
+
+    # -- weight streaming (prefill) ---------------------------------------
+
+    def expert_block(self, layer: int, expert: int) -> torch.Tensor:
+        """Zero-copy bf16 view of one expert's ``gate|up|down`` block.
+
+        The three planes are one allocation, so the returned flat tensor is
+        a single DMA-able extent -- the caller ships it to CUDA in one copy
+        and slices it on the far side.
+
+        The view aliases arena memory rather than owning it: it stays valid
+        until :meth:`close`, and writing through it edits the resident
+        expert. Treat it as read-only.
+        """
+        handle = self._require_open()
+        ptr = ctypes.c_void_p()
+        nbytes = ctypes.c_size_t()
+        rc = self._lib.sb_cpu_expert_block(
+            handle, int(layer), int(expert),
+            ctypes.byref(ptr), ctypes.byref(nbytes),
+        )
+        if rc == -2:
+            raise CpuExpertError(
+                f"expert (layer={layer}, expert={expert}) is not resident in "
+                "the CPU arena"
+            )
+        if rc != 0:
+            raise CpuExpertError(f"sb_cpu_expert_block failed rc={rc}")
+
+        n_u16 = nbytes.value // 2
+        buf = (ctypes.c_uint16 * n_u16).from_address(ptr.value)
+        # frombuffer aliases; uint16 then bit-cast, because ctypes has no
+        # bf16 and reinterpreting is exactly what we want.
+        return torch.frombuffer(buf, dtype=torch.uint16).view(torch.bfloat16)
+
+    def pin_arena(self) -> bool:
+        """Register the committed arena with CUDA so H2D copies are real DMA.
+
+        Only ``[base, used)`` is registered. The arena is deliberately
+        oversized and backed on first touch, so pinning the whole
+        reservation would commit pages holding nothing.
+
+        Must be called after the last :meth:`load_expert`; anything loaded
+        afterwards lands outside the registered range and silently reverts
+        to a staged pageable copy.
+
+        Returns True if the arena is pinned (including when it already was).
+        """
+        if self._pinned:
+            return True
+        used = self.arena_used_bytes
+        if used == 0:
+            return False
+        base = self._lib.sb_cpu_arena_base(self._require_open())
+        if not base:
+            return False
+
+        # Round up to a page: cudaHostRegister works in whole pages, and the
+        # arena is huge-page aligned so the rounded end stays inside it.
+        page = 4096
+        span = (used + page - 1) // page * page
+        span = min(span, self.arena_capacity_bytes)
+
+        err = torch.cuda.cudart().cudaHostRegister(base, span, 0)
+        # 712 == cudaErrorHostMemoryAlreadyRegistered; treat as success so a
+        # second caller is harmless.
+        code = int(err)
+        if code not in (0, 712):
+            logger.warning(
+                "Shooting Brake: cudaHostRegister on the CPU arena failed "
+                "(%d); prefill weight streaming will fall back to staged "
+                "pageable copies at roughly half the bandwidth", code,
+            )
+            return False
+        self._pinned = True
+        self._pinned_bytes = span
+        return True
+
+    @property
+    def arena_pinned(self) -> bool:
+        return self._pinned
 
     # -- introspection ---------------------------------------------------
 

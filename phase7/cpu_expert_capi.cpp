@@ -79,6 +79,10 @@ class HugeArena {
   }
 
   size_t used() const noexcept { return used_; }
+
+  // Borrowed; valid for the arena's lifetime. The prefill path hands this
+  // to cudaHostRegister so the DMA engine can read experts in place.
+  const void* base() const noexcept { return base_; }
   size_t capacity() const noexcept { return size_; }
 
  private:
@@ -295,13 +299,17 @@ class CpuExpertHost {
     if (slots_[key] >= 0) {
       slot = &experts_[static_cast<size_t>(slots_[key])];
     } else {
-      void* g = arena_.alloc(plane);
-      void* u = arena_.alloc(plane);
-      void* d = arena_.alloc(plane);
-      if (!g || !u || !d) return -2;  // arena exhausted
-      experts_.push_back(CpuExpert{static_cast<uint16_t*>(g),
-                                   static_cast<uint16_t*>(u),
-                                   static_cast<uint16_t*>(d)});
+      // One allocation for all three planes, not three. Contiguity is a
+      // requirement, not a convenience: the prefill path DMAs an expert to
+      // the 5090 as a single transfer, and three separate bump allocations
+      // only happen to be adjacent while `plane` stays a multiple of the
+      // arena's alignment. Carving one block makes that structural.
+      char* blk = static_cast<char*>(arena_.alloc(3 * plane));
+      if (!blk) return -2;  // arena exhausted
+      experts_.push_back(CpuExpert{
+          reinterpret_cast<uint16_t*>(blk),
+          reinterpret_cast<uint16_t*>(blk + plane),
+          reinterpret_cast<uint16_t*>(blk + 2 * plane)});
       slots_[key] = static_cast<int32_t>(experts_.size() - 1);
       slot = &experts_.back();
     }
@@ -428,6 +436,14 @@ class CpuExpertHost {
   size_t arena_capacity() const noexcept { return arena_.capacity(); }
   size_t resident_count() const noexcept { return experts_.size(); }
   uint64_t skipped() const noexcept { return skipped_.load(); }
+
+  // Size of one expert's contiguous gate|up|down block, and the arena it
+  // lives in. Together these let the caller pin the arena once and then
+  // DMA any resident expert straight out of it, with no staging copy.
+  size_t expert_block_bytes() const noexcept {
+    return expert_bytes(hidden_, intermediate_);
+  }
+  const void* arena_base() const noexcept { return arena_.base(); }
 
  private:
   void ensure_scratch(size_t M) {
@@ -649,6 +665,21 @@ int sb_cpu_moe_forward(sb_cpu_host_t* host, size_t layer,
   return as_host(host)->moe_forward(
       layer, static_cast<const uint16_t*>(hidden_bf16), expert_ids, weights, M,
       topk, output_f32);
+}
+
+int sb_cpu_expert_block(sb_cpu_host_t* host, size_t layer, size_t expert,
+                        const void** out_ptr, size_t* out_bytes) {
+  if (!host || !out_ptr || !out_bytes) return -1;
+  CpuExpertHost* h = as_host(host);
+  const CpuExpert* e = h->lookup(layer, expert);
+  if (!e) return -2;  // not resident
+  *out_ptr = e->gate;
+  *out_bytes = h->expert_block_bytes();
+  return 0;
+}
+
+const void* sb_cpu_arena_base(sb_cpu_host_t* host) {
+  return host ? as_host(host)->arena_base() : nullptr;
 }
 
 size_t sb_cpu_arena_used(sb_cpu_host_t* host) {

@@ -131,6 +131,7 @@ ADAPTER_VARS = (
     "SHOOTING_BRAKE_B70_GRAPH",
     "SHOOTING_BRAKE_B70_STATS",
     "SHOOTING_BRAKE_PLACEMENT",
+    "SHOOTING_BRAKE_ALL_OUT",
 )
 
 
@@ -151,7 +152,7 @@ def apply_config_env(config: str, placement: str) -> None:
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
         "SHOOTING_BRAKE_B70_STATS": "1",
     }
-    if config == "hybrid":
+    if config in ("hybrid", "all-out"):
         env.update({
             "SHOOTING_BRAKE_PLACEMENT": placement,
             "SHOOTING_BRAKE_HYBRID": "1",
@@ -159,6 +160,11 @@ def apply_config_env(config: str, placement: str) -> None:
             "SHOOTING_BRAKE_VRAM_SURGERY": "1",
             "SHOOTING_BRAKE_B70_GRAPH": "1",
         })
+        # The cold tier is refused unless asked for explicitly, so a
+        # mistyped placement degrades to an error rather than to a
+        # silently B70-only run wearing an all-out label.
+        if config == "all-out":
+            env["SHOOTING_BRAKE_ALL_OUT"] = "1"
     elif config == "all-cuda":
         # The adapter stays installed, with an all-CUDA placement: no
         # surgery, no B70, no Tier 3. This isolates the hybrid path
@@ -450,7 +456,13 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True, choices=("all-cuda", "hybrid"))
+    parser.add_argument(
+        "--config", required=True,
+        choices=("all-cuda", "hybrid", "all-out"),
+        help="all-cuda baseline, hybrid (CUDA+B70), or all-out "
+             "(CUDA+B70+CPU DRAM); all-out additionally requires an "
+             "'allout:...' placement",
+    )
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--decode-tokens", type=int, default=400)

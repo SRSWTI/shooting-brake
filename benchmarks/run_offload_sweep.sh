@@ -51,8 +51,16 @@ set -euo pipefail
 # A spread across the two knobs: active-layer count rises 8 -> 16 -> 24,
 # and split:128 is the all-32-layers baseline policy.
 PLACEMENTS="${PLACEMENTS:-subset:8:8 subset:16:8 subset:24:64 split:128}"
+# Three-tier placements ("allout:<layers>:<cuda>:<cpu>"). Empty by default:
+# the cold tier is a deliberate opt-in, so a plain sweep never pays its cost
+# without being asked.
+ALLOUT_PLACEMENTS="${ALLOUT_PLACEMENTS:-}"
 DECODE_TOKENS="${DECODE_TOKENS:-400}"
 CONCURRENCY="${CONCURRENCY:-1 8 32}"
+# Smoke-test knobs: TRIALS=1 with a couple of context lengths gives the
+# shape of the tradeoff in minutes rather than the full curve in hours.
+TRIALS="${TRIALS:-2}"
+CONTEXT_LENGTHS="${CONTEXT_LENGTHS:-2048}"
 # Engine admission cap. The offload tradeoff is visible at short context,
 # so 8192 is a fast default; raise to 32768/131072 to also see the KV
 # capacity difference at long context (slower cells).
@@ -75,11 +83,11 @@ run_one () {
     --placement "${placement:-split:128}" \
     --out "$out" \
     --max-model-len "$MAX_MODEL_LEN" \
-    --trials 2 \
+    --trials "$TRIALS" \
     --decode-tokens "$DECODE_TOKENS" \
     --batch-tokens 128 \
     --concurrency $CONCURRENCY \
-    --context-lengths 2048
+    --context-lengths $CONTEXT_LENGTHS
   # Let the card cool before the next process grabs the GPU.
   sleep "$REST_BETWEEN"
 }
@@ -90,6 +98,15 @@ run_one all-cuda "" "$OUT_DIR/all-cuda.json"
 for p in $PLACEMENTS; do
   slug="$(echo "$p" | tr ':' '-')"
   run_one hybrid "$p" "$OUT_DIR/hybrid-${slug}.json"
+done
+
+# Three-tier runs, if any were asked for. Kept separate from PLACEMENTS
+# because the cold tier is opt-in: it needs SHOOTING_BRAKE_ALL_OUT=1, which
+# run_one sets only for the all-out config, so an "allout:" policy listed
+# under PLACEMENTS would be refused rather than quietly downgraded.
+for p in $ALLOUT_PLACEMENTS; do
+  slug="$(echo "$p" | tr ':' '-')"
+  run_one all-out "$p" "$OUT_DIR/allout-${slug}.json"
 done
 
 echo "[track_b] summarizing -> $OUT_DIR"

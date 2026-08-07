@@ -122,6 +122,35 @@ int sb_cpu_moe_forward(sb_cpu_host_t* host, size_t layer,
                        const int32_t* expert_ids, const float* weights,
                        size_t M, size_t topk, float* output_f32);
 
+/**
+ * Borrow one expert's contiguous weight block.
+ *
+ * gate|up|down occupy a single allocation in that order, so the whole
+ * expert is one DMA-able extent. The prefill path relies on this: at large
+ * M the CPU cores stop being bandwidth-bound and turn compute-bound, so the
+ * cheaper move is to ship the weights to the 5090 and let it do the GEMM.
+ * Streaming targets the 5090 specifically -- the B70 sits behind a PCIe
+ * Gen3 x4 chipset link (~3.9 GB/s), which is 16x too narrow to stage into.
+ *
+ * The pointer is borrowed and stays valid until sb_cpu_destroy. To make it
+ * DMA-able the caller pins the arena once via sb_cpu_arena_base.
+ *
+ * @param out_ptr   Receives the block start (== the gate plane).
+ * @param out_bytes Receives the block size in bytes.
+ * @return 0 on success, -2 if the expert is not resident.
+ */
+int sb_cpu_expert_block(sb_cpu_host_t* host, size_t layer, size_t expert,
+                        const void** out_ptr, size_t* out_bytes);
+
+/**
+ * Arena base address, for a one-time cudaHostRegister over [base, used).
+ *
+ * Registering the committed prefix rather than the whole reservation
+ * matters: the arena is deliberately oversized and only backed on first
+ * touch, so pinning all of it would commit pages that hold nothing.
+ */
+const void* sb_cpu_arena_base(sb_cpu_host_t* host);
+
 /** Bytes actually committed in the arena. */
 size_t sb_cpu_arena_used(sb_cpu_host_t* host);
 

@@ -29,15 +29,21 @@ import torch
 
 sys.path.insert(0, "phase4/src")
 
-from shooting_brake_vllm.cpu_expert_host import CpuExpertHost  # noqa: E402
+from shooting_brake_vllm.cpu_expert_host import (  # noqa: E402
+    CpuExpertHost,
+    PackedPlane,
+)
 from shooting_brake_vllm.cpu_stream import ExpertStreamer  # noqa: E402
 
-# Qualified model shape (Qwen3.6-35B-A3B): 9.0 MiB per expert in bf16.
+# Qualified model shape (Qwen3.6-35B-A3B-NVFP4), read from its config rather
+# than assumed: hidden 2048, moe_intermediate 512, 256 experts, top-8. One
+# expert is 1.69 MiB packed against 6.00 MiB as bf16.
 HIDDEN = 2048
-INTER = 768
+INTER = 512
 NUM_EXPERTS = 256
 TOPK = 8
 
+BLOCK = 16
 #: Cold experts per layer, matching allout:16:8:8.
 CPU_PER_LAYER = 8
 
@@ -46,6 +52,14 @@ REPEATS = 7
 WARMUP = 2
 
 
+def make_plane(rows: int, cols: int, gen: torch.Generator) -> PackedPlane:
+    """A packed NVFP4 plane with realistic density and scale magnitudes."""
+    q = torch.randint(0, 256, (rows, cols // 2), generator=gen, dtype=torch.uint8)
+    exp = torch.randint(4, 11, (rows, cols // BLOCK), generator=gen)
+    man = torch.randint(0, 8, (rows, cols // BLOCK), generator=gen)
+    sf = ((exp << 3) | man).to(torch.uint8)
+    return PackedPlane(q.contiguous(), sf.contiguous(), 1.0)
+
 def build_routes(
     M: int, cold: list[int], gen: torch.Generator
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -53,6 +67,12 @@ def build_routes(
 
     Routes landing on resident experts keep their id; everything else is -1,
     exactly as the partition hands it to either tier.
+
+    At small M a uniform draw frequently yields no cold route at all -- with
+    8 of 256 experts resident the expected count at M=1 is 0.25 -- and a row
+    with nothing to compute measures neither tier. One route is therefore
+    forced onto a resident expert, which is also the case decode actually
+    cares about: the cost of a single cold expert firing.
     """
     ids = torch.randint(
         0, NUM_EXPERTS, (M, TOPK), generator=gen, dtype=torch.int32
@@ -60,6 +80,8 @@ def build_routes(
     cold_set = torch.zeros(NUM_EXPERTS, dtype=torch.bool)
     cold_set[torch.tensor(cold)] = True
     ids = torch.where(cold_set[ids.long()], ids, torch.full_like(ids, -1))
+    if int((ids >= 0).sum()) == 0:
+        ids[0, 0] = cold[0]
     weights = torch.rand(M, TOPK, generator=gen, dtype=torch.float32)
     return ids, weights
 
@@ -90,14 +112,17 @@ def main() -> int:
         num_layers=1, num_experts=NUM_EXPERTS, hidden=HIDDEN,
         intermediate=INTER, max_experts=CPU_PER_LAYER,
     )
+    elems = HIDDEN * INTER
+    packed_mib = 3 * (elems // 2 + elems // BLOCK) / 2**20
     print(f"loading {CPU_PER_LAYER} cold experts "
-          f"({3 * HIDDEN * INTER * 2 / 2**20:.1f} MiB each)")
+          f"({packed_mib:.2f} MiB each packed, "
+          f"{3 * elems * 2 / 2**20:.1f} MiB as bf16)")
     for e in cold:
         host.load_expert(
             0, e,
-            (torch.randn(INTER, HIDDEN, generator=gen) * 0.05).bfloat16(),
-            (torch.randn(INTER, HIDDEN, generator=gen) * 0.05).bfloat16(),
-            (torch.randn(HIDDEN, INTER, generator=gen) * 0.05).bfloat16(),
+            make_plane(INTER, HIDDEN, gen),
+            make_plane(INTER, HIDDEN, gen),
+            make_plane(HIDDEN, INTER, gen),
         )
     pinned = host.pin_arena()
     print(f"arena {host.arena_used_bytes / 2**20:.1f} MiB, "

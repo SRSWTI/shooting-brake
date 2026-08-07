@@ -543,30 +543,33 @@ class HybridRoutedExperts(RoutedExperts):
         )
 
     def _load_cpu_experts(self, layer_idx: int) -> None:
-        """Dequantize this layer's CPU-owned experts into the DRAM arena.
+        """Copy this layer's CPU-owned experts into the DRAM arena, packed.
 
         Must run before VRAM surgery slices the CUDA weights: surgery keeps
         only CUDA-owned experts, so once it has run the CPU tier's source
         weights are gone. :func:`_install_surgery_hook` orders the two.
 
-        The arena holds bf16 while the model holds NVFP4, so the weights are
-        dequantized on the GPU (where the unpack is cheap and already
-        implemented) and copied down. That costs ~2x the DRAM the packed
-        form would, which is the price of not writing an NVFP4 CPU GEMM;
-        the tier is bandwidth-bound either way, so the packed form would
-        actually be *faster* to stream. Revisit if DRAM becomes the limit.
+        Weights stay in NVFP4 rather than being dequantized. That is a
+        capacity decision before it is a speed one: bf16 costs 2 bytes per
+        weight against NVFP4's 0.5625, and at 3.56x a 60 GiB expert bank
+        becomes 216 GiB and stops fitting in host DRAM at all. It is also
+        faster, since this tier's cost model is bytes-read.
+
+        The only transformation applied is to the block scales. The
+        checkpoint stores them swizzled for a hardware kernel this tier does
+        not use, so they are converted to linear order once, here, rather
+        than being un-swizzled on every access.
 
         Weight layout matches ``nn.Linear``: vLLM fuses gate and up into
-        ``w13_weight`` as ``[E, 2*I, H]`` with gate first, and keeps down as
-        ``w2_weight`` ``[E, H, I]`` — exactly the arena's expected shapes,
+        ``w13_weight`` as ``[E, 2*I, H/2]`` with gate first, and keeps down as
+        ``w2_weight`` ``[E, H, I/2]`` — exactly the arena's expected shapes,
         so the split is a view, not a transpose.
         """
         from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
-            dequantize_to_dtype,
-            kE2M1ToFloat_handle,
+            convert_swizzled_to_linear,
         )
 
-        from .cpu_expert_host import get_cpu_host
+        from .cpu_expert_host import PackedPlane, get_cpu_host
 
         placement = self.shooting_brake_placement
         cpu_ids = placement.cpu_expert_ids(layer_idx)
@@ -577,32 +580,21 @@ class HybridRoutedExperts(RoutedExperts):
         idx = torch.tensor(list(cpu_ids), device=device, dtype=torch.long)
         qconfig = self.quant_method.moe_quant_config
 
-        # break_fp4_bytes indexes a module-level E2M1 lookup table with the
-        # weight's nibbles, so the table has to be on the weight's device.
-        # vLLM's own emulation callers do exactly this; it is safe here
-        # because weight loading is not graph capture, where the .to() would
-        # be illegal.
-        kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(device)
+        w13_q = self.w13_weight.data.index_select(0, idx)
+        w2_q = self.w2_weight.data.index_select(0, idx)
+        w13_sf = self.w13_weight_scale.data.index_select(0, idx)
+        w2_sf = self.w2_weight_scale.data.index_select(0, idx)
+        w13_gs = qconfig._w1.alpha_or_gscale.index_select(0, idx).float()
+        w2_gs = qconfig._w2.alpha_or_gscale.index_select(0, idx).float()
 
-        # [n_cpu, 2*I, H] and [n_cpu, H, I], both bf16.
-        w13 = dequantize_to_dtype(
-            self.w13_weight.data.index_select(0, idx),
-            self.w13_weight_scale.data.index_select(0, idx),
-            qconfig._w1.alpha_or_gscale.index_select(0, idx),
-            torch.bfloat16,
-        )
-        w2 = dequantize_to_dtype(
-            self.w2_weight.data.index_select(0, idx),
-            self.w2_weight_scale.data.index_select(0, idx),
-            qconfig._w2.alpha_or_gscale.index_select(0, idx),
-            torch.bfloat16,
-        )
-        inter = w13.shape[1] // 2
+        hidden = self.hidden_size
+        two_inter = w13_q.shape[1]
+        inter = two_inter // 2
 
         host = get_cpu_host(
             num_layers=placement.num_layers,
             num_experts=placement.num_experts,
-            hidden=self.hidden_size,
+            hidden=hidden,
             intermediate=inter,
             max_experts=placement.cpu_count(),
             num_threads=int(os.environ.get("SHOOTING_BRAKE_CPU_THREADS", "0")),
@@ -612,20 +604,53 @@ class HybridRoutedExperts(RoutedExperts):
         # slice a streamed block back into gate/up/down.
         self._cpu_intermediate = inter
 
-        w13_cpu = w13.cpu()
-        w2_cpu = w2.cpu()
+        def linear_sf(sf: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+            """Swizzled -> linear block scales, as raw e4m3 bytes."""
+            lin = convert_swizzled_to_linear(
+                sf.view(torch.float8_e4m3fn), rows, cols, 16,
+            )
+            return lin.reshape(rows, cols // 16).view(torch.uint8).cpu()
+
+        w13_q_cpu = w13_q.cpu()
+        w2_q_cpu = w2_q.cpu()
         for slot, expert_id in enumerate(cpu_ids):
+            sf13 = linear_sf(w13_sf[slot], two_inter, hidden)
+            sf2 = linear_sf(w2_sf[slot], hidden, inter)
+            gs13 = float(w13_gs[slot])
             host.load_expert(
                 layer_idx, expert_id,
-                w13_cpu[slot, :inter].contiguous(),   # gate [I, H]
-                w13_cpu[slot, inter:].contiguous(),   # up   [I, H]
-                w2_cpu[slot].contiguous(),            # down [H, I]
+                PackedPlane(w13_q_cpu[slot, :inter].contiguous(),
+                            sf13[:inter].contiguous(), gs13),
+                PackedPlane(w13_q_cpu[slot, inter:].contiguous(),
+                            sf13[inter:].contiguous(), gs13),
+                PackedPlane(w2_q_cpu[slot].contiguous(),
+                            sf2.contiguous(), float(w2_gs[slot])),
             )
 
         if os.environ.get("SHOOTING_BRAKE_CPU_VERIFY") == "1":
-            self._verify_cpu_expert(host, layer_idx, cpu_ids, w13_cpu, w2_cpu,
-                                    inter)
-        del w13, w2, w13_cpu, w2_cpu
+            from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+                dequantize_to_dtype,
+                kE2M1ToFloat_handle,
+            )
+
+            # break_fp4_bytes indexes a module-level E2M1 table with the
+            # weight's nibbles, so the table must be on the weight's device.
+            # vLLM's own emulation callers do exactly this; legal here
+            # because weight loading is not graph capture.
+            kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(device)
+            ref13 = dequantize_to_dtype(
+                w13_q[0], w13_sf[0], w13_gs[0], torch.float32,
+            ).cpu()
+            ref2 = dequantize_to_dtype(
+                w2_q[0], w2_sf[0], w2_gs[0], torch.float32,
+            ).cpu()
+            self._verify_cpu_expert(
+                host, layer_idx, cpu_ids[0],
+                ref13[:inter].contiguous(), ref13[inter:].contiguous(),
+                ref2.contiguous(),
+            )
+            del ref13, ref2
+        del w13_q, w2_q, w13_q_cpu, w2_q_cpu
 
         logger.info(
             "Shooting Brake all-out: layer %d loaded %d experts into DRAM "
@@ -638,35 +663,35 @@ class HybridRoutedExperts(RoutedExperts):
         self,
         host: Any,
         layer_idx: int,
-        cpu_ids: tuple[int, ...],
-        w13_cpu: torch.Tensor,
-        w2_cpu: torch.Tensor,
-        inter: int,
+        expert_id: int,
+        gate: torch.Tensor,
+        up: torch.Tensor,
+        down: torch.Tensor,
     ) -> None:
-        """Check the arena reproduces a torch FFN over the same weights.
+        """Check the packed arena reproduces vLLM's own dequantization.
 
-        This is the one step in the CPU tier that is proven by construction
-        rather than by measurement: the NVFP4 unpack, the scale convention,
-        the gate/up split of the fused ``w13``, and the arena's row-major
-        expectations all have to agree, and every way of getting them wrong
-        produces plausible-looking numbers rather than an error.
+        This is the step in the CPU tier proven by construction rather than
+        by measurement, and every way of getting it wrong yields plausible
+        numbers instead of an error: nibble order within a byte, the sign
+        bit, e4m3's subnormal branch, the gate/up split of the fused
+        ``w13``, the arena's row-major expectations, and the direction the
+        global scale folds — vLLM's reference quantiser divides by it where
+        ``dequantize_to_dtype`` multiplies.
 
-        Comparing against torch over the *already dequantized* weights
-        isolates exactly the second half of that chain — layout, arena
-        copy, and kernel. A transposed gate or a swapped gate/up shows up
-        here immediately; a wrong dequant does not, which is what the
-        end-to-end token comparison is for.
+        The reference planes come from ``dequantize_to_dtype`` on the
+        *swizzled* checkpoint tensors, i.e. the same values the CUDA kernel
+        sees. That makes this strictly stronger than comparing against
+        already-dequantized weights: it also proves the swizzled-to-linear
+        scale conversion done at load time, which is the one transformation
+        this tier applies to the checkpoint.
         """
-        expert_id = cpu_ids[0]
         gen = torch.Generator().manual_seed(0)
         x = (torch.randn(4, self.hidden_size, generator=gen) * 0.5).bfloat16()
 
-        gate = w13_cpu[0, :inter].float()
-        up = w13_cpu[0, inter:].float()
-        down = w2_cpu[0].float()
-        g = x.float() @ gate.T
-        u = x.float() @ up.T
-        want = (torch.nn.functional.silu(g) * u) @ down.T
+        xf = x.float()
+        want = (
+            torch.nn.functional.silu(xf @ gate.T) * (xf @ up.T)
+        ) @ down.T
 
         got = host.expert_forward(layer_idx, expert_id, x)
         err = (got - want).abs().max().item()

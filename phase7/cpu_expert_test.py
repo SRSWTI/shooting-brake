@@ -22,9 +22,11 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent /
                        "phase4" / "src"))
 
+import nvfp4_testutil  # noqa: E402
 from shooting_brake_vllm.cpu_expert_host import (  # noqa: E402
     CpuExpertError,
     CpuExpertHost,
+    PackedPlane,
 )
 
 LAYERS = 4
@@ -54,17 +56,18 @@ def close(name: str, got: torch.Tensor, want: torch.Tensor,
 def reference_ffn(x: torch.Tensor, gate: torch.Tensor, up: torch.Tensor,
                   down: torch.Tensor) -> torch.Tensor:
     """y = (silu(x @ gate^T) * (x @ up^T)) @ down^T, all in fp32."""
-    g = x.float() @ gate.float().T
-    u = x.float() @ up.float().T
-    return (torch.nn.functional.silu(g) * u) @ down.float().T
+    return nvfp4_testutil.ffn(x, gate, up, down)
 
 
-def make_expert(gen: torch.Generator) -> tuple[torch.Tensor, ...]:
-    # Scaled down so SiLU sees a realistic pre-activation range rather than
-    # saturating, which would hide sign/ordering errors.
-    def w(rows: int, cols: int) -> torch.Tensor:
-        return (torch.randn(rows, cols, generator=gen) * 0.05).bfloat16()
-    return w(INTER, HIDDEN), w(INTER, HIDDEN), w(HIDDEN, INTER)
+def make_expert(
+    gen: torch.Generator,
+) -> tuple[tuple, tuple]:
+    """Packed planes plus their dequantized references.
+
+    Both are needed: the arena stores packed NVFP4, while the checks compare
+    against vLLM's dequantization of those same bytes.
+    """
+    return nvfp4_testutil.make_expert(HIDDEN, INTER, gen)
 
 
 def main() -> int:
@@ -85,12 +88,16 @@ def main() -> int:
     check("arena reserved", host.arena_capacity_bytes > 0,
           f"{host.arena_capacity_bytes / 2**20:.1f} MiB")
 
-    weights: dict[tuple[int, int], tuple[torch.Tensor, ...]] = {}
+    weights: dict[tuple[int, int], tuple] = {}
+    # Packed planes kept alongside their dequantized references: the guards
+    # below need well-formed planes to pair with a deliberately broken one.
+    packed: dict[tuple[int, int], tuple] = {}
     for layer in range(LAYERS):
         for expert in range(EXPERTS):
-            w = make_expert(gen)
-            weights[(layer, expert)] = w
-            host.load_expert(layer, expert, *w)
+            planes, refs = make_expert(gen)
+            weights[(layer, expert)] = refs
+            packed[(layer, expert)] = planes
+            host.load_expert(layer, expert, *planes)
     check("all experts loaded", host.resident_count == LAYERS * EXPERTS,
           f"resident={host.resident_count}")
     check("arena used <= capacity",
@@ -168,12 +175,12 @@ def main() -> int:
         max_experts=1, num_threads=2, lib_path=lib,
     )
     w0 = make_expert(gen)
-    sparse.load_expert(0, 0, *w0)
+    sparse.load_expert(0, 0, *w0[0])
     x1 = (torch.randn(1, HIDDEN, generator=gen) * 0.5).bfloat16()
     ids = torch.tensor([[0, 6, -1, -1]], dtype=torch.int32)  # 6 not resident
     rw = torch.tensor([[0.5, 0.5, 0.0, 0.0]], dtype=torch.float32)
     got = sparse.moe_forward(0, x1, ids, rw)
-    want = 0.5 * reference_ffn(x1, *w0)
+    want = 0.5 * reference_ffn(x1, *w0[1])
     close("resident route still correct", got, want)
     check("non-resident route counted", sparse.skipped_routes == 1,
           f"skipped={sparse.skipped_routes}")
@@ -181,11 +188,23 @@ def main() -> int:
 
     print("\n== contract: input validation ==")
     for name, fn in [
-        ("fp32 weights rejected", lambda: host.load_expert(
-            0, 0, torch.zeros(INTER, HIDDEN), *weights[(0, 0)][1:])),
+        ("unpacked (full-width) weights rejected", lambda: host.load_expert(
+            0, 0,
+            PackedPlane(torch.zeros(INTER, HIDDEN, dtype=torch.uint8),
+                        torch.zeros(INTER, HIDDEN // 16, dtype=torch.uint8),
+                        1.0),
+            *packed[(0, 0)][1:])),
         ("transposed gate rejected", lambda: host.load_expert(
-            0, 0, torch.zeros(HIDDEN, INTER, dtype=torch.bfloat16),
-            *weights[(0, 0)][1:])),
+            0, 0,
+            PackedPlane(torch.zeros(HIDDEN, INTER // 2, dtype=torch.uint8),
+                        torch.zeros(HIDDEN, INTER // 16, dtype=torch.uint8),
+                        1.0),
+            *packed[(0, 0)][1:])),
+        ("fp32 block scales rejected", lambda: host.load_expert(
+            0, 0,
+            PackedPlane(torch.zeros(INTER, HIDDEN // 2, dtype=torch.uint8),
+                        torch.zeros(INTER, HIDDEN // 16), 1.0),
+            *packed[(0, 0)][1:])),
         ("fp32 hidden rejected", lambda: host.moe_forward(
             0, torch.zeros(1, HIDDEN), torch.zeros(1, TOPK, dtype=torch.int32),
             torch.zeros(1, TOPK))),
@@ -201,7 +220,7 @@ def main() -> int:
 
     print("\n== reload in place does not grow the arena ==")
     used_before = host.arena_used_bytes
-    host.load_expert(0, 0, *weights[(0, 0)])
+    host.load_expert(0, 0, *packed[(0, 0)])
     check("reload reuses slot", host.arena_used_bytes == used_before,
           f"{used_before} -> {host.arena_used_bytes}")
 

@@ -22,7 +22,10 @@ import torch
 
 sys.path.insert(0, "phase4/src")
 
-from shooting_brake_vllm.cpu_expert_host import CpuExpertHost  # noqa: E402
+from shooting_brake_vllm.cpu_expert_host import (  # noqa: E402
+    CpuExpertHost,
+    PackedPlane,
+)
 from shooting_brake_vllm.cpu_stream import ExpertStreamer  # noqa: E402
 
 HIDDEN = 512
@@ -30,6 +33,7 @@ INTER = 192
 NUM_LAYERS = 3
 NUM_EXPERTS = 16
 TOPK = 4
+BLOCK = 16
 
 _failures: list[str] = []
 
@@ -40,12 +44,19 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         _failures.append(name)
 
 
-def make_expert(gen: torch.Generator) -> tuple[torch.Tensor, ...]:
-    """Weights scaled so activations stay in bf16's comfortable range."""
-    gate = (torch.randn(INTER, HIDDEN, generator=gen) * 0.05).bfloat16()
-    up = (torch.randn(INTER, HIDDEN, generator=gen) * 0.05).bfloat16()
-    down = (torch.randn(HIDDEN, INTER, generator=gen) * 0.05).bfloat16()
-    return gate, up, down
+def make_plane(rows: int, cols: int, gen: torch.Generator) -> PackedPlane:
+    """A packed NVFP4 plane covering every nibble code and a scale band."""
+    q = torch.randint(0, 256, (rows, cols // 2), generator=gen, dtype=torch.uint8)
+    exp = torch.randint(4, 11, (rows, cols // BLOCK), generator=gen)
+    man = torch.randint(0, 8, (rows, cols // BLOCK), generator=gen)
+    sf = ((exp << 3) | man).to(torch.uint8)
+    return PackedPlane(q.contiguous(), sf.contiguous(), 1.0)
+
+
+def make_expert(gen: torch.Generator) -> tuple[PackedPlane, ...]:
+    return (make_plane(INTER, HIDDEN, gen),
+            make_plane(INTER, HIDDEN, gen),
+            make_plane(HIDDEN, INTER, gen))
 
 
 def main() -> int:
@@ -74,19 +85,27 @@ def main() -> int:
           f"{host.resident_count} experts, {host.arena_used_bytes / 2**20:.1f} MiB")
 
     print("== arena block view")
-    # The block must alias the arena and expose gate|up|down in order; if the
-    # three planes were not one allocation this is where it breaks.
+    # The block must alias the arena and expose the six packed sections in
+    # order; if they were not one allocation this is where it breaks.
     blk = host.expert_block(0, 0)
-    plane = HIDDEN * INTER
-    check("block is one contiguous extent", blk.numel() == 3 * plane,
-          f"{blk.numel()} elems, expected {3 * plane}")
+    elems = HIDDEN * INTER
+    nq, nsf = elems // 2, elems // BLOCK
+    want_bytes = 3 * (nq + nsf)
+    check("block is one contiguous packed extent", blk.numel() == want_bytes,
+          f"{blk.numel()} bytes, expected {want_bytes}")
     g, u, d = weights[(0, 0)]
-    check("gate plane matches",
-          torch.equal(blk[:plane].view(INTER, HIDDEN), g))
-    check("up plane matches",
-          torch.equal(blk[plane:2 * plane].view(INTER, HIDDEN), u))
-    check("down plane matches",
-          torch.equal(blk[2 * plane:].view(HIDDEN, INTER), d))
+    for i, (name, plane, rows, cols) in enumerate((
+        ("gate", g, INTER, HIDDEN),
+        ("up", u, INTER, HIDDEN),
+        ("down", d, HIDDEN, INTER),
+    )):
+        base = i * (nq + nsf)
+        check(f"{name} nibbles match",
+              torch.equal(blk[base:base + nq].view(rows, cols // 2), plane.q))
+        check(f"{name} block scales match",
+              torch.equal(
+                  blk[base + nq:base + nq + nsf].view(rows, cols // BLOCK),
+                  plane.sf))
 
     print("== arena pinning")
     pinned = host.pin_arena()

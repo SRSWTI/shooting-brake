@@ -8,35 +8,36 @@
  * are computed on CPU cores, freeing both GPUs' VRAM for hotter experts and
  * KV cache.
  *
- * Cost model (measured, not estimated). A decode-shaped expert pass (M=1)
- * reads every weight exactly once and reuses none of them, so it is a pure
- * DRAM stream: latency is ``expert_bytes / achievable_bandwidth`` and compute
- * never enters the picture. For the qualified model (hidden=2048,
- * intermediate=768 -- 9.0 MiB of bf16 per expert) on the reference host
- * (Core Ultra 9 285K, DDR5), phase7/cpu_expert_bench.py measures:
- *
- *      1 thread   -> 1340 us  @  7.0 GB/s
- *      2 threads  ->  690 us  @ 13.7 GB/s
- *      8 threads  ->  287 us  @ 32.8 GB/s
- *     12 threads  ->  195 us  @ 48.3 GB/s
- *
- * Two things follow. Thread count is not a tuning knob but a requirement --
- * single-threaded, this tier is nearly 7x slower and unusable. And the
- * achieved ceiling is ~48 GB/s, well under DDR5's theoretical peak, so plan
+ * Cost model. A decode-shaped expert pass (M=1) reads every weight exactly
+ * once and reuses none of them, so it is a pure DRAM stream: latency is
+ * ``expert_bytes / achievable_bandwidth`` and, once the decode is vectorized,
+ * compute stays out of the way. Thread count is not a tuning knob but a
+ * requirement -- single-threaded this tier is several times slower and
+ * unusable -- and the achievable ceiling on the reference host (Core Ultra 9
+ * 285K, DDR5) measures ~48 GB/s, well under DDR5's theoretical peak, so plan
  * against the measured figure.
  *
- * The B70 reads the same weights from ~450 GB/s VRAM in roughly 40us, making
- * this tier ~5x slower. That ratio is the whole reason it is the *cold* tier:
- * placement must keep frequently-routed experts off it. A hot expert parked
- * here is a latency bug, not a capacity win.
+ * Weights are stored packed NVFP4, not dequantized. At 0.5625 bytes per
+ * weight against bf16's 2, that is 3.56x less DRAM for the same experts --
+ * which is what decides whether a large expert bank fits at all. For the
+ * qualified model (hidden=2048, moe_intermediate=512, 256 experts) one expert
+ * is 1.69 MiB packed against 6.00 MiB as bf16; for a 122B-class model
+ * (hidden=3072, moe_intermediate=1024) it is 5.06 MiB against 18.0 MiB, and
+ * the full 48-layer bank is 60.8 GiB rather than 216 GiB.
+ *
+ * The B70 reads the same weights from ~450 GB/s VRAM, making this tier
+ * roughly an order of magnitude slower. That ratio is the whole reason it is
+ * the *cold* tier: placement must keep frequently-routed experts off it. A
+ * hot expert parked here is a latency bug, not a capacity win.
  *
  * Weight layout follows PyTorch ``nn.Linear`` (``[out_features, in_features]``)
- * so no transpose is needed at load time, and each output row's dot product
- * walks contiguous memory -- the right access pattern for the M=1 GEMV that
+ * so no transpose is needed at load time, and each output row walks
+ * contiguous memory -- the right access pattern for the M=1 GEMV that
  * dominates decode.
  *
- * Storage is bf16, accumulation is fp32. bf16 -> fp32 is a 16-bit shift, so
- * the conversion is free relative to the DRAM read it rides along with.
+ * Accumulation is fp32. Decoding is hoisted out of the token loop: an NVFP4
+ * element costs ~8 integer ops scalar, so decoding per (row, token) rather
+ * than per row multiplies real work by M.
  *
  * Return convention: 0 = ok, <0 = error.
  */
@@ -71,20 +72,48 @@ sb_cpu_host_t* sb_cpu_create(size_t num_layers, size_t num_experts,
                              size_t max_experts, size_t num_threads);
 
 /**
- * Load one expert's bf16 weights into the arena.
+ * Load one expert's packed NVFP4 weights into the arena.
+ *
+ * Weights are stored exactly as the checkpoint carries them -- two 4-bit
+ * elements per byte (low nibble first) plus one float8_e4m3fn scale per 16
+ * elements -- and reconstructed as
+ *
+ *     W[n][k] = e2m1(nibble) * e4m3(blockscale) * gscale
+ *
+ * which is what vLLM's dequantize_to_dtype evaluates. Block scales must
+ * already be in linear (un-swizzled) order; the checkpoint's swizzled layout
+ * exists for a hardware kernel this tier does not use.
+ *
+ * Storing packed rather than dequantized is what makes a large expert bank
+ * fit: 0.5625 bytes per weight against bf16's 2, a 3.56x difference. It also
+ * makes the tier faster, since its cost model is bytes-read.
  *
  * Copies are made; the caller's buffers may be freed immediately after.
- * Re-loading an already-resident (layer, expert) overwrites it in place
- * and does not consume additional arena space.
+ * Re-loading an already-resident (layer, expert) overwrites it in place and
+ * does not consume additional arena space.
  *
- * @param gate_bf16 bf16 [intermediate, hidden].
- * @param up_bf16   bf16 [intermediate, hidden].
- * @param down_bf16 bf16 [hidden, intermediate].
- * @return 0 on success, <0 on error (arena exhausted, bad index).
+ * @param gate_q  nvfp4 [intermediate, hidden/2];  gate_sf e4m3 [intermediate, hidden/16]
+ * @param up_q    nvfp4 [intermediate, hidden/2];  up_sf   e4m3 [intermediate, hidden/16]
+ * @param down_q  nvfp4 [hidden, intermediate/2];  down_sf e4m3 [hidden, intermediate/16]
+ * @param gs_*    per-plane global scale.
+ * @return 0 ok, -1 bad index/null, -2 arena exhausted, -3 hidden*intermediate
+ *         is not a multiple of 16.
  */
 int sb_cpu_load_expert(sb_cpu_host_t* host, size_t layer, size_t expert,
-                       const void* gate_bf16, const void* up_bf16,
-                       const void* down_bf16);
+                       const void* gate_q, const void* gate_sf, float gs_gate,
+                       const void* up_q, const void* up_sf, float gs_up,
+                       const void* down_q, const void* down_sf, float gs_down);
+
+/**
+ * The three per-plane global scales, in gate/up/down order.
+ *
+ * Kept out of the DMA block: a streamed copy carries only packed bytes, and
+ * the GPU-side dequant needs these as scalars.
+ *
+ * @return 0 on success, -2 if the expert is not resident.
+ */
+int sb_cpu_expert_gscales(sb_cpu_host_t* host, size_t layer, size_t expert,
+                          float* out3);
 
 /** 1 if (layer, expert) is CPU-resident, 0 otherwise. */
 int sb_cpu_has_expert(sb_cpu_host_t* host, size_t layer, size_t expert);

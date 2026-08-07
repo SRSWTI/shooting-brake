@@ -7,6 +7,9 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
 #include <functional>
 #include <mutex>
 #include <new>
@@ -30,6 +33,59 @@ constexpr size_t kAlign = 64;           // cache line
 // is UB; every compiler folds this to a single move.
 inline float bf16_to_f32(uint16_t v) noexcept {
   const uint32_t bits = static_cast<uint32_t>(v) << 16;
+  float f;
+  std::memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+
+// NVFP4 element decode: 1 sign bit + 3 magnitude bits per weight.
+//
+// Magnitudes 2..7 lie on a regular ladder -- {1, 1.5, 2, 3, 4, 6} is exactly
+// what `0x3F000000 + (mag << 22)` produces when bitcast to fp32 -- so the
+// common case is one shift, one add and a bitcast, with no lookup table to
+// pull through cache. E2M1 has no subnormal exponent field, so magnitudes 0
+// and 1 fall off that ladder and are patched to 0.0 and 0.5.
+//
+// Written branch-light on purpose: this runs once per weight, and the whole
+// point of storing NVFP4 rather than bf16 is that the tier becomes
+// compute-sensitive once it stops being starved for bandwidth.
+inline float e2m1_to_f32(uint32_t nib) noexcept {
+  const uint32_t mag = nib & 0x7u;
+  uint32_t bits = 0x3F000000u + (mag << 22);
+  if (mag < 2u) bits = (mag == 0u) ? 0u : 0x3F000000u;
+  bits |= (nib & 0x8u) << 28;  // sign bit 3 -> bit 31
+  float f;
+  std::memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+
+// Block scales are stored as raw float8_e4m3fn bytes, matching what the
+// checkpoint carries. Decoded through a 256-entry table built once: the
+// scale is read once per 16 weights, so the lookup is 1/16th the traffic of
+// the element decode and costs nothing measurable.
+//
+// e4m3fn has no infinities; exponent 15 with mantissa 7 is NaN. That is left
+// as NaN rather than clamped, so a corrupt scale surfaces loudly instead of
+// quietly biasing an expert.
+inline float e4m3_to_f32(uint8_t v) noexcept {
+  const uint32_t sign = static_cast<uint32_t>(v & 0x80u) << 24;
+  const uint32_t exp = (v >> 3) & 0x0Fu;
+  const uint32_t man = v & 0x07u;
+  uint32_t bits;
+  if (exp == 0u) {
+    if (man == 0u) {
+      bits = sign;  // +/- 0
+    } else {
+      // Subnormal: 2^-6 * (man / 8).
+      const float f = std::ldexp(static_cast<float>(man), -9);
+      std::memcpy(&bits, &f, sizeof(bits));
+      bits |= sign;
+    }
+  } else if (exp == 0x0Fu && man == 0x07u) {
+    bits = 0x7FC00000u | sign;  // NaN
+  } else {
+    bits = sign | ((exp + 120u) << 23) | (man << 20);  // bias 7 -> 127
+  }
   float f;
   std::memcpy(&f, &bits, sizeof(f));
   return f;
@@ -209,51 +265,160 @@ class ThreadPool {
 // W is [N, K] row-major (PyTorch nn.Linear), so each output n walks one
 // contiguous weight row -- the layout that makes the M=1 decode case a clean
 // sequential stream. [n_begin, n_end) is this thread's slice of the output.
+//
+// Weights stay packed NVFP4, exactly as the checkpoint carries them: two
+// 4-bit elements per byte (low nibble first) plus one float8_e4m3fn scale per
+// 16 elements, times one global scale per plane. So
+//
+//     W[n][k] = e2m1(nibble) * e4m3(blockscale) * gscale
+//
+// which is the expression vLLM's dequantize_to_dtype evaluates. That
+// equivalence is the entire correctness argument and is deliberately not
+// re-derived: the reference quantiser in the same vLLM module folds the
+// global scale in the opposite direction, and matching the wrong one yields
+// plausible weights rather than an error.
+//
+// Packed costs arithmetic and saves 3.56x the DRAM (0.5625 vs 2 bytes per
+// weight). For a tier whose whole cost model is bytes-read that is why it can
+// hold a 60 GiB expert bank at all -- dequantized, the same bank would need
+// 216 GiB.
 
-void matmul_bf16in(const uint16_t* __restrict W, const uint16_t* __restrict in,
-                   float* __restrict out, size_t M, size_t N, size_t K,
-                   size_t n_begin, size_t n_end) {
-  for (size_t m = 0; m < M; ++m) {
-    const uint16_t* xrow = in + m * K;
-    float* orow = out + m * N;
-    for (size_t n = n_begin; n < n_end; ++n) {
-      const uint16_t* wrow = W + n * K;
+// Decoding is hoisted out of the token loop. With bf16 the "decode" was a
+// single shift, so repeating it per token cost nothing and the natural
+// token-outer order was fine. An NVFP4 element costs ~8 integer ops, so
+// decoding once per (row, token) rather than once per row multiplies this
+// tier's real work by M -- measured, that alone made packed storage 2x
+// slower than bf16 at M=128 despite reading 3.56x fewer bytes.
+//
+// So: row outer, decode once into scratch, then every token dots against it.
+
+// One decoded weight row, in floats. 4096 covers hidden=3072 (the 122B
+// shape) with room to spare, and 16 KiB of stack stays in L1 next to the
+// activation. Anything larger falls back to the heap rather than smashing
+// the stack.
+constexpr size_t kRowScratch = 4096;
+
+inline void decode_row(const uint8_t* __restrict q,
+                       const uint8_t* __restrict s, float gscale,
+                       const float* __restrict sf_tab, float* __restrict w,
+                       size_t kblocks) noexcept {
+  for (size_t b = 0; b < kblocks; ++b) {
+    // The 16 weights of a block share one scale, so it lifts out of the
+    // element loop, leaving 16 independent decodes.
+    const float bs = sf_tab[s[b]] * gscale;
+    const uint8_t* qb = q + b * 8;
+    float* wb = w + b * 16;
+#if defined(__AVX2__)
+    // The whole E2M1 magnitude ladder doubled -- {0,1,2,3,4,6,8,12} and its
+    // negatives -- fits in int8, so a single vpshufb decodes all 16 nibbles
+    // of the block against a 16-byte table, sign included. Halving is folded
+    // into the scale, so nothing has to undo the doubling.
+    //
+    // This matters more than it looks: scalar, the decode costs ~8 integer
+    // ops per weight and leaves the tier 20x above its DRAM floor, which is
+    // the opposite of what packing was for.
+    const __m128i lut = _mm_setr_epi8(0, 1, 2, 3, 4, 6, 8, 12,
+                                      0, -1, -2, -3, -4, -6, -8, -12);
+    const __m128i mask = _mm_set1_epi8(0x0F);
+    const __m128i bytes = _mm_loadl_epi64(
+        reinterpret_cast<const __m128i*>(qb));
+    const __m128i lo = _mm_and_si128(bytes, mask);
+    const __m128i hi = _mm_and_si128(_mm_srli_epi16(bytes, 4), mask);
+    // Low nibble is the even element, high the odd one; unpacklo restores
+    // that order. Swapping them transposes weight pairs undetectably.
+    const __m128i codes = _mm_unpacklo_epi8(_mm_shuffle_epi8(lut, lo),
+                                            _mm_shuffle_epi8(lut, hi));
+    const __m256 scale = _mm256_set1_ps(bs * 0.5f);
+    _mm256_storeu_ps(wb, _mm256_mul_ps(
+        _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(codes)), scale));
+    _mm256_storeu_ps(wb + 8, _mm256_mul_ps(
+        _mm256_cvtepi32_ps(
+            _mm256_cvtepi8_epi32(_mm_srli_si128(codes, 8))),
+        scale));
+#else
+    for (size_t j = 0; j < 8; ++j) {
+      const uint8_t byte = qb[j];
+      wb[2 * j] = e2m1_to_f32(byte & 0x0Fu) * bs;
+      wb[2 * j + 1] = e2m1_to_f32(byte >> 4) * bs;
+    }
+#endif
+  }
+}
+
+class RowScratch {
+ public:
+  explicit RowScratch(size_t K) : ptr_(stack_) {
+    if (K > kRowScratch) {
+      heap_.resize(K);
+      ptr_ = heap_.data();
+    }
+  }
+  float* get() noexcept { return ptr_; }
+
+ private:
+  float stack_[kRowScratch];
+  std::vector<float> heap_;
+  float* ptr_;
+};
+
+void matmul_nvfp4_bf16in(const uint8_t* __restrict Wq,
+                         const uint8_t* __restrict Wsf, float gscale,
+                         const float* __restrict sf_tab,
+                         const uint16_t* __restrict in, float* __restrict out,
+                         size_t M, size_t N, size_t K, size_t n_begin,
+                         size_t n_end) {
+  const size_t knib = K / 2;
+  const size_t kblocks = K / 16;
+  RowScratch scratch(K);
+  float* __restrict w = scratch.get();
+
+  for (size_t n = n_begin; n < n_end; ++n) {
+    decode_row(Wq + n * knib, Wsf + n * kblocks, gscale, sf_tab, w, kblocks);
+    for (size_t m = 0; m < M; ++m) {
+      const uint16_t* xrow = in + m * K;
       // Four accumulators: breaks the loop-carried dependency so the FMA
       // pipeline stays fed instead of stalling on latency.
       float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
       size_t k = 0;
       for (; k + 4 <= K; k += 4) {
-        a0 += bf16_to_f32(xrow[k + 0]) * bf16_to_f32(wrow[k + 0]);
-        a1 += bf16_to_f32(xrow[k + 1]) * bf16_to_f32(wrow[k + 1]);
-        a2 += bf16_to_f32(xrow[k + 2]) * bf16_to_f32(wrow[k + 2]);
-        a3 += bf16_to_f32(xrow[k + 3]) * bf16_to_f32(wrow[k + 3]);
+        a0 += bf16_to_f32(xrow[k + 0]) * w[k + 0];
+        a1 += bf16_to_f32(xrow[k + 1]) * w[k + 1];
+        a2 += bf16_to_f32(xrow[k + 2]) * w[k + 2];
+        a3 += bf16_to_f32(xrow[k + 3]) * w[k + 3];
       }
-      for (; k < K; ++k) a0 += bf16_to_f32(xrow[k]) * bf16_to_f32(wrow[k]);
-      orow[n] = (a0 + a1) + (a2 + a3);
+      for (; k < K; ++k) a0 += bf16_to_f32(xrow[k]) * w[k];
+      out[m * N + n] = (a0 + a1) + (a2 + a3);
     }
   }
 }
 
 // Same shape, fp32 activations: the down projection consumes the SwiGLU
 // product, which is computed rather than loaded.
-void matmul_f32in(const uint16_t* __restrict W, const float* __restrict in,
-                  float* __restrict out, size_t M, size_t N, size_t K,
-                  size_t n_begin, size_t n_end) {
-  for (size_t m = 0; m < M; ++m) {
-    const float* xrow = in + m * K;
-    float* orow = out + m * N;
-    for (size_t n = n_begin; n < n_end; ++n) {
-      const uint16_t* wrow = W + n * K;
+void matmul_nvfp4_f32in(const uint8_t* __restrict Wq,
+                        const uint8_t* __restrict Wsf, float gscale,
+                        const float* __restrict sf_tab,
+                        const float* __restrict in, float* __restrict out,
+                        size_t M, size_t N, size_t K, size_t n_begin,
+                        size_t n_end) {
+  const size_t knib = K / 2;
+  const size_t kblocks = K / 16;
+  RowScratch scratch(K);
+  float* __restrict w = scratch.get();
+
+  for (size_t n = n_begin; n < n_end; ++n) {
+    decode_row(Wq + n * knib, Wsf + n * kblocks, gscale, sf_tab, w, kblocks);
+    for (size_t m = 0; m < M; ++m) {
+      const float* xrow = in + m * K;
       float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
       size_t k = 0;
       for (; k + 4 <= K; k += 4) {
-        a0 += xrow[k + 0] * bf16_to_f32(wrow[k + 0]);
-        a1 += xrow[k + 1] * bf16_to_f32(wrow[k + 1]);
-        a2 += xrow[k + 2] * bf16_to_f32(wrow[k + 2]);
-        a3 += xrow[k + 3] * bf16_to_f32(wrow[k + 3]);
+        a0 += xrow[k + 0] * w[k + 0];
+        a1 += xrow[k + 1] * w[k + 1];
+        a2 += xrow[k + 2] * w[k + 2];
+        a3 += xrow[k + 3] * w[k + 3];
       }
-      for (; k < K; ++k) a0 += xrow[k] * bf16_to_f32(wrow[k]);
-      orow[n] = (a0 + a1) + (a2 + a3);
+      for (; k < K; ++k) a0 += xrow[k] * w[k];
+      out[m * N + n] = (a0 + a1) + (a2 + a3);
     }
   }
 }
@@ -262,10 +427,19 @@ void matmul_f32in(const uint16_t* __restrict W, const float* __restrict in,
 // Host
 // ---------------------------------------------------------------------------
 
+// One expert's packed planes. Each plane is nibbles followed by its block
+// scales; the three planes plus their scales form one contiguous extent so
+// the prefill path can DMA a whole expert to the 5090 in a single transfer.
 struct CpuExpert {
-  const uint16_t* gate;  // bf16 [intermediate, hidden]
-  const uint16_t* up;    // bf16 [intermediate, hidden]
-  const uint16_t* down;  // bf16 [hidden, intermediate]
+  const uint8_t* gate_q;   // nvfp4 [intermediate, hidden/2]
+  const uint8_t* gate_sf;  // e4m3  [intermediate, hidden/16]
+  const uint8_t* up_q;
+  const uint8_t* up_sf;
+  const uint8_t* down_q;   // nvfp4 [hidden, intermediate/2]
+  const uint8_t* down_sf;  // e4m3  [hidden, intermediate/16]
+  float gs_gate;
+  float gs_up;
+  float gs_down;
 };
 
 class CpuExpertHost {
@@ -280,42 +454,60 @@ class CpuExpertHost {
                kHugePage /* slack for alignment */),
         pool_(num_threads) {
     slots_.assign(num_layers * num_experts, -1);
+    for (size_t i = 0; i < 256; ++i) {
+      sf_tab_[i] = e4m3_to_f32(static_cast<uint8_t>(i));
+    }
   }
 
   bool valid() const noexcept { return arena_.valid(); }
 
+  // Bytes one expert occupies: 3 planes of hidden*intermediate weights, each
+  // half a byte, plus one e4m3 scale per 16 weights. 0.5625 B/weight against
+  // bf16's 2.
   static size_t expert_bytes(size_t hidden, size_t intermediate) noexcept {
-    // gate + up are [intermediate, hidden]; down is [hidden, intermediate].
-    return 3 * hidden * intermediate * sizeof(uint16_t);
+    const size_t elems = hidden * intermediate;
+    return 3 * (elems / 2 + elems / 16);
   }
 
-  int load_expert(size_t layer, size_t expert, const void* gate,
-                  const void* up, const void* down) {
+  int load_expert(size_t layer, size_t expert, const void* gate_q,
+                  const void* gate_sf, float gs_gate, const void* up_q,
+                  const void* up_sf, float gs_up, const void* down_q,
+                  const void* down_sf, float gs_down) {
     if (layer >= num_layers_ || expert >= num_experts_) return -1;
-    const size_t plane = hidden_ * intermediate_ * sizeof(uint16_t);
+    const size_t elems = hidden_ * intermediate_;
+    if (elems % 16 != 0) return -3;  // block scales assume 16 | K
+    const size_t nq = elems / 2;
+    const size_t nsf = elems / 16;
     const size_t key = layer * num_experts_ + expert;
 
     CpuExpert* slot;
     if (slots_[key] >= 0) {
       slot = &experts_[static_cast<size_t>(slots_[key])];
     } else {
-      // One allocation for all three planes, not three. Contiguity is a
-      // requirement, not a convenience: the prefill path DMAs an expert to
-      // the 5090 as a single transfer, and three separate bump allocations
-      // only happen to be adjacent while `plane` stays a multiple of the
-      // arena's alignment. Carving one block makes that structural.
-      char* blk = static_cast<char*>(arena_.alloc(3 * plane));
+      // One allocation for everything. Contiguity is a requirement, not a
+      // convenience: the prefill path DMAs an expert as a single transfer,
+      // and separate bump allocations are only adjacent while every plane
+      // size happens to be a multiple of the arena's alignment.
+      char* blk = static_cast<char*>(arena_.alloc(3 * (nq + nsf)));
       if (!blk) return -2;  // arena exhausted
+      auto* p = reinterpret_cast<uint8_t*>(blk);
       experts_.push_back(CpuExpert{
-          reinterpret_cast<uint16_t*>(blk),
-          reinterpret_cast<uint16_t*>(blk + plane),
-          reinterpret_cast<uint16_t*>(blk + 2 * plane)});
+          p, p + nq,
+          p + (nq + nsf), p + (nq + nsf) + nq,
+          p + 2 * (nq + nsf), p + 2 * (nq + nsf) + nq,
+          0.0f, 0.0f, 0.0f});
       slots_[key] = static_cast<int32_t>(experts_.size() - 1);
       slot = &experts_.back();
     }
-    std::memcpy(const_cast<uint16_t*>(slot->gate), gate, plane);
-    std::memcpy(const_cast<uint16_t*>(slot->up), up, plane);
-    std::memcpy(const_cast<uint16_t*>(slot->down), down, plane);
+    std::memcpy(const_cast<uint8_t*>(slot->gate_q), gate_q, nq);
+    std::memcpy(const_cast<uint8_t*>(slot->gate_sf), gate_sf, nsf);
+    std::memcpy(const_cast<uint8_t*>(slot->up_q), up_q, nq);
+    std::memcpy(const_cast<uint8_t*>(slot->up_sf), up_sf, nsf);
+    std::memcpy(const_cast<uint8_t*>(slot->down_q), down_q, nq);
+    std::memcpy(const_cast<uint8_t*>(slot->down_sf), down_sf, nsf);
+    slot->gs_gate = gs_gate;
+    slot->gs_up = gs_up;
+    slot->gs_down = gs_down;
     return 0;
   }
 
@@ -335,15 +527,18 @@ class CpuExpertHost {
     const size_t hid = hidden_;
 
     pool_.parallel_for(inter, [&](size_t b, size_t en) {
-      matmul_bf16in(e.gate, input_bf16, g, M, inter, hid, b, en);
+      matmul_nvfp4_bf16in(e.gate_q, e.gate_sf, e.gs_gate, sf_tab_,
+                          input_bf16, g, M, inter, hid, b, en);
     });
     pool_.parallel_for(inter, [&](size_t b, size_t en) {
-      matmul_bf16in(e.up, input_bf16, u, M, inter, hid, b, en);
+      matmul_nvfp4_bf16in(e.up_q, e.up_sf, e.gs_up, sf_tab_,
+                          input_bf16, u, M, inter, hid, b, en);
     });
     // Fuse the activation into gate's buffer; down then reads one array.
     for (size_t i = 0, n = M * inter; i < n; ++i) g[i] = silu(g[i]) * u[i];
     pool_.parallel_for(hid, [&](size_t b, size_t en) {
-      matmul_f32in(e.down, g, output, M, hid, inter, b, en);
+      matmul_nvfp4_f32in(e.down_q, e.down_sf, e.gs_down, sf_tab_,
+                         g, output, M, hid, inter, b, en);
     });
   }
 
@@ -445,6 +640,19 @@ class CpuExpertHost {
   }
   const void* arena_base() const noexcept { return arena_.base(); }
 
+  // The three per-plane global scales. They live outside the DMA block
+  // because the streamed copy carries only the packed bytes; the GPU-side
+  // dequant needs these separately and they are 12 bytes, not worth
+  // complicating the block layout or its alignment for.
+  int expert_gscales(size_t layer, size_t expert, float out[3]) const {
+    const CpuExpert* e = lookup(layer, expert);
+    if (!e) return -2;
+    out[0] = e->gs_gate;
+    out[1] = e->gs_up;
+    out[2] = e->gs_down;
+    return 0;
+  }
+
  private:
   void ensure_scratch(size_t M) {
     const size_t need = M * intermediate_;
@@ -467,6 +675,10 @@ class CpuExpertHost {
   const size_t intermediate_;
   HugeArena arena_;
   ThreadPool pool_;
+
+  // float8_e4m3fn -> fp32, built once. Read once per 16 weights, so a table
+  // here costs nothing while keeping the element decode branch-light.
+  float sf_tab_[256];
 
   std::vector<int32_t> slots_;      // (layer, expert) -> index into experts_
   std::vector<CpuExpert> experts_;  // arena-backed weight pointers
@@ -637,11 +849,22 @@ sb_cpu_host_t* sb_cpu_create(size_t num_layers, size_t num_experts,
 }
 
 int sb_cpu_load_expert(sb_cpu_host_t* host, size_t layer, size_t expert,
-                       const void* gate_bf16, const void* up_bf16,
-                       const void* down_bf16) {
-  if (!host || !gate_bf16 || !up_bf16 || !down_bf16) return -1;
-  return as_host(host)->load_expert(layer, expert, gate_bf16, up_bf16,
-                                    down_bf16);
+                       const void* gate_q, const void* gate_sf, float gs_gate,
+                       const void* up_q, const void* up_sf, float gs_up,
+                       const void* down_q, const void* down_sf,
+                       float gs_down) {
+  if (!host || !gate_q || !gate_sf || !up_q || !up_sf || !down_q || !down_sf) {
+    return -1;
+  }
+  return as_host(host)->load_expert(layer, expert, gate_q, gate_sf, gs_gate,
+                                    up_q, up_sf, gs_up, down_q, down_sf,
+                                    gs_down);
+}
+
+int sb_cpu_expert_gscales(sb_cpu_host_t* host, size_t layer, size_t expert,
+                          float* out3) {
+  if (!host || !out3) return -1;
+  return as_host(host)->expert_gscales(layer, expert, out3);
 }
 
 int sb_cpu_has_expert(sb_cpu_host_t* host, size_t layer, size_t expert) {
@@ -673,7 +896,7 @@ int sb_cpu_expert_block(sb_cpu_host_t* host, size_t layer, size_t expert,
   CpuExpertHost* h = as_host(host);
   const CpuExpert* e = h->lookup(layer, expert);
   if (!e) return -2;  // not resident
-  *out_ptr = e->gate;
+  *out_ptr = e->gate_q;
   *out_bytes = h->expert_block_bytes();
   return 0;
 }

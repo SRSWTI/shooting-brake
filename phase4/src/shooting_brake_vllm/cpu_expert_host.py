@@ -39,6 +39,7 @@ from __future__ import annotations
 import ctypes
 import os
 from pathlib import Path
+from typing import NamedTuple
 
 import torch
 
@@ -53,6 +54,31 @@ except ImportError:  # standalone use, outside a vLLM process
 logger = init_logger(__name__)
 
 _DEFAULT_LIB = "phase7/libsb_cpu_expert.so"
+
+
+class PackedPlane(NamedTuple):
+    """One NVFP4 weight matrix as the arena stores it.
+
+    Packed rather than dequantized, because the tier's cost is bytes-read and
+    NVFP4 is 0.5625 B/weight against bf16's 2 -- a 3.56x difference that
+    decides whether a large expert bank fits in host DRAM at all.
+
+    Reconstruction is ``e2m1(q) * e4m3(sf) * gscale``, matching what vLLM's
+    ``dequantize_to_dtype`` computes. Note its reference quantiser in the same
+    module folds ``gscale`` the other way; this is the multiply convention.
+
+    Attributes:
+        q: uint8 ``[out_features, in_features / 2]``, two nibbles per byte,
+            low nibble first.
+        sf: uint8 ``[out_features, in_features / 16]``, raw float8_e4m3fn
+            block scales in **linear** order -- not the checkpoint's swizzled
+            layout, which exists for a kernel this tier does not use.
+        gscale: per-plane global scale.
+    """
+
+    q: torch.Tensor
+    sf: torch.Tensor
+    gscale: float
 
 
 class CpuExpertError(RuntimeError):
@@ -116,7 +142,15 @@ class CpuExpertHost:
         lib.sb_cpu_load_expert.restype = ctypes.c_int
         lib.sb_cpu_load_expert.argtypes = [
             ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t,
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_float,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_float,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_float,
+        ]
+
+        lib.sb_cpu_expert_gscales.restype = ctypes.c_int
+        lib.sb_cpu_expert_gscales.argtypes = [
+            ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_float),
         ]
 
         lib.sb_cpu_has_expert.restype = ctypes.c_int
@@ -194,41 +228,65 @@ class CpuExpertHost:
     def _ptr(t: torch.Tensor) -> ctypes.c_void_p:
         return ctypes.c_void_p(t.data_ptr())
 
-    def _check_weight(self, t: torch.Tensor, rows: int, cols: int,
-                      name: str) -> torch.Tensor:
+    def _check_plane(self, plane: "PackedPlane", rows: int, cols: int,
+                     name: str) -> "PackedPlane":
         """Reject anything the native side would read incorrectly.
 
-        A silently transposed or non-contiguous weight produces plausible
-        garbage rather than an error, so shape, dtype, device and stride are
-        all enforced here where the failure is still legible.
+        A transposed, non-contiguous or wrongly-shaped plane produces
+        plausible garbage rather than an error, so shape, dtype, device and
+        stride are all enforced here where the failure is still legible.
+
+        ``cols`` counts weights, not bytes: nibbles are half a byte each and
+        there is one scale per 16 of them.
         """
-        if t.dtype is not torch.bfloat16:
-            raise CpuExpertError(f"{name} must be bfloat16, got {t.dtype}")
-        if t.device.type != "cpu":
-            raise CpuExpertError(f"{name} must be on CPU, got {t.device}")
-        if tuple(t.shape) != (rows, cols):
+        if cols % 16:
             raise CpuExpertError(
-                f"{name} must be [{rows}, {cols}], got {tuple(t.shape)}"
+                f"{name}: in_features={cols} must be a multiple of 16; "
+                "NVFP4 block scales cover 16 weights each"
             )
-        return t if t.is_contiguous() else t.contiguous()
+        for tag, t, want, dtype in (
+            ("weights", plane.q, (rows, cols // 2), torch.uint8),
+            ("scales", plane.sf, (rows, cols // 16), torch.uint8),
+        ):
+            if t.dtype is not dtype:
+                raise CpuExpertError(
+                    f"{name} {tag} must be {dtype}, got {t.dtype}"
+                )
+            if t.device.type != "cpu":
+                raise CpuExpertError(
+                    f"{name} {tag} must be on CPU, got {t.device}"
+                )
+            if tuple(t.shape) != want:
+                raise CpuExpertError(
+                    f"{name} {tag} must be {list(want)}, got {list(t.shape)}"
+                )
+        return PackedPlane(
+            plane.q if plane.q.is_contiguous() else plane.q.contiguous(),
+            plane.sf if plane.sf.is_contiguous() else plane.sf.contiguous(),
+            float(plane.gscale),
+        )
 
     # -- loading ---------------------------------------------------------
 
-    def load_expert(self, layer: int, expert: int, gate: torch.Tensor,
-                    up: torch.Tensor, down: torch.Tensor) -> None:
-        """Copy one expert's weights into the DRAM arena.
+    def load_expert(self, layer: int, expert: int, gate: "PackedPlane",
+                    up: "PackedPlane", down: "PackedPlane") -> None:
+        """Copy one expert's packed NVFP4 weights into the DRAM arena.
 
-        The native side memcpy's out of these buffers, so they may be freed
-        (or their VRAM originals released by surgery) as soon as this returns.
+        Each plane carries its nibbles, its linear-order e4m3 block scales,
+        and its global scale. The native side memcpy's out of these buffers,
+        so they may be freed -- or their VRAM originals released by surgery --
+        as soon as this returns.
         """
         handle = self._require_open()
-        gate = self._check_weight(gate, self.intermediate, self.hidden, "gate")
-        up = self._check_weight(up, self.intermediate, self.hidden, "up")
-        down = self._check_weight(down, self.hidden, self.intermediate, "down")
+        gate = self._check_plane(gate, self.intermediate, self.hidden, "gate")
+        up = self._check_plane(up, self.intermediate, self.hidden, "up")
+        down = self._check_plane(down, self.hidden, self.intermediate, "down")
 
         rc = self._lib.sb_cpu_load_expert(
             handle, int(layer), int(expert),
-            self._ptr(gate), self._ptr(up), self._ptr(down),
+            self._ptr(gate.q), self._ptr(gate.sf), gate.gscale,
+            self._ptr(up.q), self._ptr(up.sf), up.gscale,
+            self._ptr(down.q), self._ptr(down.sf), down.gscale,
         )
         if rc == -2:
             raise CpuExpertError(
@@ -324,11 +382,12 @@ class CpuExpertHost:
     # -- weight streaming (prefill) ---------------------------------------
 
     def expert_block(self, layer: int, expert: int) -> torch.Tensor:
-        """Zero-copy bf16 view of one expert's ``gate|up|down`` block.
+        """Zero-copy uint8 view of one expert's packed weight block.
 
-        The three planes are one allocation, so the returned flat tensor is
-        a single DMA-able extent -- the caller ships it to CUDA in one copy
-        and slices it on the far side.
+        The block is ``gate_q | gate_sf | up_q | up_sf | down_q | down_sf``
+        in one allocation, so the returned flat tensor is a single DMA-able
+        extent -- the caller ships it to CUDA in one copy and unpacks it on
+        the far side.
 
         The view aliases arena memory rather than owning it: it stays valid
         until :meth:`close`, and writing through it edits the resident
@@ -349,11 +408,28 @@ class CpuExpertHost:
         if rc != 0:
             raise CpuExpertError(f"sb_cpu_expert_block failed rc={rc}")
 
-        n_u16 = nbytes.value // 2
-        buf = (ctypes.c_uint16 * n_u16).from_address(ptr.value)
-        # frombuffer aliases; uint16 then bit-cast, because ctypes has no
-        # bf16 and reinterpreting is exactly what we want.
-        return torch.frombuffer(buf, dtype=torch.uint16).view(torch.bfloat16)
+        buf = (ctypes.c_uint8 * nbytes.value).from_address(ptr.value)
+        return torch.frombuffer(buf, dtype=torch.uint8)
+
+    def expert_gscales(
+        self, layer: int, expert: int
+    ) -> tuple[float, float, float]:
+        """Per-plane global scales, in gate/up/down order.
+
+        Carried outside the DMA block: the streamed copy is packed bytes
+        only, and the GPU-side dequant needs these as scalars.
+        """
+        out = (ctypes.c_float * 3)()
+        rc = self._lib.sb_cpu_expert_gscales(
+            self._require_open(), int(layer), int(expert),
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_float)),
+        )
+        if rc != 0:
+            raise CpuExpertError(
+                f"sb_cpu_expert_gscales failed rc={rc} "
+                f"(layer={layer}, expert={expert})"
+            )
+        return (out[0], out[1], out[2])
 
     def pin_arena(self) -> bool:
         """Register the committed arena with CUDA so H2D copies are real DMA.

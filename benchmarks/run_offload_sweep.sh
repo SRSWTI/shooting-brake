@@ -50,11 +50,14 @@ set -euo pipefail
 
 # A spread across the two knobs: active-layer count rises 8 -> 16 -> 24,
 # and split:128 is the all-32-layers baseline policy.
-PLACEMENTS="${PLACEMENTS:-subset:8:8 subset:16:8 subset:24:64 split:128}"
+# ${VAR-default} rather than ${VAR:-default}: an explicitly empty PLACEMENTS
+# means "run none of these", which is how a single tier gets measured on its
+# own. The colon form would silently substitute the default instead.
+PLACEMENTS="${PLACEMENTS-subset:8:8 subset:16:8 subset:24:64 split:128}"
 # Three-tier placements ("allout:<layers>:<cuda>:<cpu>"). Empty by default:
 # the cold tier is a deliberate opt-in, so a plain sweep never pays its cost
 # without being asked.
-ALLOUT_PLACEMENTS="${ALLOUT_PLACEMENTS:-}"
+ALLOUT_PLACEMENTS="${ALLOUT_PLACEMENTS-}"
 DECODE_TOKENS="${DECODE_TOKENS:-400}"
 CONCURRENCY="${CONCURRENCY:-1 8 32}"
 # Smoke-test knobs: TRIALS=1 with a couple of context lengths gives the

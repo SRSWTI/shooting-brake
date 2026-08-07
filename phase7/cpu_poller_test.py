@@ -33,6 +33,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent /
                        "phase4" / "src"))
 
+import nvfp4_testutil  # noqa: E402
 from shooting_brake_vllm.cpu_expert_host import (  # noqa: E402
     CpuExpertHost,
     CpuExpertPoller,
@@ -95,9 +96,9 @@ def main() -> int:
     for e in range(EXPERTS):
         host.load_expert(
             LAYER, e,
-            (torch.randn(INTER, HIDDEN, generator=gen) * 0.05).bfloat16(),
-            (torch.randn(INTER, HIDDEN, generator=gen) * 0.05).bfloat16(),
-            (torch.randn(HIDDEN, INTER, generator=gen) * 0.05).bfloat16(),
+            nvfp4_testutil.make_plane(INTER, HIDDEN, gen),
+            nvfp4_testutil.make_plane(INTER, HIDDEN, gen),
+            nvfp4_testutil.make_plane(HIDDEN, INTER, gen),
         )
 
     # Buffers the poller holds raw pointers into. These must stay referenced

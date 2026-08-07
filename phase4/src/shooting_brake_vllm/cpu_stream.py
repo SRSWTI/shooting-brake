@@ -114,11 +114,18 @@ class ExpertStreamer:
 
         self._plane = self.hidden * self.intermediate
         self._slots = max(1, int(slots))
+        # Packed NVFP4: half a byte per weight plus one e4m3 block scale per
+        # 16, three planes per expert.
+        self._block_bytes = 3 * (self._plane // 2 + self._plane // 16)
 
-        # Ring of device-side weight slots, plus the events that keep a
-        # copy from overwriting a slot still being read.
+        # Ring of device-side slots holding the arena's packed bytes verbatim,
+        # plus the events that keep a copy from overwriting a slot still being
+        # read. uint8 because these are packed bytes, not weights: the unpack
+        # happens after the transfer, which is exactly what makes the transfer
+        # 3.56x smaller.
         self._ring = torch.empty(
-            self._slots, 3 * self._plane, dtype=dtype, device=self.device,
+            self._slots, self._block_bytes, dtype=torch.uint8,
+            device=self.device,
         )
         self._copy_stream = torch.cuda.Stream(device=self.device)
         self._copy_done = [torch.cuda.Event() for _ in range(self._slots)]
@@ -128,9 +135,19 @@ class ExpertStreamer:
             # something to wait on rather than a special case.
             ev.record()
 
-        # Host-side arena views, built once per expert and reused. Rebuilding
-        # the ctypes view per call would allocate on the prefill path.
+        # E2M1 magnitude ladder, indexed by nibble: sign in bit 3, magnitude
+        # in bits 0-2. Resident on device so the unpack is a gather rather
+        # than a host round trip.
+        mags = torch.tensor(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32,
+        )
+        self._e2m1 = torch.cat((mags, -mags)).to(self.device)
+
+        # Host-side arena views and per-expert global scales, built once and
+        # reused. Rebuilding either per call would allocate on the prefill
+        # path.
         self._blocks: dict[tuple[int, int], torch.Tensor] = {}
+        self._gscales: dict[tuple[int, int], tuple[torch.Tensor, ...]] = {}
 
         self.experts_streamed = 0
         self.bytes_streamed = 0
@@ -146,24 +163,84 @@ class ExpertStreamer:
             self._blocks[key] = blk
         return blk
 
-    def _views(self, slot: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Slice a ring slot back into gate, up and down.
+    def _gscale(self, layer: int, expert: int) -> tuple[torch.Tensor, ...]:
+        """Per-plane global scales as device scalars, cached.
+
+        Cached as tensors rather than floats because the dequantizer takes a
+        device scalar: building one per call meant a fresh allocation plus a
+        tiny H2D copy for every plane of every expert of every layer, which
+        showed up as a measurable prefill regression -- hundreds of
+        micro-transfers per step, each dwarfed by its own launch overhead.
+        """
+        key = (layer, expert)
+        gs = self._gscales.get(key)
+        if gs is None:
+            gs = tuple(
+                torch.tensor(v, dtype=torch.float32, device=self.device)
+                for v in self._host.expert_gscales(layer, expert)  # type: ignore[attr-defined]
+            )
+            self._gscales[key] = gs
+        return gs
+
+    def _views(
+        self, slot: int, gscales: tuple[float, float, float]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Unpack a ring slot into dequantized gate, up and down.
+
+        The slot holds the arena's packed bytes verbatim:
+        ``gate_q | gate_sf | up_q | up_sf | down_q | down_sf``. Unpacking on
+        the GPU is the point of streaming packed rather than dequantized
+        data -- the transfer carries 3.56x fewer bytes, and the 5090 absorbs
+        the decode.
 
         Layout matches the arena: ``gate`` and ``up`` are
-        ``[intermediate, hidden]`` and ``down`` is ``[hidden, intermediate]``,
-        laid out in that order.
+        ``[intermediate, hidden]`` and ``down`` is ``[hidden, intermediate]``.
         """
-        p = self._plane
         flat = self._ring[slot]
-        gate = flat[:p].view(self.intermediate, self.hidden)
-        up = flat[p : 2 * p].view(self.intermediate, self.hidden)
-        down = flat[2 * p :].view(self.hidden, self.intermediate)
-        return gate, up, down
+        out = []
+        off = 0
+        for (rows, cols), gs in zip(
+            ((self.intermediate, self.hidden),
+             (self.intermediate, self.hidden),
+             (self.hidden, self.intermediate)),
+            gscales,
+        ):
+            nq = rows * cols // 2
+            nsf = rows * cols // 16
+            q = flat[off:off + nq].view(rows, cols // 2)
+            sf = flat[off + nq:off + nq + nsf].view(rows, cols // 16)
+            off += nq + nsf
+            out.append(self._dequant(q, sf, gs))
+        return out[0], out[1], out[2]
+
+    def _dequant(
+        self, q: torch.Tensor, sf: torch.Tensor, gscale: torch.Tensor
+    ) -> torch.Tensor:
+        """packed NVFP4 -> dtype: e2m1(nib) * e4m3(sf) * gscale.
+
+        Delegates to vLLM's fused Triton dequantizer rather than expressing
+        the unpack as torch ops. Not a style preference: the elementwise form
+        materialises several full-size intermediates, and measured on this
+        path it cost more than the 3.56x of PCIe traffic that packing saves,
+        turning a transfer win into a net loss. The fused kernel makes one
+        pass.
+
+        ``swizzle=False`` is the matching entry point -- the arena stores
+        linear block scales, having undone the checkpoint's swizzle at load
+        time.
+        """
+        from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+            dequantize_to_dtype,
+        )
+
+        return dequantize_to_dtype(
+            q, sf, gscale, self.dtype, block_size=16, swizzle=False,
+        )
 
     @staticmethod
     def _group_routes(
         cpu_ids: torch.Tensor, topk_weights: torch.Tensor
-    ) -> tuple[list[int], torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[list[int], torch.Tensor, torch.Tensor, list[int]]:
         """Bucket routes by expert.
 
         Returns the expert ids present, the per-route token rows and routing
@@ -254,7 +331,7 @@ class ExpertStreamer:
             r = rows[begin:end]
             w = weights[begin:end].to(torch.float32).unsqueeze(1)
 
-            gate, up, down = self._views(slot)
+            gate, up, down = self._views(slot, self._gscale(layer_idx, experts[i]))
             xs = x.index_select(0, r)
             h = F.silu(xs @ gate.t()) * (xs @ up.t())
             y = h @ down.t()
@@ -267,7 +344,7 @@ class ExpertStreamer:
                 issue(nxt)
 
         self.experts_streamed += n
-        self.bytes_streamed += n * 3 * self._plane * self._ring.element_size()
+        self.bytes_streamed += n * self._block_bytes
         return out.to(x.dtype)
 
     # -- introspection ----------------------------------------------------
@@ -311,7 +388,7 @@ def get_streamer(
             "computed on the 5090 from streamed weights instead of on CPU "
             "cores.",
             _streamer_singleton._slots,
-            3 * _streamer_singleton._plane * 2 / 2**20,
+            _streamer_singleton._block_bytes / 2**20,
             "pinned (DMA)" if pinned else "unpinned (staged copies)",
             stream_threshold(),
         )

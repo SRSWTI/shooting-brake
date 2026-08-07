@@ -468,6 +468,129 @@ class CpuExpertHost {
   std::atomic<uint64_t> skipped_{0};
 };
 
+// One registered layer's flags and pinned buffers. Buffers are owned by the
+// caller (CUDA pinned allocations) and must outlive the poller.
+struct PollLayer {
+  size_t layer;
+  volatile uint32_t* signal;
+  volatile uint32_t* completion;
+  const uint16_t* hidden;  // bf16
+  const int32_t* ids;
+  const float* weights;
+  float* output;
+  size_t topk;
+};
+
+// Host-side watcher for graph-captured dispatch. Structurally identical to
+// the B70 poller; see the header for why it cannot live in Python.
+class CpuPoller {
+ public:
+  explicit CpuPoller(CpuExpertHost* host) : host_(host) {}
+
+  ~CpuPoller() { stop(); }
+
+  CpuPoller(const CpuPoller&) = delete;
+  CpuPoller& operator=(const CpuPoller&) = delete;
+
+  // Safe to call while running: the sweep re-snapshots under the same mutex,
+  // and layers are only ever appended.
+  void add(const PollLayer& layer) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    layers_.push_back(layer);
+    layer_count_.store(layers_.size(), std::memory_order_release);
+  }
+
+  int start() {
+    if (running_.exchange(true)) return 0;  // already running
+    try {
+      thread_ = std::thread([this] { loop(); });
+    } catch (...) {
+      running_ = false;
+      return -1;
+    }
+    return 0;
+  }
+
+  void stop() {
+    if (!running_.exchange(false)) return;
+    if (thread_.joinable()) thread_.join();
+  }
+
+  uint64_t dispatch_count() const { return dispatches_.load(); }
+  uint64_t error_count() const { return errors_.load(); }
+  uint64_t service_ns() const { return service_ns_.load(); }
+
+ private:
+  void loop() {
+    std::vector<PollLayer> snapshot;
+    size_t known = 0;
+    int idle = 0;
+
+    while (running_.load(std::memory_order_relaxed)) {
+      if (layer_count_.load(std::memory_order_acquire) != known) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        snapshot = layers_;
+        known = snapshot.size();
+      }
+
+      bool worked = false;
+      for (const PollLayer& entry : snapshot) {
+        // The signal's VALUE is the batch size M; 0 means idle.
+        const uint32_t M = entry.signal[0];
+        if (M == 0) continue;
+
+        // Clear before dispatching so the next graph replay can signal this
+        // layer again while we work.
+        entry.signal[0] = 0;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        worked = true;
+
+        const auto t0 = std::chrono::steady_clock::now();
+        const int rc = host_->moe_forward(entry.layer, entry.hidden, entry.ids,
+                                          entry.weights, M, entry.topk,
+                                          entry.output);
+        if (rc != 0) errors_.fetch_add(1);
+
+        service_ns_.fetch_add(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - t0)
+                .count()));
+
+        // Always release the waiter, even on failure: the CUDA side is parked
+        // in cuStreamWaitValue32, which has no timeout.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        entry.completion[0] = 1;
+        dispatches_.fetch_add(1);
+      }
+
+      // Back off when idle rather than spinning hot. A dispatch costs ~195us
+      // here, so sleep granularity is noise against it, and a spinning
+      // watcher would take a core from the FFN pool that needs it.
+      if (worked) {
+        idle = 0;
+      } else if (++idle < 512) {
+        SB_SPIN_HINT();
+      } else {
+        std::this_thread::sleep_for(std::chrono::microseconds(20));
+      }
+    }
+  }
+
+  CpuExpertHost* host_;
+  std::vector<PollLayer> layers_;
+  std::mutex mutex_;
+  std::atomic<size_t> layer_count_{0};
+  std::atomic<bool> running_{false};
+  std::atomic<uint64_t> dispatches_{0};
+  std::atomic<uint64_t> errors_{0};
+  std::atomic<uint64_t> service_ns_{0};
+  std::thread thread_;
+};
+
+inline CpuPoller* as_poller(sb_cpu_poller_t* p) {
+  return static_cast<CpuPoller*>(p);
+}
+
 inline CpuExpertHost* as_host(sb_cpu_host_t* h) {
   return static_cast<CpuExpertHost*>(h);
 }
@@ -542,6 +665,50 @@ size_t sb_cpu_resident_count(sb_cpu_host_t* host) {
 
 uint64_t sb_cpu_skipped_routes(sb_cpu_host_t* host) {
   return host ? as_host(host)->skipped() : 0;
+}
+
+sb_cpu_poller_t* sb_cpu_poll_create(sb_cpu_host_t* host) {
+  if (!host) return nullptr;
+  return new (std::nothrow) CpuPoller(as_host(host));
+}
+
+int sb_cpu_poll_register(sb_cpu_poller_t* poller, size_t layer,
+                         volatile uint32_t* signal,
+                         volatile uint32_t* completion, const void* hidden,
+                         const int32_t* ids, const float* weights,
+                         float* output, size_t topk) {
+  if (!poller || !signal || !completion || !hidden || !ids || !weights ||
+      !output || topk == 0) {
+    return -1;
+  }
+  as_poller(poller)->add(PollLayer{layer, signal, completion,
+                                   static_cast<const uint16_t*>(hidden), ids,
+                                   weights, output, topk});
+  return 0;
+}
+
+int sb_cpu_poll_start(sb_cpu_poller_t* poller) {
+  return poller ? as_poller(poller)->start() : -1;
+}
+
+void sb_cpu_poll_stop(sb_cpu_poller_t* poller) {
+  if (poller) as_poller(poller)->stop();
+}
+
+uint64_t sb_cpu_poll_dispatch_count(sb_cpu_poller_t* poller) {
+  return poller ? as_poller(poller)->dispatch_count() : 0;
+}
+
+uint64_t sb_cpu_poll_error_count(sb_cpu_poller_t* poller) {
+  return poller ? as_poller(poller)->error_count() : 0;
+}
+
+uint64_t sb_cpu_poll_service_ns(sb_cpu_poller_t* poller) {
+  return poller ? as_poller(poller)->service_ns() : 0;
+}
+
+void sb_cpu_poll_destroy(sb_cpu_poller_t* poller) {
+  delete as_poller(poller);
 }
 
 void sb_cpu_destroy(sb_cpu_host_t* host) {

@@ -135,6 +135,33 @@ class CpuExpertHost:
         lib.sb_cpu_destroy.restype = None
         lib.sb_cpu_destroy.argtypes = [ctypes.c_void_p]
 
+        lib.sb_cpu_poll_create.restype = ctypes.c_void_p
+        lib.sb_cpu_poll_create.argtypes = [ctypes.c_void_p]
+
+        lib.sb_cpu_poll_register.restype = ctypes.c_int
+        lib.sb_cpu_poll_register.argtypes = [
+            ctypes.c_void_p, ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32),
+            ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+            ctypes.c_size_t,
+        ]
+
+        lib.sb_cpu_poll_start.restype = ctypes.c_int
+        lib.sb_cpu_poll_start.argtypes = [ctypes.c_void_p]
+
+        lib.sb_cpu_poll_stop.restype = None
+        lib.sb_cpu_poll_stop.argtypes = [ctypes.c_void_p]
+
+        for name in ("sb_cpu_poll_dispatch_count", "sb_cpu_poll_error_count",
+                     "sb_cpu_poll_service_ns"):
+            fn = getattr(lib, name)
+            fn.restype = ctypes.c_uint64
+            fn.argtypes = [ctypes.c_void_p]
+
+        lib.sb_cpu_poll_destroy.restype = None
+        lib.sb_cpu_poll_destroy.argtypes = [ctypes.c_void_p]
+
     def _require_open(self) -> ctypes.c_void_p:
         if self._handle is None:
             raise CpuExpertError("CPU expert host is closed")
@@ -308,3 +335,163 @@ class CpuExpertHost:
             self.close()
         except Exception:
             pass
+
+
+class CpuExpertPoller:
+    """Handle for the native polling thread that drives the CPU tier.
+
+    Owns nothing but the native handle: the loop itself runs inside
+    ``libsb_cpu_expert.so`` (``sb_cpu_poll_*``) because a Python watcher
+    either costs ~55us per wakeup or holds the GIL and starves the engine
+    thread. See the C header for the full rationale.
+
+    One poller serves every layer — the arena and thread pool are shared, so
+    a second one would only contend for the same DRAM bandwidth.
+    """
+
+    def __init__(self, host: CpuExpertHost) -> None:
+        self._host = host
+        self._lib = host._lib
+        handle = self._lib.sb_cpu_poll_create(host._require_open())
+        if not handle:
+            raise CpuExpertError("sb_cpu_poll_create failed")
+        self._handle: ctypes.c_void_p | None = ctypes.c_void_p(handle)
+        self._started = False
+        self._layers = 0
+
+    def register_layer(
+        self,
+        layer_idx: int,
+        signal_host: int,
+        completion_host: int,
+        pinned_hidden: torch.Tensor,
+        pinned_ids: torch.Tensor,
+        pinned_weights: torch.Tensor,
+        pinned_output: torch.Tensor,
+    ) -> None:
+        """Bind one layer's flags and pinned buffers to the native loop.
+
+        The buffers must stay alive for the poller's lifetime — the native
+        side keeps raw pointers, so letting a tensor be collected turns into
+        a use-after-free on a background thread. The caller (the layer
+        module) owns them for exactly that reason.
+        """
+        if self._handle is None:
+            raise CpuExpertError("poller is destroyed")
+        if pinned_hidden.dtype is not torch.bfloat16:
+            raise CpuExpertError(
+                f"pinned_hidden must be bfloat16, got {pinned_hidden.dtype}")
+        if pinned_ids.dtype is not torch.int32:
+            raise CpuExpertError(
+                f"pinned_ids must be int32, got {pinned_ids.dtype}")
+        if pinned_weights.dtype is not torch.float32:
+            raise CpuExpertError(
+                f"pinned_weights must be float32, got {pinned_weights.dtype}")
+        if pinned_output.dtype is not torch.float32:
+            raise CpuExpertError(
+                f"pinned_output must be float32, got {pinned_output.dtype}")
+
+        u32 = ctypes.POINTER(ctypes.c_uint32)
+        f32 = ctypes.POINTER(ctypes.c_float)
+        i32 = ctypes.POINTER(ctypes.c_int32)
+        rc = self._lib.sb_cpu_poll_register(
+            self._handle, int(layer_idx),
+            ctypes.cast(signal_host, u32),
+            ctypes.cast(completion_host, u32),
+            ctypes.c_void_p(pinned_hidden.data_ptr()),
+            ctypes.cast(pinned_ids.data_ptr(), i32),
+            ctypes.cast(pinned_weights.data_ptr(), f32),
+            ctypes.cast(pinned_output.data_ptr(), f32),
+            int(pinned_ids.shape[1]),
+        )
+        if rc != 0:
+            raise CpuExpertError(
+                f"sb_cpu_poll_register failed rc={rc} for layer {layer_idx}")
+        self._layers += 1
+
+    def start(self) -> None:
+        if self._started or self._handle is None:
+            return
+        rc = self._lib.sb_cpu_poll_start(self._handle)
+        if rc != 0:
+            raise CpuExpertError(f"sb_cpu_poll_start failed rc={rc}")
+        self._started = True
+
+    def stop(self) -> None:
+        if not self._started or self._handle is None:
+            return
+        self._lib.sb_cpu_poll_stop(self._handle)
+        self._started = False
+
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    @property
+    def layers(self) -> int:
+        return self._layers
+
+    @property
+    def dispatch_count(self) -> int:
+        return int(self._lib.sb_cpu_poll_dispatch_count(self._handle))
+
+    @property
+    def error_count(self) -> int:
+        """Failed dispatches. Nonzero means results are untrustworthy."""
+        return int(self._lib.sb_cpu_poll_error_count(self._handle))
+
+    @property
+    def service_mean_us(self) -> float:
+        """Mean time the poller spent inside moe_forward per dispatch."""
+        n = self.dispatch_count
+        if n == 0:
+            return 0.0
+        total = int(self._lib.sb_cpu_poll_service_ns(self._handle))
+        return total / n / 1000.0
+
+    def close(self) -> None:
+        if getattr(self, "_handle", None) is not None:
+            self._lib.sb_cpu_poll_destroy(self._handle)
+            self._handle = None
+            self._started = False
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+# --- Process-wide singletons ------------------------------------------
+#
+# The arena and its thread pool are per-process resources: a second host
+# would duplicate the weights, and a second poller would only contend for
+# the same DRAM bandwidth. One of each serves every layer.
+
+_host_singleton: CpuExpertHost | None = None
+_poller_singleton: CpuExpertPoller | None = None
+
+
+def get_cpu_host(**kwargs: object) -> CpuExpertHost:
+    """Return the shared CPU expert host, creating it on first use."""
+    global _host_singleton
+    if _host_singleton is None:
+        _host_singleton = CpuExpertHost(**kwargs)  # type: ignore[arg-type]
+    return _host_singleton
+
+
+def get_cpu_poller(host: CpuExpertHost) -> CpuExpertPoller:
+    """Return the shared CPU poller, creating it on first use."""
+    global _poller_singleton
+    if _poller_singleton is None:
+        _poller_singleton = CpuExpertPoller(host)
+    return _poller_singleton
+
+
+__all__ = [
+    "CpuExpertError",
+    "CpuExpertHost",
+    "CpuExpertPoller",
+    "get_cpu_host",
+    "get_cpu_poller",
+]

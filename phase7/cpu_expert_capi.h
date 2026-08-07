@@ -134,6 +134,79 @@ size_t sb_cpu_resident_count(sb_cpu_host_t* host);
 /** Routes dropped because their expert was not resident; must stay 0. */
 uint64_t sb_cpu_skipped_routes(sb_cpu_host_t* host);
 
+/**
+ * Signal-driven poller ("all-out mode" only).
+ *
+ * Mirrors the B70 poller so both tiers dispatch identically: the CUDA stream
+ * writes the batch size M into a host-mapped signal flag
+ * (cuStreamWriteValue32) and then blocks on a completion flag
+ * (cuStreamWaitValue32), and a native thread on the host notices the signal
+ * and runs the work. Because every step on the CUDA side is a stream
+ * operation, the whole round trip is captured by torch.cuda.graph().
+ *
+ * The watcher cannot live in Python: a yielding poll loop costs ~55us per
+ * wakeup and a spinning one holds the GIL and starves the engine thread.
+ *
+ * Unlike the B70 poller this one backs off to a short sleep rather than
+ * spinning hot. The service time here is ~195us, so a few microseconds of
+ * wakeup latency is noise, and a spinning watcher would steal a core from
+ * the FFN thread pool that actually needs it.
+ *
+ * Failure semantics are identical and non-negotiable: cuStreamWaitValue32
+ * has no timeout, so the completion flag is raised even when the dispatch
+ * fails. Leaving it unset wedges the device permanently and makes the
+ * process unkillable. Failures are counted for the caller to collect.
+ */
+
+/** Opaque poller handle. */
+typedef void sb_cpu_poller_t;
+
+/**
+ * Create a poller bound to @p host. The host must outlive it.
+ * Returns NULL on failure.
+ */
+sb_cpu_poller_t* sb_cpu_poll_create(sb_cpu_host_t* host);
+
+/**
+ * Register one layer's flags and pinned buffers.
+ *
+ * Safe to call while the poller is running. All pointers must remain valid
+ * until sb_cpu_poll_destroy.
+ *
+ * @param layer      Absolute layer index.
+ * @param signal     Host-mapped flag; the CUDA stream writes M here.
+ * @param completion Host-mapped flag; set to 1 when the result is ready.
+ * @param hidden     Pinned bf16 [max_batch, hidden] activation.
+ * @param ids        Pinned int32 [max_batch, topk] global expert ids.
+ * @param weights    Pinned float32 [max_batch, topk] routing weights.
+ * @param output     Pinned float32 [max_batch, hidden] result target.
+ * @param topk       Routes per token.
+ * @return 0 on success, <0 on error.
+ */
+int sb_cpu_poll_register(sb_cpu_poller_t* poller, size_t layer,
+                         volatile uint32_t* signal,
+                         volatile uint32_t* completion,
+                         const void* hidden, const int32_t* ids,
+                         const float* weights, float* output, size_t topk);
+
+/** Start the polling thread. Returns 0 on success, <0 on error. */
+int sb_cpu_poll_start(sb_cpu_poller_t* poller);
+
+/** Stop the polling thread and join it. */
+void sb_cpu_poll_stop(sb_cpu_poller_t* poller);
+
+/** Total dispatches served since start. */
+uint64_t sb_cpu_poll_dispatch_count(sb_cpu_poller_t* poller);
+
+/** Number of failed dispatches; nonzero means results are untrustworthy. */
+uint64_t sb_cpu_poll_error_count(sb_cpu_poller_t* poller);
+
+/** Accumulated service time in nanoseconds, for exposed-wait accounting. */
+uint64_t sb_cpu_poll_service_ns(sb_cpu_poller_t* poller);
+
+/** Stop if running, then release the handle. */
+void sb_cpu_poll_destroy(sb_cpu_poller_t* poller);
+
 /** Release the arena and join worker threads. */
 void sb_cpu_destroy(sb_cpu_host_t* host);
 

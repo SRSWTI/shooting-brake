@@ -95,6 +95,28 @@ def _get_b70_provider(placement: Placement) -> Any:
     return provider
 
 
+def _build_cpu_id_map(placement: Placement) -> np.ndarray:
+    """[num_experts] int32: global expert id if CPU-owned, else -1.
+
+    The CPU arena is keyed by ``(layer, global_expert)`` rather than by a
+    compact slot, so unlike the B70 map this is identity-or-sentinel rather
+    than a renumbering. Gathering it with ``topk_ids`` yields exactly the id
+    vector ``sb_cpu_moe_forward`` expects: CPU routes carry their own id,
+    every other route carries -1 and is skipped.
+
+    As with the B70 map, every active layer offloads the same expert ids, so
+    one map serves them all; read it from the first layer that owns any.
+    """
+    id_map = np.full(placement.num_experts, -1, dtype=np.int32)
+    active = placement.cpu_active_layers()
+    if not active:
+        return id_map
+    for expert_id, owner in enumerate(placement.owners[active[0]]):
+        if owner.device is Device.CPU:
+            id_map[expert_id] = expert_id
+    return id_map
+
+
 _SURGERY_HOOK_ATTR = "_shooting_brake_surgery_hook"
 
 
@@ -120,6 +142,12 @@ def _install_surgery_hook(quant_method: Any) -> None:
     def process_weights_after_loading(layer: Any) -> None:
         original(layer)
         if isinstance(layer, HybridRoutedExperts):
+            # Order matters: the CPU tier sources its weights from the same
+            # tensors surgery is about to slice away, so it must copy them
+            # out first. Reversed, the arena would silently load whatever
+            # experts survived the slice.
+            if layer._cpu_active:
+                layer._load_cpu_experts(layer.layer_index)
             layer._maybe_perform_vram_surgery(layer.layer_index)
 
     quant_method.process_weights_after_loading = process_weights_after_loading
@@ -202,11 +230,14 @@ class HybridRoutedExperts(RoutedExperts):
         self._b70_poller: Any = None
         self._first_forward_done = False
         self._b70_stats = os.environ.get("SHOOTING_BRAKE_B70_STATS") == "1"
-        # [b70_routes, total_routes] accumulated on device.  Incrementing
-        # a device tensor needs no host sync, so it survives graph
-        # capture; read it between steps via collective_rpc.
+        # [b70_routes, total_routes, cpu_routes] accumulated on device.
+        # Incrementing a device tensor needs no host sync, so it survives
+        # graph capture; read it between steps via collective_rpc. The
+        # third slot stays zero unless all-out mode is on — allocated
+        # unconditionally because `_cpu_active` is not resolved yet here,
+        # and 8 bytes is not worth the ordering constraint.
         self._route_counter: torch.Tensor | None = (
-            torch.zeros(2, dtype=torch.int64, device="cuda")
+            torch.zeros(3, dtype=torch.int64, device="cuda")
             if self._b70_stats and self._b70_graph_mode
             else None
         )
@@ -241,6 +272,65 @@ class HybridRoutedExperts(RoutedExperts):
             logger.info(
                 "Shooting Brake Tier 3: graph-compatible B70 dispatch "
                 "enabled for layer %s", self.layer_name,
+            )
+        # All-out mode: the CPU DDR5 cold tier. Structurally a second copy
+        # of the Tier 3 machinery above (flags, pinned staging, native
+        # poller) pointed at a different compute backend, so both remote
+        # tiers dispatch and join identically. Off unless a placement
+        # actually assigns CPU experts, which only AllOutPolicy does.
+        self._cpu_active = (
+            self._b70_graph_mode
+            and self.shooting_brake_placement.cpu_count() > 0
+        )
+        self._cpu_poller: Any = None
+        self._cpu_host: Any = None
+        self._cpu_id_map = _build_cpu_id_map(self.shooting_brake_placement)
+        if self._cpu_active:
+            hidden = self.hidden_size
+            self._cpu_id_map_cuda = torch.tensor(
+                self._cpu_id_map, device="cuda", dtype=torch.int32,
+            )
+            # bf16 staging, unlike the B70's fp16: the CPU kernels consume
+            # bf16 directly, so the model's own dtype crosses unconverted.
+            self._cpu_pinned_hidden = torch.empty(
+                self._b70_max_batch, hidden, dtype=torch.bfloat16,
+                pin_memory=True, device="cpu",
+            )
+            self._cpu_pinned_ids = torch.empty(
+                self._b70_max_batch, 8, dtype=torch.int32,
+                pin_memory=True, device="cpu",
+            )
+            self._cpu_pinned_weights = torch.empty(
+                self._b70_max_batch, 8, dtype=torch.float32,
+                pin_memory=True, device="cpu",
+            )
+            self._cpu_pinned_output = torch.empty(
+                self._b70_max_batch, hidden, dtype=torch.float32,
+                pin_memory=True, device="cpu",
+            )
+            self._dev_cpu_fp32 = torch.empty(
+                self._b70_max_batch, hidden, dtype=torch.float32,
+                device="cuda",
+            )
+            self._dev_cpu_bf16 = torch.empty(
+                self._b70_max_batch, hidden, dtype=torch.bfloat16,
+                device="cuda",
+            )
+            from .stream_signal import alloc_host_mapped_flag
+            self._cpu_signal_host, self._cpu_signal_dev = (
+                alloc_host_mapped_flag(0)
+            )
+            self._cpu_completion_host, self._cpu_completion_dev = (
+                alloc_host_mapped_flag(0)
+            )
+            logger.warning(
+                "Shooting Brake ALL-OUT MODE: layer %s will compute %d "
+                "experts on CPU cores. This is ~5x the B70's per-expert "
+                "cost and is off by default for that reason.",
+                self.layer_name,
+                self.shooting_brake_placement.layer_cpu_count(
+                    self.shooting_brake_placement.cpu_active_layers()[0]
+                ),
             )
         self.shooting_brake_provider = ShootingBrakeExpertProviderClient(
             qualified_model=qualified_model,
@@ -318,12 +408,13 @@ class HybridRoutedExperts(RoutedExperts):
 
         placement = self.shooting_brake_placement
 
-        # Skip layers with no B70 experts (e.g. FP8 layers 32-39).
-        b70_count = sum(
-            1 for owner in placement.owners[layer_idx]
-            if owner.device is Device.B70
-        )
-        if b70_count == 0:
+        # Skip layers with nothing offloaded (e.g. FP8 layers 32-39). Both
+        # tiers count: the slice below keeps only CUDA-owned experts, so a
+        # layer holding CPU experts and no B70 ones still has VRAM to
+        # reclaim, and counting only B70 would leave it behind.
+        b70_count = placement.layer_b70_count(layer_idx)
+        cpu_count = placement.layer_cpu_count(layer_idx)
+        if b70_count + cpu_count == 0:
             return
 
         # Determine CUDA-owned expert IDs (sorted ascending for contiguous
@@ -341,8 +432,8 @@ class HybridRoutedExperts(RoutedExperts):
 
         logger.info(
             "Shooting Brake VRAM surgery: layer %d — slicing %d→%d "
-            "CUDA experts (freeing %d B70 experts)",
-            layer_idx, placement.num_experts, num_cuda, b70_count,
+            "CUDA experts (freeing %d B70 + %d CPU experts)",
+            layer_idx, placement.num_experts, num_cuda, b70_count, cpu_count,
         )
 
         # --- Slice weight parameters (accessed by forward_modular) ---
@@ -441,6 +532,119 @@ class HybridRoutedExperts(RoutedExperts):
             layer_idx, num_cuda,
         )
 
+    def _load_cpu_experts(self, layer_idx: int) -> None:
+        """Dequantize this layer's CPU-owned experts into the DRAM arena.
+
+        Must run before VRAM surgery slices the CUDA weights: surgery keeps
+        only CUDA-owned experts, so once it has run the CPU tier's source
+        weights are gone. :func:`_install_surgery_hook` orders the two.
+
+        The arena holds bf16 while the model holds NVFP4, so the weights are
+        dequantized on the GPU (where the unpack is cheap and already
+        implemented) and copied down. That costs ~2x the DRAM the packed
+        form would, which is the price of not writing an NVFP4 CPU GEMM;
+        the tier is bandwidth-bound either way, so the packed form would
+        actually be *faster* to stream. Revisit if DRAM becomes the limit.
+
+        Weight layout matches ``nn.Linear``: vLLM fuses gate and up into
+        ``w13_weight`` as ``[E, 2*I, H]`` with gate first, and keeps down as
+        ``w2_weight`` ``[E, H, I]`` — exactly the arena's expected shapes,
+        so the split is a view, not a transpose.
+        """
+        from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+            dequantize_to_dtype,
+        )
+        from .cpu_expert_host import get_cpu_host
+
+        placement = self.shooting_brake_placement
+        cpu_ids = placement.cpu_expert_ids(layer_idx)
+        if not cpu_ids:
+            return
+
+        device = self.w13_weight.device
+        idx = torch.tensor(list(cpu_ids), device=device, dtype=torch.long)
+        qconfig = self.quant_method.moe_quant_config
+
+        # [n_cpu, 2*I, H] and [n_cpu, H, I], both bf16.
+        w13 = dequantize_to_dtype(
+            self.w13_weight.data.index_select(0, idx),
+            self.w13_weight_scale.data.index_select(0, idx),
+            qconfig._w1.alpha_or_gscale.index_select(0, idx),
+            torch.bfloat16,
+        )
+        w2 = dequantize_to_dtype(
+            self.w2_weight.data.index_select(0, idx),
+            self.w2_weight_scale.data.index_select(0, idx),
+            qconfig._w2.alpha_or_gscale.index_select(0, idx),
+            torch.bfloat16,
+        )
+        inter = w13.shape[1] // 2
+
+        host = get_cpu_host(
+            num_layers=placement.num_layers,
+            num_experts=placement.num_experts,
+            hidden=self.hidden_size,
+            intermediate=inter,
+            max_experts=placement.cpu_count(),
+            num_threads=int(os.environ.get("SHOOTING_BRAKE_CPU_THREADS", "0")),
+        )
+        self._cpu_host = host
+
+        w13_cpu = w13.cpu()
+        w2_cpu = w2.cpu()
+        for slot, expert_id in enumerate(cpu_ids):
+            host.load_expert(
+                layer_idx, expert_id,
+                w13_cpu[slot, :inter].contiguous(),   # gate [I, H]
+                w13_cpu[slot, inter:].contiguous(),   # up   [I, H]
+                w2_cpu[slot].contiguous(),            # down [H, I]
+            )
+        del w13, w2, w13_cpu, w2_cpu
+
+        logger.info(
+            "Shooting Brake all-out: layer %d loaded %d experts into DRAM "
+            "(arena %.2f / %.2f GiB)",
+            layer_idx, len(cpu_ids),
+            host.arena_used_bytes / 2**30, host.arena_capacity_bytes / 2**30,
+        )
+
+    def _register_cpu_poller(self, layer_idx: int) -> None:
+        """Bind this layer's flags and pinned buffers to the CPU poller.
+
+        Mirrors :meth:`_register_b70_poller`: a layer owning no CPU experts
+        registers nothing and dispatches nothing, so concentrating the tier
+        into a few layers costs only those layers a round trip.
+        """
+        from .cpu_expert_host import get_cpu_poller
+
+        if not self.shooting_brake_placement.is_cpu_active(layer_idx):
+            self._cpu_active = False
+            return
+        if self._cpu_host is None:
+            self._cpu_active = False
+            logger.warning(
+                "Shooting Brake all-out: layer %d has CPU experts but no "
+                "arena was loaded; falling back to B70+CUDA only", layer_idx,
+            )
+            return
+
+        poller = get_cpu_poller(self._cpu_host)
+        poller.register_layer(
+            layer_idx=layer_idx,
+            signal_host=self._cpu_signal_host,
+            completion_host=self._cpu_completion_host,
+            pinned_hidden=self._cpu_pinned_hidden,
+            pinned_ids=self._cpu_pinned_ids,
+            pinned_weights=self._cpu_pinned_weights,
+            pinned_output=self._cpu_pinned_output,
+        )
+        poller.start()
+        self._cpu_poller = poller
+        logger.info(
+            "Shooting Brake all-out: layer %d registered with CPU poller",
+            layer_idx,
+        )
+
     def _register_b70_poller(self, layer_idx: int) -> None:
         """Bind this layer's flags and pinned buffers to the shared poller.
 
@@ -492,14 +696,16 @@ class HybridRoutedExperts(RoutedExperts):
         race an active stream capture). vLLM's first forward is the eager
         profiling pass, which sits between the two.
 
-        VRAM surgery is deliberately *not* here: it runs earlier, off
-        ``process_weights_after_loading``, so the freed memory is already
-        reflected in the profiling peak vLLM sizes the KV cache from.
-        See :func:`_install_surgery_hook`.
+        VRAM surgery and the CPU arena load are deliberately *not* here:
+        both run earlier, off ``process_weights_after_loading``, so the
+        freed memory is already reflected in the profiling peak vLLM sizes
+        the KV cache from. See :func:`_install_surgery_hook`.
         """
         self._ensure_layer_device_map(topk_ids)
         if self._b70_graph_mode:
             self._register_b70_poller(self.layer_index)
+        if self._cpu_active:
+            self._register_cpu_poller(self.layer_index)
         self._first_forward_done = True
 
     def forward_modular(
@@ -591,9 +797,18 @@ class HybridRoutedExperts(RoutedExperts):
             # by torch.cuda.graph() without modification.
             b70_ids = self._b70_slot_map_cuda[topk_ids]
             b70_mask = b70_ids >= 0
-            # B70-owned routes contribute through the B70 partial, so
+            if self._cpu_active:
+                cpu_ids = self._cpu_id_map_cuda[topk_ids]
+                cpu_mask = cpu_ids >= 0
+                # Both offloaded tiers contribute through their own
+                # partial, so both must be zeroed out of the CUDA weights.
+                # Missing either double-counts those routes.
+                offloaded = b70_mask | cpu_mask
+            else:
+                offloaded = b70_mask
+            # Offloaded routes contribute through their remote partial, so
             # zero their CUDA weight; CUDA-owned routes are untouched.
-            cuda_weights = topk_weights * (~b70_mask).to(topk_weights.dtype)
+            cuda_weights = topk_weights * (~offloaded).to(topk_weights.dtype)
             cuda_topk_ids = (
                 self._cuda_remap[topk_ids]
                 if self._cuda_remap is not None
@@ -604,12 +819,22 @@ class HybridRoutedExperts(RoutedExperts):
                 # inside the captured graph.  Read between steps.
                 self._route_counter[0] += b70_mask.sum()
                 self._route_counter[1] += b70_mask.numel()
+                if self._cpu_active:
+                    self._route_counter[2] += cpu_mask.sum()
+            # Issue both remote tiers before the CUDA work so both overlap
+            # with it. The CPU tier is the slower of the two (~195us vs
+            # ~40us), so it must start first to have any chance of hiding
+            # under the CUDA expert compute.
+            if self._cpu_active:
+                self._cpu_issue_graph(x, cpu_ids, topk_weights)
             self._b70_issue_graph(x, b70_ids, topk_weights)
             y_cuda = super().forward_modular(
                 x, cuda_weights, cuda_topk_ids,
                 shared_experts, shared_experts_input,
             )
             y_b70 = self._b70_take_graph(x.shape[0])
+            if self._cpu_active:
+                return y_cuda + y_b70 + self._cpu_take_graph(x.shape[0])
             return y_cuda + y_b70
         part = partition_routes(topk_ids, topk_weights, dml, layer_idx)
         validate_partition(
@@ -920,6 +1145,50 @@ class HybridRoutedExperts(RoutedExperts):
         write_flag(self._completion_dev, 0)
 
         return self._dev_b70_bf16[:M]
+
+    def _cpu_issue_graph(
+        self,
+        x: torch.Tensor,
+        cpu_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> None:
+        """Graph-compatible CPU-tier issue — pure CUDA stream operations.
+
+        Identical in shape to :meth:`_b70_issue_graph`; only the staged
+        dtype and the flag differ. The activation crosses as bf16 because
+        the CPU kernels consume bf16 natively, so unlike the B70 path there
+        is no cast.
+
+        Args:
+            x: [M, hidden] activation on CUDA.
+            cpu_ids: [M, topk] global expert ids for CPU-owned routes,
+                -1 elsewhere. Gathered by the caller, which already needs
+                the mask to zero the CUDA weights.
+            topk_weights: [M, topk] routing weights, unmodified.
+        """
+        from .stream_signal import write_flag
+        M = x.shape[0]
+
+        self._cpu_pinned_hidden[:M].copy_(x, non_blocking=True)
+        self._cpu_pinned_ids[:M].copy_(cpu_ids, non_blocking=True)
+        self._cpu_pinned_weights[:M].copy_(topk_weights, non_blocking=True)
+
+        # The flag VALUE is M, so the poller computes exactly this batch
+        # rather than the whole staging buffer. M is constant at capture
+        # time (one graph per batch size), so it is baked into the replay.
+        write_flag(self._cpu_signal_dev, M)
+
+    def _cpu_take_graph(self, M: int) -> torch.Tensor:
+        """Graph-compatible CPU-tier take — pure CUDA stream operations."""
+        from .stream_signal import wait_flag, write_flag
+
+        wait_flag(self._cpu_completion_dev, 1)
+        self._dev_cpu_fp32[:M].copy_(
+            self._cpu_pinned_output[:M], non_blocking=True,
+        )
+        self._dev_cpu_bf16[:M].copy_(self._dev_cpu_fp32[:M])
+        write_flag(self._cpu_completion_dev, 0)
+        return self._dev_cpu_bf16[:M]
 
     def _shadow_validate(
         self,

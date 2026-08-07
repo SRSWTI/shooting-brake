@@ -1,0 +1,61 @@
+#pragma once
+
+#include "ggml-cuda.h"
+
+namespace dflash::common {
+
+// Thread-local CUDA/HIP graph controls used while executing a graph whose
+// topology or backend metadata requires a temporary policy override. The
+// setters return their prior state, which makes this scope safe to nest.
+class ScopedCudaGraphOverrides {
+public:
+    explicit ScopedCudaGraphOverrides(
+            bool disable_graphs = false,
+            int mmvq_max_ncols = 0,
+            bool skip_property_check = false)
+        : disable_graphs_(disable_graphs),
+          override_mmvq_(mmvq_max_ncols > 0),
+          skip_property_check_(skip_property_check) {
+        if (disable_graphs_) {
+            previous_graphs_disabled_ =
+                ggml_backend_cuda_set_graphs_disabled_override(true);
+        }
+        if (override_mmvq_) {
+            previous_mmvq_max_ncols_ =
+                ggml_backend_cuda_set_mmvq_max_ncols_override(
+                    mmvq_max_ncols);
+        }
+        if (skip_property_check_) {
+            previous_skip_property_check_ =
+                ggml_backend_cuda_set_skip_props_check(true);
+        }
+    }
+
+    ~ScopedCudaGraphOverrides() {
+        if (skip_property_check_) {
+            ggml_backend_cuda_set_skip_props_check(
+                previous_skip_property_check_);
+        }
+        if (override_mmvq_) {
+            ggml_backend_cuda_set_mmvq_max_ncols_override(
+                previous_mmvq_max_ncols_);
+        }
+        if (disable_graphs_) {
+            ggml_backend_cuda_set_graphs_disabled_override(
+                previous_graphs_disabled_);
+        }
+    }
+
+    ScopedCudaGraphOverrides(const ScopedCudaGraphOverrides &) = delete;
+    ScopedCudaGraphOverrides & operator=(const ScopedCudaGraphOverrides &) = delete;
+
+private:
+    bool disable_graphs_ = false;
+    bool override_mmvq_ = false;
+    bool skip_property_check_ = false;
+    bool previous_graphs_disabled_ = false;
+    bool previous_skip_property_check_ = false;
+    int previous_mmvq_max_ncols_ = 0;
+};
+
+}  // namespace dflash::common

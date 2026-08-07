@@ -1,0 +1,297 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - 'harness/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  uv-workspace:
+    name: uv workspace (lock + sync + import smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.x"
+      - name: Verify uv lockfile and workspace sync
+        # Skips the torch wheel in this fast job; the CUDA build below runs a
+        # full sync and builds megakernel against torch.
+        run: bash scripts/check_uv_workspace.sh
+
+      - name: Lint Python surfaces touched by lucebox tooling
+        run: uv run --frozen --extra dev ruff check .
+
+  build:
+    name: Build (cmake + uv sync --extra megakernel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
+
+      - uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          # Keep the existing upstream CUDA toolkit version; the uv workspace
+          # only replaces Python environment setup.
+          # Building megakernel's CUDAExtension links against torch's libs,
+          # so CI uses the matching cu128 PyTorch wheel below.
+          cuda: '12.8.0'
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "thrust", "driver-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev"]'
+
+      - name: Provide CUDA driver stub for hosted tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/cuda-stubs"
+          ln -sf "$CUDA_PATH/targets/x86_64-linux/lib/stubs/libcuda.so" \
+            "$RUNNER_TEMP/cuda-stubs/libcuda.so.1"
+          {
+            echo "LD_LIBRARY_PATH=$RUNNER_TEMP/cuda-stubs:/usr/local/cuda-12.8/targets/x86_64-linux/lib/stubs:/usr/local/cuda-12.8/lib64"
+          } >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.x"
+          # uv reads .python-version (3.12, matching the previous CI) and downloads the matching
+          # interpreter; no separate setup-python step needed.
+
+      - name: Build dflash (smoke + server)
+        run: |
+          cd server
+          cmake -B build \
+            -DCMAKE_CUDA_ARCHITECTURES="86" \
+            -DDFLASH27B_ENABLE_BSA=OFF \
+            -DDFLASH27B_FA_ALL_QUANTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target \
+            test_dflash test_generate test_flash_attn_sparse test_server_unit \
+            test_deepseek4_unit -j$(nproc)
+
+      - name: Run C++ server unit tests
+        run: |
+          cd server/build
+          ctest --output-on-failure -R "server_unit|deepseek4_unit" --no-tests=error
+
+      - name: Populate venv with cu128 torch + setuptools
+        # First pass: install the workspace's default deps. dflash declares
+        # torch (which uv pulls from the pytorch-cu128 index per
+        # [tool.uv.sources]) and pflash drags in setuptools. Megakernel is
+        # in the optional `megakernel` extra so its build does NOT run yet.
+        run: uv sync --frozen
+
+      - name: Build megakernel via uv sync (sm_75)
+        env:
+          CUDA_HOME: ${{ env.CUDA_PATH }}
+          MEGAKERNEL_CUDA_ARCH: sm_75
+        # Second pass: builds megakernel against the venv populated above.
+        # `no-build-isolation-package = ["qwen35-megakernel-bf16"]` (set in
+        # the root pyproject.toml) forces setup.py to import the main env's
+        # cu128 torch — same wheel that runtime will use, so the resulting
+        # .so links against an ABI we can actually load.
+        run: uv sync --frozen --extra megakernel
+
+      - name: Verify megakernel extension imports
+        run: |
+          uv run --frozen --no-sync python -c "
+          import torch
+          import qwen35_megakernel_bf16_C as M
+          print('megakernel sm_75 .so loads:', M.__file__)
+          "
+
+      - name: Rebuild megakernel via uv sync (sm_86)
+        env:
+          CUDA_HOME: ${{ env.CUDA_PATH }}
+          MEGAKERNEL_CUDA_ARCH: sm_86
+        # --reinstall-package forces uv to recompile the CUDAExtension
+        # with the new MEGAKERNEL_CUDA_ARCH env var; without it, uv
+        # would skip the already-installed package at the same version.
+        run: uv sync --frozen --extra megakernel --reinstall-package qwen35-megakernel-bf16
+
+      - name: Verify megakernel extension imports (sm_86)
+        run: |
+          uv run --frozen --no-sync python -c "
+          import torch
+          import qwen35_megakernel_bf16_C as M
+          print('megakernel sm_86 .so loads:', M.__file__)
+          "
+
+  gpu-tests:
+    name: GPU tests (self-hosted RTX 3090, sm_86)
+    # Runs only after the GitHub-hosted jobs pass. Those compile the dflash
+    # kernels for sm_86 but execute on GPU-less VMs, so the kernel never runs.
+    # This job lands on lucebox3 (RTX 3090) and actually executes it.
+    #
+    # SECURITY: fork PRs DO run here, but only after a maintainer approves the
+    # workflow run. The repo enforces approval_policy=all_external_contributors,
+    # so every push from an outside collaborator parks the run as
+    # action_required until a maintainer reviews the diff and approves it.
+    # That human checkpoint is the line of defense for the self-hosted box;
+    # do not weaken the approval policy while this job runs fork code.
+    # Gate only on the 1-minute workspace check, NOT the ~18-minute hosted
+    # CPU build: the GPU job compiles the same tree itself in ~2 minutes on
+    # real hardware, so serializing it behind the cloud build only delayed
+    # the strongest signal this CI produces.
+    needs: [uv-workspace]
+    runs-on: [self-hosted, gpu, sm86]
+    timeout-minutes: 30
+    # Serialize CUDA jobs across PRs (one RTX 3090). The ROCm job has its
+    # own group: different physical GPU, no contention.
+    concurrency:
+      group: lucebox3-gpu-runner
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: GPU smoke (nvidia-smi)
+        run: nvidia-smi --query-gpu=name,driver_version,memory.total,power.limit --format=csv
+
+      - name: Build GPU test binary (sm_86, runner-local CUDA)
+        # Uses the runner's own nvcc (/usr/bin/nvcc); no Jimver download since
+        # lucebox3 already has the CUDA toolkit installed.
+        run: |
+          cd server
+          cmake -B build \
+            -DCMAKE_CUDA_ARCHITECTURES="86" \
+            -DDFLASH27B_ENABLE_BSA=OFF \
+            -DDFLASH27B_FA_ALL_QUANTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build \
+            --target test_flash_attn_sparse test_deepseek4_mmid_grouped_cuda \
+            -j"$(nproc)"
+
+      - name: Run flash-attn sparse kernel test on the 3090
+        # Self-contained kernel correctness test (no model weights), so it is
+        # safe and fast in CI. This is the execution the hosted jobs cannot do.
+        run: ./server/build/test_flash_attn_sparse
+
+      - name: Run grouped MMID dispatch and parity test on the 3090
+        run: ./server/build/test_deepseek4_mmid_grouped_cuda
+
+      # Optional model-backed end-to-end smoke (real spec-decode on the 3090),
+      # disabled by default because it builds dflash_server and lazy-loads the
+      # ~16 GB Qwen3.6-27B target + draft (~1-2 min). The weights are already
+      # staged at /opt/models on lucebox3 (override with repo var
+      # LUCEBOX_MODELS_DIR). Verified working on the runner. To enable, uncomment;
+      # continue-on-error keeps a heavy/slow run from ever blocking a PR.
+      # - name: dflash end-to-end smoke (model-backed)
+      #   continue-on-error: true
+      #   env:
+      #     MODELS: ${{ vars.LUCEBOX_MODELS_DIR || '/opt/models' }}
+      #   run: |
+      #     cd server
+      #     cmake --build build --target dflash_server -j"$(nproc)"
+      #     ./build/dflash_server "$MODELS/Qwen3.6-27B-Q4_K_M.gguf" \
+      #       --draft "$MODELS/draft/dflash-draft-3.6-q4_k_m.gguf" --port 8099 &
+      #     SRV=$!; trap 'kill $SRV 2>/dev/null' EXIT
+      #     for i in $(seq 1 90); do curl -sf localhost:8099/v1/models >/dev/null && break; sleep 2; done
+      #     curl -sf --max-time 240 localhost:8099/v1/completions \
+      #       -H 'Content-Type: application/json' \
+      #       -d '{"prompt":"The capital of France is","max_tokens":8}' | grep -q '"text"'
+
+  gpu-tests-amd:
+    name: GPU tests (self-hosted Radeon 8060S, gfx1151 / ROCm)
+    # Companion to gpu-tests: exercises the OTHER half of lucebox3 - the Strix
+    # Halo iGPU - via ROCm/HIP. GitHub-hosted runners cannot touch an AMD GPU at
+    # all. The runner is pinned to ROCm 6.4.4 on kernel 6.14 (ROCm 7.2 page-
+    # faults on gfx1151); hipcc is not on the runner's minimal PATH, so it is
+    # invoked by absolute path.
+    #
+    # SECURITY: same model as gpu-tests - fork PRs run only after a maintainer
+    # approves the workflow run (approval_policy=all_external_contributors).
+    # Gate only on the 1-minute workspace check and the NVIDIA GPU job, NOT the
+    # ~18-minute hosted CPU build: the GPU job compiles the same tree itself in
+    # ~2 minutes on real hardware. The NVIDIA dependency keeps the two
+    # self-hosted GPU jobs from entering the same concurrency group
+    # simultaneously; GitHub cancels older pending jobs in a group even when
+    # cancel-in-progress is false.
+    needs: [uv-workspace, gpu-tests]
+    if: ${{ always() && needs['uv-workspace'].result == 'success' }}
+    runs-on: [self-hosted, rocm, gfx1151]
+    timeout-minutes: 20
+    # Serialize across PRs per GPU. NOT the same group as the CUDA job:
+    # the combo box has two distinct GPUs (RTX 3090 + Strix iGPU), and a
+    # shared group only holds one waiting job, so the Radeon leg was
+    # chronically displaced ("higher priority waiting request") by every
+    # new CUDA job entering the queue.
+    concurrency:
+      group: lucebox3-rocm-runner
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: KFD health (diagnose instead of hanging)
+        # rocminfo on a wedged KFD blocks in uninterruptible sleep and eats
+        # the whole 20-minute job timeout. Probe with a hard timeout first,
+        # and when it hangs, dump the evidence (D-state holders, dmesg) so
+        # the job fails in seconds with a diagnosis instead of silently.
+        run: |
+          # A wedged KFD puts rocminfo in UNINTERRUPTIBLE sleep: timeout(1)
+          # cannot kill it and a foreground wait blocks until the job
+          # timeout. Probe in the background (output to a file so no pipe
+          # keeps the step alive) and enforce the deadline in the shell.
+          /opt/rocm/bin/rocminfo > /tmp/rocminfo.out 2>&1 &
+          PROBE=$!
+          for i in $(seq 1 15); do
+            kill -0 $PROBE 2>/dev/null || break
+            sleep 1
+          done
+          if kill -0 $PROBE 2>/dev/null; then
+            echo "::error::rocminfo hung (likely D-state) — ROCm/KFD wedged; the box needs a reboot"
+            echo "--- probe state:"
+            ps -o pid,stat,wchan:32,comm -p $PROBE || true
+            echo "--- processes holding /dev/kfd:"
+            sudo fuser -v /dev/kfd 2>&1 || true
+            echo "--- D-state processes:"
+            ps -eo pid,user,stat,wchan:32,comm | awk '$3 ~ /D/' || true
+            echo "--- recent amdgpu/kfd dmesg:"
+            sudo dmesg 2>/dev/null | grep -iE "amdgpu|kfd" | tail -15 || true
+            kill -9 $PROBE 2>/dev/null || true
+            disown $PROBE 2>/dev/null || true
+            exit 1
+          fi
+          wait $PROBE && echo "KFD healthy" || { echo "::error::rocminfo exited non-zero"; cat /tmp/rocminfo.out | tail -5; exit 1; }
+
+      - name: ROCm smoke (rocminfo sees gfx1151)
+        run: cat /tmp/rocminfo.out | grep -E "Name:|Marketing Name:" | grep -iE "gfx1151|Radeon 8060S"
+
+      - name: Build + run HIP vector-add on the Radeon 8060S
+        # Self-contained HIP kernel correctness test (no model weights). This is
+        # the execution the GitHub-hosted jobs cannot do.
+        run: |
+          /opt/rocm/bin/hipcc --offload-arch=gfx1151 -O2 \
+            -o "$RUNNER_TEMP/hip_smoke" .github/ci/hip_smoke.cpp
+          "$RUNNER_TEMP/hip_smoke"
+
+      - name: Build + test ROCmFP formats
+        run: |
+          cmake -S server -B "$RUNNER_TEMP/rocmfp-build" \
+            -DDFLASH27B_GPU_BACKEND=hip \
+            -DDFLASH27B_HIP_ARCHITECTURES=gfx1151 \
+            -DDFLASH27B_SERVER=OFF \
+            -DDFLASH27B_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_HIP_FLAGS=-DDFLASH_WAVE_SIZE=32
+          cmake --build "$RUNNER_TEMP/rocmfp-build" \
+            --target test_rocmfp4 test_rocmfpx test_rocmfp4_hip_tail test_rocmfpx_mmq \
+              test_deepseek4_mmid_grouped_cuda \
+            --parallel 8
+          ctest --test-dir "$RUNNER_TEMP/rocmfp-build" \
+            --output-on-failure \
+            -R 'rocmfp4_reference|rocmfpx_reference|rocmfp4_hip_tail|rocmfpx_mmq|deepseek4_mmid_grouped_cuda'

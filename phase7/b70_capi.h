@@ -74,6 +74,22 @@ int sb_b70_take(sb_b70_provider_t* provider, uint64_t generation,
 size_t sb_b70_num_resident(sb_b70_provider_t* provider);
 
 /**
+ * Free and total bytes on the B70 the provider selected.
+ *
+ * The second card exists for capacity, so its occupancy is the number that
+ * decides whether a given expert bank fits. Until this existed it was the
+ * one resource in the system inferred from arithmetic rather than measured:
+ * the 5090's VRAM, host DRAM and the KV cache were all reported, while the
+ * B70's was computed as experts x bytes-per-expert and assumed.
+ *
+ * Returns 0 on success, -1 if the provider is null, not loaded, or the
+ * runtime does not expose the free-memory aspect. Outputs are untouched on
+ * failure. Either pointer may be null.
+ */
+int sb_b70_device_memory(sb_b70_provider_t* provider,
+                         size_t* free_bytes, size_t* total_bytes);
+
+/**
  * Native signal-driven poller.
  *
  * Tier 3 makes the CUDA side dispatch to the B70 entirely from within a

@@ -912,6 +912,32 @@ ProviderStatus B70Provider::arm_test_fault(const ProviderTestFault fault,
 }
 #endif
 
+bool B70Provider::device_memory(std::size_t* free_bytes,
+                                std::size_t* total_bytes) const noexcept {
+  try {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (!impl_->queue) {
+      return false;
+    }
+    const sycl::device device = impl_->queue->get_device();
+    if (!device.has(sycl::aspect::ext_intel_free_memory)) {
+      return false;
+    }
+    if (free_bytes) {
+      *free_bytes =
+          device.get_info<sycl::ext::intel::info::device::free_memory>();
+    }
+    if (total_bytes) {
+      *total_bytes = device.get_info<sycl::info::device::global_mem_size>();
+    }
+    return true;
+  } catch (...) {
+    // Occupancy is reporting. A runtime that refuses the query must not be
+    // able to take down a serving process through a telemetry call.
+    return false;
+  }
+}
+
 void B70Provider::shutdown() noexcept {
   try {
     std::lock_guard<std::mutex> lock(impl_->mutex);

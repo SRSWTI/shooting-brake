@@ -226,6 +226,13 @@ size_t sb_b70_num_resident(sb_b70_provider_t* provider) {
   return p->capability().num_resident_experts;
 }
 
+int sb_b70_device_memory(sb_b70_provider_t* provider,
+                         size_t* free_bytes, size_t* total_bytes) {
+  if (!provider) return -1;
+  auto* p = reinterpret_cast<B70Provider*>(provider);
+  return p->device_memory(free_bytes, total_bytes) ? 0 : -1;
+}
+
 sb_b70_poller_t* sb_b70_poll_create(sb_b70_provider_t* provider,
                                     uint64_t generation) {
   if (!provider) return nullptr;

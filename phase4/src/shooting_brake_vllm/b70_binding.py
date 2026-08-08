@@ -68,6 +68,13 @@ class B70ProviderClient:
         lib.sb_b70_num_resident.restype = ctypes.c_size_t
         lib.sb_b70_num_resident.argtypes = [ctypes.c_void_p]
 
+        lib.sb_b70_device_memory.restype = ctypes.c_int
+        lib.sb_b70_device_memory.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+
         lib.sb_b70_shutdown.restype = None
         lib.sb_b70_shutdown.argtypes = [ctypes.c_void_p]
 
@@ -145,6 +152,28 @@ class B70ProviderClient:
     @property
     def resident_per_layer(self) -> int:
         return self._resident_per_layer
+
+    @property
+    def device_memory(self) -> tuple[int, int] | None:
+        """``(free_bytes, total_bytes)`` on the B70, or ``None``.
+
+        The second card is bought for capacity, so its occupancy is the
+        number that decides whether an expert bank fits. Until this existed
+        it was the only resource in the system inferred rather than
+        measured: 5090 VRAM, host DRAM and the KV cache were all reported
+        while the B70's was computed as experts x bytes-per-expert.
+
+        ``None`` when the provider is not loaded or the runtime does not
+        expose the free-memory aspect.
+        """
+        if not self._loaded or self._handle is None:
+            return None
+        free = ctypes.c_size_t(0)
+        total = ctypes.c_size_t(0)
+        rc = self._lib.sb_b70_device_memory(
+            self._handle, ctypes.byref(free), ctypes.byref(total)
+        )
+        return (free.value, total.value) if rc == 0 else None
 
     @property
     def loaded(self) -> bool:

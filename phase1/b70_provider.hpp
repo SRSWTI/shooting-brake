@@ -97,6 +97,17 @@ class B70Provider final {
                                 std::uint64_t sequence);
 #endif
 
+  // Free and total bytes on the selected B70, read from the provider's own
+  // device handle rather than a second lookup -- so the occupancy reported
+  // is guaranteed to be the card the expert bank actually loaded onto,
+  // which matters on a host carrying more than one Intel GPU.
+  //
+  // Uses the ext_intel_free_memory aspect. Returns false when the runtime
+  // does not expose it, leaving both outputs untouched: occupancy is
+  // reporting, never a reason to fail a dispatch.
+  bool device_memory(std::size_t* free_bytes,
+                     std::size_t* total_bytes) const noexcept;
+
   void shutdown() noexcept;
 
  private:

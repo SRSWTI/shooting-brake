@@ -186,6 +186,26 @@ def collect_worker_stats(worker: Any) -> dict[str, Any]:
         "total_gib": total_b / 2**30,
     }
 
+    # B70 VRAM. The second card is bought for capacity, so its occupancy is
+    # the number that decides whether an expert bank fits -- and it was the
+    # only resource here inferred rather than measured, while the 5090's
+    # VRAM, host DRAM and the KV cache were all reported. Read through the
+    # provider's own device handle, so it is guaranteed to describe the card
+    # the bank actually loaded onto rather than whichever Intel GPU a second
+    # lookup happens to enumerate first.
+    from .routed_experts import _b70_provider_singleton
+
+    if _b70_provider_singleton is not None:
+        mem = _b70_provider_singleton.device_memory
+        if mem is not None:
+            free_b70, total_b70 = mem
+            stats["b70_memory"] = {
+                "used_gib": (total_b70 - free_b70) / 2**30,
+                "free_gib": free_b70 / 2**30,
+                "total_gib": total_b70 / 2**30,
+                "resident_per_layer": _b70_provider_singleton.resident_per_layer,
+            }
+
     # Host DRAM. Untracked until now because the first two tiers do not use
     # it for weights, but the cold tier holds its whole expert bank here and
     # B70 prefill streaming adds a second copy of the B70 bank. On the 35B

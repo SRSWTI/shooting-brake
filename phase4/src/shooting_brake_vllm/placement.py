@@ -157,6 +157,20 @@ class Placement:
             if owner.device is Device.CPU
         )
 
+    def b70_expert_ids(self, layer: int) -> tuple[int, ...]:
+        """Global expert ids this layer keeps on the B70.
+
+        Used by the prefill weight streamer, which needs a host-side copy of
+        exactly these experts: at prefill the B70's kernel costs more than
+        moving its weights to the 5090, so the same arena that backs the CPU
+        tier also holds the B70 set. Distinct from the provider's own compact
+        slot numbering, which is per-layer and dense.
+        """
+        return tuple(
+            e for e, owner in enumerate(self.owners[layer])
+            if owner.device is Device.B70
+        )
+
     # -- (de)serialization for data-driven swapping ----------------------
 
     SCHEMA = "shooting-brake.placement.v1"

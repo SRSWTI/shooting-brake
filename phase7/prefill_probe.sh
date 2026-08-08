@@ -64,6 +64,14 @@ HYBRID=(
 # Passing it empty is not the same thing — the policy parser rejects "".
 run_case all-cuda
 run_case phase6 "${HYBRID[@]}" SHOOTING_BRAKE_PLACEMENT=subset:16:8
+# Same placement as phase6, but B70-owned routes are computed on the 5090
+# from streamed weights instead of dispatched to the B70. The threshold is
+# forced to 1 because this probe's prompt is ~138 tokens, far below the
+# production default -- without it the case would silently measure the
+# dispatch path again and report a meaningless pass.
+run_case phase6-stream "${HYBRID[@]}" SHOOTING_BRAKE_PLACEMENT=subset:16:8 \
+                SHOOTING_BRAKE_B70_PREFILL_STREAM=1 \
+                SHOOTING_BRAKE_B70_STREAM_T=1
 run_case allout "${HYBRID[@]}" SHOOTING_BRAKE_PLACEMENT=allout:16:8:8 \
                 SHOOTING_BRAKE_ALL_OUT=1 SHOOTING_BRAKE_CPU_VERIFY=1
 

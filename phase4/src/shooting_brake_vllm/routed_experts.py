@@ -34,6 +34,48 @@ def _placement_policy_name() -> str:
     """Placement policy spec from the environment (default: all-CUDA)."""
     return os.environ.get("SHOOTING_BRAKE_PLACEMENT", "all-cuda")
 
+
+def b70_prefill_stream_enabled() -> bool:
+    """Whether prefill computes B70-owned routes on the 5090 from streamed
+    weights instead of dispatching them to the B70.
+
+    Off by default. When off, nothing in the streaming path is constructed:
+    no host copy of the B70 bank is retained, no arena space is reserved for
+    it, and ``_b70_prefill_partial`` keeps its chunked-dispatch behaviour
+    exactly.
+    """
+    return os.environ.get("SHOOTING_BRAKE_B70_PREFILL_STREAM") == "1"
+
+
+#: Token count at or above which B70 routes stream instead of dispatching.
+#:
+#: Distinct from the CPU tier's threshold because the two tiers have
+#: different dispatch costs against the same transfer cost. Measured on the
+#: qualified model (phase7/prefill_chunk_bench.py for the dispatch side,
+#: two chunk sizes agreeing at ~26.9 us/token/layer; the transfer side is
+#: 0.41 GiB per layer over the 5090's direct Gen5 x16 link):
+#:
+#:       M      dispatch     streamed
+#:       1        0.03 ms      0.26 ms
+#:      80        2.15 ms      7.72 ms
+#:     311        8.37 ms      8.38 ms   <- crossover
+#:    2048       55.09 ms      8.38 ms
+#:
+#: Dispatch scales with tokens; streaming is flat once most of the bank has
+#: been touched. Default sits above the analytic crossover, not on it: the
+#: model assumes every route reaches a distinct expert, and the penalty for
+#: streaming too early (moving 0.41 GiB for a handful of routes) is far
+#: worse than for streaming too late.
+DEFAULT_B70_STREAM_THRESHOLD = 512
+
+
+def b70_stream_threshold() -> int:
+    return int(
+        os.environ.get(
+            "SHOOTING_BRAKE_B70_STREAM_T", str(DEFAULT_B70_STREAM_THRESHOLD)
+        )
+    )
+
 def _build_b70_slot_map(placement: Placement) -> np.ndarray:
     """[num_experts] int32: B70 compact slot per global expert, -1 for CUDA.
 
@@ -147,12 +189,13 @@ def _install_surgery_hook(quant_method: Any) -> None:
     def process_weights_after_loading(layer: Any) -> None:
         original(layer)
         if isinstance(layer, HybridRoutedExperts):
-            # Order matters: the CPU tier sources its weights from the same
-            # tensors surgery is about to slice away, so it must copy them
-            # out first. Reversed, the arena would silently load whatever
-            # experts survived the slice.
-            if layer._cpu_active:
-                layer._load_cpu_experts(layer.layer_index)
+            # Order matters: both host tiers source their weights from the
+            # same tensors surgery is about to slice away, so they must copy
+            # them out first. Reversed, the arena would silently load
+            # whatever experts survived the slice — and for the B70 set,
+            # surgery removes exactly those, so it would load nothing.
+            if layer._cpu_active or b70_prefill_stream_enabled():
+                layer._load_host_experts(layer.layer_index)
             layer._maybe_perform_vram_surgery(layer.layer_index)
 
     quant_method.process_weights_after_loading = process_weights_after_loading
@@ -295,6 +338,12 @@ class HybridRoutedExperts(RoutedExperts):
         self._cpu_poller: Any = None
         self._cpu_host: Any = None
         self._cpu_intermediate: int | None = None
+        # Resolved once: the flag is read at construction like every other
+        # adapter switch, so a mid-run environment change cannot desync the
+        # arena contents (loaded at weight-load time) from the forward path.
+        self._b70_prefill_stream = (
+            b70_prefill_stream_enabled() and self._b70_graph_mode
+        )
         self._cpu_id_map = _build_cpu_id_map(self.shooting_brake_placement)
         if self._cpu_active:
             hidden = self.hidden_size
@@ -548,8 +597,30 @@ class HybridRoutedExperts(RoutedExperts):
             layer_idx, num_cuda,
         )
 
-    def _load_cpu_experts(self, layer_idx: int) -> None:
-        """Copy this layer's CPU-owned experts into the DRAM arena, packed.
+    def _load_host_experts(self, layer_idx: int) -> None:
+        """Copy this layer's host-resident experts into the DRAM arena, packed.
+
+        Two tiers draw on the same arena, and which experts land here depends
+        on both:
+
+        * **CPU tier** (``allout:`` placement) — experts the CPU poller
+          computes at decode. Always loaded when present.
+        * **B70 prefill streaming** (``SHOOTING_BRAKE_B70_PREFILL_STREAM=1``)
+          — B70-owned experts, loaded *in addition*, because above the
+          crossover it is cheaper to move an expert's weights to the 5090
+          once per layer than to dispatch tokens to a kernel that re-reads
+          them. The B70 keeps its own copy and still serves decode; this is a
+          second copy for a different regime, not a migration.
+
+        One arena keyed by ``(layer, expert)`` serves both: the two id sets
+        are disjoint by construction, so a single streamer and a single ring
+        cover them with no per-tier bookkeeping.
+
+        Reading the B70 set back over PCIe instead of holding it in DRAM was
+        rejected on arithmetic: the B70 sits on a PCH Gen3 x4 link, so
+        recovering 0.41 GiB per layer would cost ~107 ms against ~8 ms to
+        push the same bytes from DRAM over the 5090's direct Gen5 x16.
+
 
         Must run before VRAM surgery slices the CUDA weights: surgery keeps
         only CUDA-owned experts, so once it has run the CPU tier's source
@@ -579,11 +650,14 @@ class HybridRoutedExperts(RoutedExperts):
 
         placement = self.shooting_brake_placement
         cpu_ids = placement.cpu_expert_ids(layer_idx)
-        if not cpu_ids:
+        stream_b70 = b70_prefill_stream_enabled()
+        b70_ids = placement.b70_expert_ids(layer_idx) if stream_b70 else ()
+        host_ids = cpu_ids + b70_ids
+        if not host_ids:
             return
 
         device = self.w13_weight.device
-        idx = torch.tensor(list(cpu_ids), device=device, dtype=torch.long)
+        idx = torch.tensor(list(host_ids), device=device, dtype=torch.long)
         qconfig = self.quant_method.moe_quant_config
 
         w13_q = self.w13_weight.data.index_select(0, idx)
@@ -597,12 +671,18 @@ class HybridRoutedExperts(RoutedExperts):
         two_inter = w13_q.shape[1]
         inter = two_inter // 2
 
+        # Arena is sized for both tiers up front: it reserves address space
+        # and commits lazily, but the reservation has to cover the worst
+        # case or a later layer's load runs out of room.
+        max_experts = placement.cpu_count() + (
+            placement.b70_count() if stream_b70 else 0
+        )
         host = get_cpu_host(
             num_layers=placement.num_layers,
             num_experts=placement.num_experts,
             hidden=hidden,
             intermediate=inter,
-            max_experts=placement.cpu_count(),
+            max_experts=max_experts,
             num_threads=int(os.environ.get("SHOOTING_BRAKE_CPU_THREADS", "0")),
         )
         self._cpu_host = host
@@ -619,7 +699,7 @@ class HybridRoutedExperts(RoutedExperts):
 
         w13_q_cpu = w13_q.cpu()
         w2_q_cpu = w2_q.cpu()
-        for slot, expert_id in enumerate(cpu_ids):
+        for slot, expert_id in enumerate(host_ids):
             sf13 = linear_sf(w13_sf[slot], two_inter, hidden)
             sf2 = linear_sf(w2_sf[slot], hidden, inter)
             gs13 = float(w13_gs[slot])
@@ -651,7 +731,7 @@ class HybridRoutedExperts(RoutedExperts):
                 w2_q[0], w2_sf[0], w2_gs[0], torch.float32,
             ).cpu()
             self._verify_cpu_expert(
-                host, layer_idx, cpu_ids[0],
+                host, layer_idx, host_ids[0],
                 ref13[:inter].contiguous(), ref13[inter:].contiguous(),
                 ref2.contiguous(),
             )
@@ -659,9 +739,9 @@ class HybridRoutedExperts(RoutedExperts):
         del w13_q, w2_q, w13_q_cpu, w2_q_cpu
 
         logger.info(
-            "Shooting Brake all-out: layer %d loaded %d experts into DRAM "
-            "(arena %.2f / %.2f GiB)",
-            layer_idx, len(cpu_ids),
+            "Shooting Brake: layer %d loaded %d host experts into DRAM "
+            "(%d cpu-tier, %d b70-prefill) — arena %.2f / %.2f GiB",
+            layer_idx, len(host_ids), len(cpu_ids), len(b70_ids),
             host.arena_used_bytes / 2**30, host.arena_capacity_bytes / 2**30,
         )
 
@@ -1389,26 +1469,82 @@ class HybridRoutedExperts(RoutedExperts):
                 layer_idx, x, cpu_ids, topk_weights
             )
         if self._b70_graph_mode:
-            y = y + self._b70_prefill_partial(x, b70_ids, topk_weights)
+            # Two id spaces, and they are not interchangeable. The provider
+            # is addressed by compact per-layer slot (``_b70_slot_map``);
+            # the DRAM arena is keyed by global expert id, exactly like the
+            # cold tier's ``_cpu_id_map``. Streaming reads the arena, so it
+            # needs the global form -- handing it slots looks up a different
+            # expert and, for a slot below the CUDA-resident count, one that
+            # was never loaded at all.
+            b70_global_ids = (
+                torch.where(b70_mask, topk_ids, -1)
+                if self._b70_prefill_stream
+                else None
+            )
+            y = y + self._b70_prefill_partial(
+                layer_idx, x, b70_ids, topk_weights, b70_global_ids,
+            )
         return y
 
     def _b70_prefill_partial(
         self,
+        layer_idx: int,
         x: torch.Tensor,
         b70_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        b70_global_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """B70 partial for a batch larger than the staging buffers.
 
-        Chunked rather than resized: sizing the pinned buffers for the
-        largest prefill would cost ~48 MiB of pinned host memory and ~48 MiB
-        of VRAM *per layer*, and that VRAM comes straight out of the KV cache
-        this tier exists to grow.
+        Two strategies, chosen by token count, because they have different
+        cost curves against the same work:
 
-        Each chunk's result is copied out before the next dispatch, because
-        ``_b70_take_graph`` returns a view of a buffer the next chunk
-        overwrites.
+        * **Dispatch** (default) sends tokens to the B70 and leaves the
+          weights where they are. Cost scales with tokens — ~26.9 us per
+          token per layer, measured. Chunked rather than resized: sizing the
+          pinned buffers for the largest prefill would cost ~48 MiB of
+          pinned host memory and ~48 MiB of VRAM *per layer*, and that VRAM
+          comes straight out of the KV cache this tier exists to grow.
+          Each chunk's result is copied out before the next dispatch,
+          because ``_b70_take_graph`` returns a view the next chunk
+          overwrites.
+        * **Streaming** (``SHOOTING_BRAKE_B70_PREFILL_STREAM=1``, at or
+          above :func:`b70_stream_threshold`) moves the weights to the 5090
+          once and computes there. Cost is flat in M — 0.41 GiB per layer
+          over the 5090's direct Gen5 x16 link — so it wins once there are
+          enough tokens to amortise the transfer.
+
+        Chunking is not what makes dispatch slow here: collapsing 25
+        dispatches into 2 moves TTFT by 5.1% (phase7/prefill_chunk_bench.py).
+        The B70's NVFP4 kernel runs at ~3.8x its own VRAM-bandwidth floor on
+        prefill shapes because it does not amortise weight reads across
+        tokens — it was written for decode, where an expert sees one or two
+        rows. Streaming sidesteps that kernel rather than fixing it.
+
+        Decode never reaches this method at all, so the B70 keeps serving
+        the regime it is good at, where dispatch beats streaming ~9x at M=1.
         """
+        if (
+            self._b70_prefill_stream
+            and b70_global_ids is not None
+            and x.shape[0] >= b70_stream_threshold()
+            and self._cpu_host is not None
+            # Choosing which experts to move is data-dependent, so the
+            # streamer syncs to read the expert list; a host sync during
+            # capture invalidates the graph. Same guard as the cold tier.
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from .cpu_stream import get_streamer
+
+            streamer = get_streamer(
+                self._cpu_host, self.hidden_size, self._cpu_intermediate,
+            )
+            # Global ids, not the compact slots the provider takes: the
+            # arena is keyed by (layer, global expert).
+            return streamer.forward(
+                layer_idx, x, b70_global_ids, topk_weights,
+            )
+
         M = x.shape[0]
         cap = self._b70_max_batch
         out = torch.empty(M, self.hidden_size, dtype=x.dtype, device=x.device)

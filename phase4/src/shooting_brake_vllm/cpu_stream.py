@@ -383,10 +383,10 @@ def get_streamer(
             host, hidden, intermediate, **kwargs,  # type: ignore[arg-type]
         )
         logger.warning(
-            "Shooting Brake all-out: prefill weight streaming active — "
-            "%d slots x %.1f MiB, arena %s. Cold experts above M=%d are "
-            "computed on the 5090 from streamed weights instead of on CPU "
-            "cores.",
+            "Shooting Brake: prefill weight streaming active — %d slots x "
+            "%.1f MiB, arena %s. Host-resident experts above the tier's "
+            "threshold are computed on the 5090 from streamed weights "
+            "(cold tier above M=%d; B70 prefill has its own threshold).",
             _streamer_singleton._slots,
             _streamer_singleton._block_bytes / 2**20,
             "pinned (DMA)" if pinned else "unpinned (staged copies)",

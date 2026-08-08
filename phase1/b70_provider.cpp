@@ -12,6 +12,7 @@
 #include <new>
 #include <optional>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -26,19 +27,63 @@
 namespace shooting_brake::phase1 {
 namespace {
 
-constexpr std::size_t kLayers = 32;
+// Expert-bank geometry. Runtime, not compile-time: the bank file names
+// the shape it was built for, and hard-coding it here is how a provider
+// silently serves a different model's weights. Set once by
+// `adopt_bank_geometry` before any dispatch, from the header of the bank
+// being loaded.
+//
+// Two values stay compile-time because they size stack arrays and buffers
+// before the bank is even opened, and because both qualified models share
+// them. `require_qualified_config` on the Python side asserts them against
+// the model's own config and names this provider as the reason, so a third
+// model cannot reach here with a different routing width.
 constexpr std::size_t kExpertsPerLayer = 256;
-constexpr std::size_t kHiddenSize = 2048;
-constexpr std::size_t kIntermediateSize = 512;
 constexpr std::size_t kTopK = 8;
-constexpr std::size_t kTotalExperts = kLayers * kExpertsPerLayer;
 
-constexpr std::size_t kW13Bytes = 2 * kIntermediateSize * (kHiddenSize / 2);
-constexpr std::size_t kS13Bytes = 2 * kIntermediateSize * (kHiddenSize / 16);
-constexpr std::size_t kW2Bytes = kHiddenSize * (kIntermediateSize / 2);
-constexpr std::size_t kS2Bytes = kHiddenSize * (kIntermediateSize / 16);
-constexpr std::size_t kExpertBytes =
-    kW13Bytes + kS13Bytes + kW2Bytes + kS2Bytes + 2 * sizeof(float);
+std::size_t g_layers = 0;
+std::size_t g_hidden = 0;
+std::size_t g_intermediate = 0;
+std::size_t g_total_experts = 0;
+std::size_t g_w13_bytes = 0;
+std::size_t g_s13_bytes = 0;
+std::size_t g_w2_bytes = 0;
+std::size_t g_s2_bytes = 0;
+std::size_t g_expert_bytes = 0;
+
+// Derives every dependent size from the three the header carries. Returns
+// false when the header's own arithmetic disagrees with its dimensions,
+// which catches a truncated or foreign file before anything is mapped
+// into a kernel argument.
+bool adopt_bank_geometry(std::size_t layers, std::size_t experts_per_layer,
+                         std::size_t hidden, std::size_t intermediate,
+                         std::uint64_t w13, std::uint64_t s13,
+                         std::uint64_t w2, std::uint64_t s2) noexcept {
+  if (layers == 0 || hidden == 0 || intermediate == 0 ||
+      experts_per_layer != kExpertsPerLayer || hidden % 16 != 0 ||
+      intermediate % 16 != 0) {
+    return false;
+  }
+  const std::size_t w13_bytes = 2 * intermediate * (hidden / 2);
+  const std::size_t s13_bytes = 2 * intermediate * (hidden / 16);
+  const std::size_t w2_bytes = hidden * (intermediate / 2);
+  const std::size_t s2_bytes = hidden * (intermediate / 16);
+  if (w13 != w13_bytes || s13 != s13_bytes || w2 != w2_bytes ||
+      s2 != s2_bytes) {
+    return false;
+  }
+  g_layers = layers;
+  g_hidden = hidden;
+  g_intermediate = intermediate;
+  g_total_experts = layers * experts_per_layer;
+  g_w13_bytes = w13_bytes;
+  g_s13_bytes = s13_bytes;
+  g_w2_bytes = w2_bytes;
+  g_s2_bytes = s2_bytes;
+  g_expert_bytes =
+      w13_bytes + s13_bytes + w2_bytes + s2_bytes + 2 * sizeof(float);
+  return true;
+}
 
 // Per-dispatch profiling costs real latency: a profiled Level Zero
 // queue timestamps every command, and the kernel_us figure additionally
@@ -66,26 +111,32 @@ struct ExpertBankHeader {
 
 static_assert(sizeof(ExpertBankHeader) == 60,
               "the packed expert-bank header must be 60 bytes");
-constexpr std::uint64_t kExpectedFileBytes =
-    sizeof(ExpertBankHeader) +
-    static_cast<std::uint64_t>(kTotalExperts) * kExpertBytes;
+// Functions rather than constants: every term depends on the geometry the
+// bank header supplies, so none of them exists until `adopt_bank_geometry`
+// has run.
+std::uint64_t expected_file_bytes() noexcept {
+  return sizeof(ExpertBankHeader) +
+         static_cast<std::uint64_t>(g_total_experts) * g_expert_bytes;
+}
 
-constexpr std::uint64_t kPersistentWeightBytesPerExpert =
-    kW13Bytes + kS13Bytes + kW2Bytes + kS2Bytes + 2 * sizeof(float);
+std::uint64_t persistent_weight_bytes_per_expert() noexcept {
+  return g_w13_bytes + g_s13_bytes + g_w2_bytes + g_s2_bytes +
+         2 * sizeof(float);
+}
 
 std::uint64_t persistent_device_bytes(const std::size_t max_batch,
                                       const std::size_t resident_experts) {
-  constexpr std::uint64_t kBytesPerBatchRow =
-      kHiddenSize * sizeof(sycl::half) +
+  const std::uint64_t bytes_per_batch_row =
+      g_hidden * sizeof(sycl::half) +
       kTopK * sizeof(std::int32_t) +
       kTopK * sizeof(float) +
-      kTopK * 2 * kIntermediateSize * sizeof(float) +
-      kHiddenSize * sizeof(float);
+      kTopK * 2 * g_intermediate * sizeof(float) +
+      g_hidden * sizeof(float);
   const std::uint64_t resident_weight_bytes =
-      static_cast<std::uint64_t>(kLayers) * resident_experts *
-      kPersistentWeightBytesPerExpert;
+      static_cast<std::uint64_t>(g_layers) * resident_experts *
+      persistent_weight_bytes_per_expert();
   return resident_weight_bytes +
-         static_cast<std::uint64_t>(max_batch) * kBytesPerBatchRow;
+         static_cast<std::uint64_t>(max_batch) * bytes_per_batch_row;
 }
 
 std::string errno_message(const char* operation) {
@@ -361,7 +412,7 @@ struct B70Provider::Impl {
       const std::size_t canonical_expert =
           static_cast<std::size_t>(config.resident_experts[local_expert]);
       const std::uint8_t* source =
-          records + (source_layer + canonical_expert) * kExpertBytes +
+          records + (source_layer + canonical_expert) * g_expert_bytes +
           record_offset;
       std::memcpy(upload_staging + local_expert * bytes_per_expert, source,
                   bytes_per_expert);
@@ -383,7 +434,7 @@ struct B70Provider::Impl {
       const std::size_t canonical_expert =
           static_cast<std::size_t>(config.resident_experts[local_expert]);
       const std::uint8_t* source =
-          records + (source_layer + canonical_expert) * kExpertBytes +
+          records + (source_layer + canonical_expert) * g_expert_bytes +
           record_offset;
       std::memcpy(upload_staging + local_expert * sizeof(float), source,
                   sizeof(float));
@@ -425,7 +476,7 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     }
     if (config.max_batch >
         std::numeric_limits<std::size_t>::max() /
-            (kTopK * 2 * kIntermediateSize * sizeof(float))) {
+            (kTopK * 2 * g_intermediate * sizeof(float))) {
       impl_->set_error("config.max_batch overflows the scratch-buffer size");
       return ProviderStatus::invalid_argument;
     }
@@ -473,11 +524,15 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
       return impl_->reject_load_locked(ProviderStatus::device_error,
                                        errno_message("fstat expert bank"));
     }
+    // Size cannot be checked yet: the expected size is a function of the
+    // geometry, and the geometry lives in the header. Only rule out a file
+    // too small to contain one.
     if (!S_ISREG(file_stat.st_mode) || file_stat.st_size < 0 ||
-        static_cast<std::uint64_t>(file_stat.st_size) != kExpectedFileBytes) {
+        static_cast<std::uint64_t>(file_stat.st_size) <
+            sizeof(ExpertBankHeader)) {
       return impl_->reject_load_locked(
           ProviderStatus::invalid_argument,
-          "expert bank is not a regular file of the exact required size");
+          "expert bank is not a regular file large enough to hold a header");
     }
 
     impl_->bank_mapping_bytes = static_cast<std::size_t>(file_stat.st_size);
@@ -493,15 +548,30 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     ExpertBankHeader header {};
     std::memcpy(&header, impl_->bank_mapping, sizeof(header));
     if (std::memcmp(header.magic, "SBEXP001", sizeof(header.magic)) != 0 ||
-        header.num_layers != kLayers ||
-        header.experts_per_layer != kExpertsPerLayer ||
-        header.hidden_size != kHiddenSize ||
-        header.intermediate_size != kIntermediateSize || header.reserved != 0 ||
-        header.w13_bytes != kW13Bytes || header.s13_bytes != kS13Bytes ||
-        header.w2_bytes != kW2Bytes || header.s2_bytes != kS2Bytes) {
+        header.reserved != 0) {
       return impl_->reject_load_locked(
           ProviderStatus::invalid_argument,
           "expert bank header does not match the Phase-1 NVFP4 B70 contract");
+    }
+    // The bank declares its own shape and this provider adopts it, rather
+    // than the reverse. `adopt_bank_geometry` still rejects a header whose
+    // record sizes disagree with its own dimensions, so a truncated or
+    // foreign file cannot install a geometry that would then be used to
+    // compute kernel arguments.
+    if (!adopt_bank_geometry(header.num_layers, header.experts_per_layer,
+                             header.hidden_size, header.intermediate_size,
+                             header.w13_bytes, header.s13_bytes,
+                             header.w2_bytes, header.s2_bytes)) {
+      return impl_->reject_load_locked(
+          ProviderStatus::invalid_argument,
+          "expert bank header declares an inconsistent or unsupported "
+          "geometry");
+    }
+    if (static_cast<std::uint64_t>(file_stat.st_size) !=
+        expected_file_bytes()) {
+      return impl_->reject_load_locked(
+          ProviderStatus::invalid_argument,
+          "expert bank size does not match the geometry its header declares");
     }
 
     const SelectedDevice selected = select_b70();
@@ -535,14 +605,14 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
         static_cast<std::uint64_t>(
             selected.device.get_info<sycl::info::device::global_mem_size>());
     impl_->capability.supported_hidden_sizes = {
-        static_cast<std::uint32_t>(kHiddenSize)};
+        static_cast<std::uint32_t>(g_hidden)};
     impl_->capability.supported_intermediate_sizes = {
-        static_cast<std::uint32_t>(kIntermediateSize)};
+        static_cast<std::uint32_t>(g_intermediate)};
     impl_->capability.supported_topk = {static_cast<std::uint32_t>(kTopK)};
     const std::size_t resident_experts_per_layer =
         impl_->config.resident_experts.size();
     const std::size_t resident_experts_total =
-        kLayers * resident_experts_per_layer;
+        g_layers * resident_experts_per_layer;
     impl_->capability.num_resident_experts =
         static_cast<std::uint32_t>(resident_experts_total);
     impl_->capability.max_batch_remote =
@@ -550,52 +620,78 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     impl_->capability.kernel_families = {
         "nvfp4_moe_split", "nvfp4_moe_fused"};
     impl_->capability.health_heartbeat_interval_ms = 1000;
-    impl_->capability.num_layers = static_cast<std::uint32_t>(kLayers);
+    impl_->capability.num_layers = static_cast<std::uint32_t>(g_layers);
     impl_->capability.experts_per_layer =
         static_cast<std::uint32_t>(kExpertsPerLayer);
 
+    // Refuse a placement that cannot fit before allocating any of it.
+    // `persistent_device_bytes` already computed this figure, but only
+    // afterwards, to report free memory — so an over-committed placement
+    // surfaced as a raw SYCL allocation failure with the engine half up.
+    // At the 122B's geometry one resident expert index costs ~238 MiB
+    // across 47 layers, so the ceiling is easy to cross by accident and
+    // the message needs to say how many would fit.
+    const std::uint64_t required_bytes =
+        persistent_device_bytes(config.max_batch, resident_experts_per_layer);
+    const std::uint64_t device_bytes =
+        impl_->capability.device_memory_total_bytes;
+    if (device_bytes != 0 && required_bytes > device_bytes) {
+      const std::uint64_t per_index =
+          static_cast<std::uint64_t>(g_layers) *
+          persistent_weight_bytes_per_expert();
+      std::ostringstream message;
+      message << "placement needs " << (required_bytes >> 20)
+              << " MiB on the B70 but the device has " << (device_bytes >> 20)
+              << " MiB; at " << g_layers << " layers each resident expert "
+              << "index costs " << (per_index >> 20) << " MiB, so at most "
+              << (per_index ? device_bytes / per_index : 0)
+              << " experts per layer fit";
+      return impl_->reject_load_locked(ProviderStatus::device_error,
+                                       message.str());
+    }
+
     impl_->w13 = impl_->allocate_device<std::uint8_t>(
-        resident_experts_total * kW13Bytes);
+        resident_experts_total * g_w13_bytes);
     impl_->s13 = impl_->allocate_device<std::uint8_t>(
-        resident_experts_total * kS13Bytes);
+        resident_experts_total * g_s13_bytes);
     impl_->w2 = impl_->allocate_device<std::uint8_t>(
-        resident_experts_total * kW2Bytes);
+        resident_experts_total * g_w2_bytes);
     impl_->s2 = impl_->allocate_device<std::uint8_t>(
-        resident_experts_total * kS2Bytes);
+        resident_experts_total * g_s2_bytes);
     impl_->w13_global =
         impl_->allocate_device<float>(resident_experts_total);
     impl_->w2_global =
         impl_->allocate_device<float>(resident_experts_total);
 
     impl_->hidden =
-        impl_->allocate_device<sycl::half>(config.max_batch * kHiddenSize);
+        impl_->allocate_device<sycl::half>(config.max_batch * g_hidden);
     impl_->ids = impl_->allocate_device<std::int32_t>(config.max_batch * kTopK);
     impl_->weights = impl_->allocate_device<float>(config.max_batch * kTopK);
     impl_->scratch = impl_->allocate_device<float>(
-        config.max_batch * kTopK * 2 * kIntermediateSize);
+        config.max_batch * kTopK * 2 * g_intermediate);
     impl_->output =
-        impl_->allocate_device<float>(config.max_batch * kHiddenSize);
+        impl_->allocate_device<float>(config.max_batch * g_hidden);
     impl_->copyout_staging =
-        impl_->allocate_host<float>(config.max_batch * kHiddenSize);
+        impl_->allocate_host<float>(config.max_batch * g_hidden);
 
     const std::size_t layer_staging_bytes =
-        resident_experts_per_layer * kW13Bytes;
+        resident_experts_per_layer * g_w13_bytes;
     impl_->upload_staging =
         impl_->allocate_host<std::uint8_t>(layer_staging_bytes);
 
     const auto* records = static_cast<const std::uint8_t*>(impl_->bank_mapping) +
                           sizeof(ExpertBankHeader);
-    constexpr std::size_t kS13Offset = kW13Bytes;
-    constexpr std::size_t kW2Offset = kS13Offset + kS13Bytes;
-    constexpr std::size_t kS2Offset = kW2Offset + kW2Bytes;
-    constexpr std::size_t kW13GlobalOffset = kS2Offset + kS2Bytes;
-    constexpr std::size_t kW2GlobalOffset = kW13GlobalOffset + sizeof(float);
+    const std::size_t kS13Offset = g_w13_bytes;
+    const std::size_t kW2Offset = kS13Offset + g_s13_bytes;
+    const std::size_t kS2Offset = kW2Offset + g_w2_bytes;
+    const std::size_t kW13GlobalOffset = kS2Offset + g_s2_bytes;
+    const std::size_t kW2GlobalOffset = kW13GlobalOffset + sizeof(float);
 
-    for (std::size_t layer = 0; layer < kLayers; ++layer) {
-      impl_->upload_plane(records, 0, kW13Bytes, impl_->w13, layer);
-      impl_->upload_plane(records, kS13Offset, kS13Bytes, impl_->s13, layer);
-      impl_->upload_plane(records, kW2Offset, kW2Bytes, impl_->w2, layer);
-      impl_->upload_plane(records, kS2Offset, kS2Bytes, impl_->s2, layer);
+    for (std::size_t layer = 0; layer < g_layers; ++layer) {
+      impl_->upload_plane(records, 0, g_w13_bytes, impl_->w13, layer);
+      impl_->upload_plane(records, kS13Offset, g_s13_bytes, impl_->s13, layer);
+      impl_->upload_plane(records, kW2Offset, g_w2_bytes, impl_->w2, layer);
+      impl_->upload_plane(records, kS2Offset, g_s2_bytes, impl_->s2, layer);
       impl_->upload_globals(records, kW13GlobalOffset, impl_->w13_global, layer);
       impl_->upload_globals(records, kW2GlobalOffset, impl_->w2_global, layer);
     }
@@ -672,7 +768,7 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
       return ProviderStatus::generation_mismatch;
     }
     if (hidden == nullptr || ids == nullptr || weights == nullptr || M == 0 ||
-        M > impl_->config.max_batch || layer >= kLayers) {
+        M > impl_->config.max_batch || layer >= g_layers) {
       impl_->set_error("issue received an invalid pointer, layer, or batch shape");
       return ProviderStatus::invalid_argument;
     }
@@ -693,7 +789,7 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
     }
 
     sycl::event first = impl_->queue->memcpy(
-        impl_->hidden, hidden, M * kHiddenSize * sizeof(sycl::half));
+        impl_->hidden, hidden, M * g_hidden * sizeof(sycl::half));
     impl_->queue->memcpy(impl_->ids, ids,
                          route_elements * sizeof(std::int32_t));
     impl_->queue->memcpy(impl_->weights, weights,
@@ -704,10 +800,10 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
     }
 
     const std::size_t first_expert = layer * resident_experts;
-    const std::uint8_t* layer_w13 = impl_->w13 + first_expert * kW13Bytes;
-    const std::uint8_t* layer_s13 = impl_->s13 + first_expert * kS13Bytes;
-    const std::uint8_t* layer_w2 = impl_->w2 + first_expert * kW2Bytes;
-    const std::uint8_t* layer_s2 = impl_->s2 + first_expert * kS2Bytes;
+    const std::uint8_t* layer_w13 = impl_->w13 + first_expert * g_w13_bytes;
+    const std::uint8_t* layer_s13 = impl_->s13 + first_expert * g_s13_bytes;
+    const std::uint8_t* layer_w2 = impl_->w2 + first_expert * g_w2_bytes;
+    const std::uint8_t* layer_s2 = impl_->s2 + first_expert * g_s2_bytes;
     const float* layer_w13_global = impl_->w13_global + first_expert;
     const float* layer_w2_global = impl_->w2_global + first_expert;
 
@@ -717,14 +813,14 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
           *impl_->queue, impl_->hidden, impl_->ids, impl_->weights, layer_w13,
           layer_s13, layer_w13_global, layer_w2, layer_s2, layer_w2_global,
           impl_->scratch, impl_->output, M, resident_experts, kTopK,
-          kHiddenSize, kIntermediateSize, quixicore::xpu::DType::f16, true,
+          g_hidden, g_intermediate, quixicore::xpu::DType::f16, true,
           quixicore::xpu::Variant::sycl, false);
     } else {
       quixicore::xpu::ops::nvfp4_moe_fused(
           *impl_->queue, impl_->hidden, impl_->ids, impl_->weights, layer_w13,
           layer_s13, layer_w13_global, layer_w2, layer_s2, layer_w2_global,
-          impl_->output, M, resident_experts, kTopK, kHiddenSize,
-          kIntermediateSize, quixicore::xpu::DType::f16, true,
+          impl_->output, M, resident_experts, kTopK, g_hidden,
+          g_intermediate, quixicore::xpu::DType::f16, true,
           quixicore::xpu::Variant::sycl, false);
     }
 
@@ -740,7 +836,7 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
     // copy, and wait again.
     impl_->copy_out.emplace(impl_->queue->memcpy(
         impl_->copyout_staging, impl_->output,
-        M * kHiddenSize * sizeof(float)));
+        M * g_hidden * sizeof(float)));
 #ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
     if (impl_->armed_test_fault &&
         *impl_->armed_test_fault ==
@@ -814,7 +910,7 @@ ProviderStatus B70Provider::take(const std::uint64_t generation,
       return ProviderStatus::device_error;
     }
 
-    const std::size_t required_elements = impl_->pending_M * kHiddenSize;
+    const std::size_t required_elements = impl_->pending_M * g_hidden;
     if (output == nullptr || result == nullptr ||
         output_elements < required_elements) {
       impl_->set_error("take received an invalid output buffer or result pointer");

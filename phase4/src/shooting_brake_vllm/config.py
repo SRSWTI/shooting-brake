@@ -187,6 +187,21 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
                 "expert-bank layout cannot represent it"
             )
 
+    # The B70 provider keeps these two as compile-time constants: they size
+    # buffers and a stack array before the bank is even opened, and both
+    # qualified models share them. Geometry is otherwise read from the
+    # model, so without this check a third model could pass qualification
+    # and then meet a provider built for a different routing width — which
+    # would feed the kernel routing slots that were never populated, with
+    # no error raised anywhere.
+    for name, required in (("num_experts", 256), ("num_experts_per_tok", 8)):
+        if geometry[name] != required:
+            raise QualificationError(
+                f"{name}={geometry[name]} but the B70 provider is compiled "
+                f"for {required} (phase1/b70_provider.cpp). Both qualified "
+                "models match; a new one needs the provider changed too."
+            )
+
     # Identity, not a bound. A stale 35B bank (32 layers, hidden 2048,
     # intermediate 512) satisfies `32 <= 47` against the 122B and would be
     # served happily, with the B70 returning experts of the wrong shape for

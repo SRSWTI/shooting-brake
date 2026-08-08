@@ -37,6 +37,7 @@ class B70ProviderClient:
         self._setup_signatures()
         self._handle: ctypes.c_void_p | None = None
         self._loaded = False
+        self._hidden = 0
         self._resident_count = 0
         self._sequence = 0
 
@@ -146,8 +147,18 @@ class B70ProviderClient:
 
         self._resident_count = self._lib.sb_b70_num_resident(self._handle)
         self._loaded = True
-        # Per-layer resident count
-        self._resident_per_layer = self._resident_count // 32
+        # Per-layer resident count. The layer count comes from the bank's
+        # own header, which is what the provider itself adopts — a constant
+        # here would silently misreport occupancy for any bank that is not
+        # the 32-layer 35B one.
+        from .config import read_bank_header
+
+        header = read_bank_header(str(bank_path))
+        layers = header.layers
+        self._hidden = header.hidden_size
+        self._resident_per_layer = (
+            self._resident_count // layers if layers else 0
+        )
 
     @property
     def resident_per_layer(self) -> int:
@@ -226,7 +237,9 @@ class B70ProviderClient:
         weights_c = np.ascontiguousarray(weights, dtype=np.float32)
         M = hidden.shape[0]
         topk = ids_c.shape[1]
-        assert hidden.shape[1] == 2048
+        assert hidden.shape[1] == self._hidden, (
+            f"hidden dim {hidden.shape[1]} != bank's {self._hidden}"
+        )
         assert ids_c.shape == (M, topk)
         assert weights_c.shape == (M, topk)
 
@@ -277,7 +290,7 @@ class B70ProviderClient:
             raise B70ProviderError("provider not loaded")
 
         if output is None:
-            output = np.empty((M, 2048), dtype=np.float32)
+            output = np.empty((M, self._hidden), dtype=np.float32)
         elif not output.flags["C_CONTIGUOUS"] or output.dtype != np.float32:
             output = np.ascontiguousarray(output, dtype=np.float32)
 
@@ -285,7 +298,7 @@ class B70ProviderClient:
             self._handle,
             ctypes.c_uint64(generation), ctypes.c_uint64(sequence),
             output.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            ctypes.c_size_t(M * 2048),
+            ctypes.c_size_t(M * self._hidden),
         )
         if status != 0:
             raise B70ProviderError(

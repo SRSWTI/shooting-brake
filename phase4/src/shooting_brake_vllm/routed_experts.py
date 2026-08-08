@@ -537,12 +537,15 @@ class HybridRoutedExperts(RoutedExperts):
         self._b70_max_batch = int(
             os.environ.get("SHOOTING_BRAKE_B70_MAX_BATCH", "128")
         )
+        # Sized from the model, not a literal: the 122B's hidden is 3072
+        # against the 35B's 2048, and a staging buffer one model too small
+        # truncates the activation copy rather than failing.
         self._b70_pinned_hidden: torch.Tensor = torch.empty(
-            self._b70_max_batch, 2048, dtype=torch.float16,
+            self._b70_max_batch, self.hidden_size, dtype=torch.float16,
             pin_memory=True, device="cpu",
         )
         self._b70_pinned_output: torch.Tensor = torch.empty(
-            self._b70_max_batch, 2048, dtype=torch.float32,
+            self._b70_max_batch, self.hidden_size, dtype=torch.float32,
             pin_memory=True, device="cpu",
         )
         # Phase 8.5: VRAM surgery state. When enabled, B70-owned expert
@@ -626,10 +629,12 @@ class HybridRoutedExperts(RoutedExperts):
             )
             # Device-side result buffers (pre-allocated, no torch.empty in forward).
             self._dev_b70_fp32 = torch.empty(
-                self._b70_max_batch, 2048, dtype=torch.float32, device="cuda",
+                self._b70_max_batch, self.hidden_size,
+                dtype=torch.float32, device="cuda",
             )
             self._dev_b70_bf16 = torch.empty(
-                self._b70_max_batch, 2048, dtype=torch.bfloat16, device="cuda",
+                self._b70_max_batch, self.hidden_size,
+                dtype=torch.bfloat16, device="cuda",
             )
             # Signal/completion flags (host-mapped, accessible from both sides).
             from .stream_signal import alloc_host_mapped_flag

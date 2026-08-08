@@ -59,6 +59,12 @@ PLACEMENTS="${PLACEMENTS-subset:8:8 subset:16:8 subset:24:64 split:128}"
 # without being asked.
 ALLOUT_PLACEMENTS="${ALLOUT_PLACEMENTS-}"
 DECODE_TOKENS="${DECODE_TOKENS:-400}"
+# Prefill-streaming arms. Empty by default for the same reason the cold tier
+# is: each entry is an extra full run, and streaming retains a host copy of
+# the B70 bank. List the same placements you put in PLACEMENTS to get a
+# with/without pair for each.
+STREAM_PLACEMENTS="${STREAM_PLACEMENTS-}"
+ALLOUT_STREAM_PLACEMENTS="${ALLOUT_STREAM_PLACEMENTS-}"
 CONCURRENCY="${CONCURRENCY:-1 8 32}"
 # Smoke-test knobs: TRIALS=1 with a couple of context lengths gives the
 # shape of the tradeoff in minutes rather than the full curve in hours.
@@ -82,11 +88,12 @@ mkdir -p "$OUT_DIR"
 
 run_one () {
   local config="$1" placement="$2" out="$3"
+  shift 3            # anything left is passed through verbatim
   if [[ -f "$out" ]]; then
     echo "[track_b] cached $config $placement -> $out"
     return
   fi
-  echo "[track_b] running $config ${placement:-(n/a)}"
+  echo "[track_b] running $config ${placement:-(n/a)} $*"
   "$REPO_ROOT/.venv/bin/python" benchmarks/offload_benchmark.py \
     --config "$config" \
     --placement "${placement:-split:128}" \
@@ -97,7 +104,8 @@ run_one () {
     --batch-tokens 128 \
     --max-num-seqs "$MAX_NUM_SEQS" \
     --concurrency $CONCURRENCY \
-    --context-lengths $CONTEXT_LENGTHS
+    --context-lengths $CONTEXT_LENGTHS \
+    "$@"
   # Let the card cool before the next process grabs the GPU.
   sleep "$REST_BETWEEN"
 }
@@ -117,6 +125,23 @@ done
 for p in $ALLOUT_PLACEMENTS; do
   slug="$(echo "$p" | tr ':' '-')"
   run_one all-out "$p" "$OUT_DIR/allout-${slug}.json"
+done
+
+# B70 prefill weight streaming, as a separate arm rather than a replacement.
+# It only changes prefill, and only above its token threshold, so pairing
+# each placement with and without it is the only way to read the effect --
+# a single streamed run has nothing to be compared against. Decode is
+# identical either way, which the pairing also demonstrates rather than
+# asserts. Empty by default: the arm doubles the runtime of whatever it is
+# given, and it costs host DRAM for a second copy of the B70 bank.
+for p in $STREAM_PLACEMENTS; do
+  slug="$(echo "$p" | tr ':' '-')"
+  run_one hybrid "$p" "$OUT_DIR/stream-${slug}.json" --prefill-stream
+done
+
+for p in $ALLOUT_STREAM_PLACEMENTS; do
+  slug="$(echo "$p" | tr ':' '-')"
+  run_one all-out "$p" "$OUT_DIR/allout-stream-${slug}.json" --prefill-stream
 done
 
 echo "[track_b] summarizing -> $OUT_DIR"

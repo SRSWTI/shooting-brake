@@ -185,6 +185,48 @@ def collect_worker_stats(worker: Any) -> dict[str, Any]:
         "free_gib": free_b / 2**30,
         "total_gib": total_b / 2**30,
     }
+
+    # Host DRAM. Untracked until now because the first two tiers do not use
+    # it for weights, but the cold tier holds its whole expert bank here and
+    # B70 prefill streaming adds a second copy of the B70 bank. On the 35B
+    # that is under a gigabyte; at 122B scale it is the constraint that
+    # decides whether the model loads at all, so it belongs beside VRAM
+    # rather than in a footnote. VmHWM is the peak, which is what a capacity
+    # decision needs -- current RSS understates a run that has already
+    # freed a transient staging copy.
+    try:
+        fields = {}
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith(("VmRSS:", "VmHWM:")):
+                    k, v = line.split(":", 1)
+                    fields[k] = int(v.split()[0]) / 2**20  # kB -> GiB
+        if fields:
+            stats["host_memory"] = {
+                "rss_gib": fields.get("VmRSS", 0.0),
+                "peak_rss_gib": fields.get("VmHWM", 0.0),
+            }
+    except OSError:
+        pass
+
+    # Board power. The project's claim is capacity per dollar, and running
+    # cost is part of that: a second card that idles at 40 W changes the
+    # arithmetic differently than one that draws 200 W. Sampled, not
+    # integrated -- a single reading between steps, not an energy total.
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(torch.cuda.current_device())
+        stats["cuda_power"] = {
+            "watts": pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0,
+            "limit_watts": pynvml.nvmlDeviceGetEnforcedPowerLimit(h) / 1000.0,
+            "temperature_c": pynvml.nvmlDeviceGetTemperature(h, 0),
+        }
+    except Exception:
+        # pynvml missing or the driver refuses the query: power is a nice
+        # extra, never a reason to lose the rest of the snapshot.
+        pass
     return stats
 
 

@@ -87,6 +87,11 @@ class StreamTiming:
     itls_s: list[float] = field(default_factory=list)
     token_ids: list[int] = field(default_factory=list)
     text: str = ""
+    #: Per-position prompt logprobs, populated only when requested. This is
+    #: the quality signal that token ids cannot provide: it is produced
+    #: during prefill and degrades continuously, where a sampled id only
+    #: changes once damage flips an argmax.
+    prompt_logprobs: list[float] = field(default_factory=list)
 
     @property
     def decode_tok_per_s(self) -> float:
@@ -132,10 +137,13 @@ ADAPTER_VARS = (
     "SHOOTING_BRAKE_B70_STATS",
     "SHOOTING_BRAKE_PLACEMENT",
     "SHOOTING_BRAKE_ALL_OUT",
+    "SHOOTING_BRAKE_B70_PREFILL_STREAM",
 )
 
 
-def apply_config_env(config: str, placement: str) -> None:
+def apply_config_env(
+    config: str, placement: str, prefill_stream: bool = False,
+) -> None:
     """Make the environment exactly describe ``config``.
 
     The adapter reads these at class-construction time, so this must run
@@ -172,6 +180,18 @@ def apply_config_env(config: str, placement: str) -> None:
         env["SHOOTING_BRAKE_PLACEMENT"] = "all-cuda"
     else:
         raise SystemExit(f"unknown config: {config}")
+    # Passed explicitly rather than inherited. It is listed in ADAPTER_VARS
+    # and therefore cleared above, so an exported value from the calling
+    # shell cannot turn a dispatch baseline into a streaming run wearing the
+    # baseline's label -- the failure mode that makes a comparison table
+    # quietly meaningless.
+    if prefill_stream:
+        if config == "all-cuda":
+            raise SystemExit(
+                "prefill streaming needs an offloaded placement; "
+                "there is nothing to stream in all-cuda"
+            )
+        env["SHOOTING_BRAKE_B70_PREFILL_STREAM"] = "1"
     os.environ.update(env)
 
 
@@ -196,12 +216,19 @@ def build_engine(max_num_seqs: int, max_model_len: int) -> Any:
 
 
 async def stream_one(
-    engine: Any, prompt: str, max_tokens: int
+    engine: Any, prompt: str, max_tokens: int,
+    prompt_logprobs: bool = False,
 ) -> StreamTiming:
     """Drive one request and timestamp every token as it arrives."""
     from vllm import SamplingParams
 
-    params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+    params = SamplingParams(
+        temperature=0.0, max_tokens=max_tokens,
+        # 0 = the sampled token's own logprob at each prompt position, which
+        # is all the quality metric needs. Requesting a top-k list instead
+        # would cost far more to serialise for no extra signal.
+        prompt_logprobs=0 if prompt_logprobs else None,
+    )
     timing = StreamTiming()
     start = time.perf_counter()
     previous = start
@@ -227,6 +254,13 @@ async def stream_one(
         timing.token_ids = list(completion.token_ids)
         timing.text = completion.text
         timing.prompt_tokens = len(output.prompt_token_ids or ())
+        if prompt_logprobs and getattr(output, "prompt_logprobs", None):
+            # Position 0 has no prediction behind it, so it carries no
+            # logprob and is skipped rather than counted as zero.
+            timing.prompt_logprobs = [
+                next(iter(d.values())).logprob
+                for d in output.prompt_logprobs[1:] if d
+            ]
 
     timing.total_s = time.perf_counter() - start
     timing.output_tokens = seen
@@ -234,12 +268,14 @@ async def stream_one(
 
 
 async def stream_many(
-    engine: Any, prompts: list[str], max_tokens: int
+    engine: Any, prompts: list[str], max_tokens: int,
+    prompt_logprobs: bool = False,
 ) -> tuple[list[StreamTiming], float]:
     """Run prompts concurrently; returns timings and wall-clock span."""
     start = time.perf_counter()
     timings = await asyncio.gather(
-        *(stream_one(engine, p, max_tokens) for p in prompts)
+        *(stream_one(engine, p, max_tokens, prompt_logprobs)
+          for p in prompts)
     )
     return list(timings), time.perf_counter() - start
 
@@ -248,12 +284,35 @@ async def stream_many(
 
 
 async def run_correctness(engine: Any) -> list[dict[str, Any]]:
-    """Greedy-decode the prompt matrix; token ids are the comparison key."""
-    timings, _ = await stream_many(engine, list(CORRECTNESS_PROMPTS), 32)
-    return [
-        {"prompt": prompt, "token_ids": t.token_ids, "text": t.text}
-        for prompt, t in zip(CORRECTNESS_PROMPTS, timings, strict=True)
-    ]
+    """Greedy decode plus prompt logprobs — quality, not just agreement.
+
+    Token ids alone are a weak instrument, and this project has the receipt:
+    a prefill path that dropped every offloaded route still emitted
+    byte-identical tokens, because damage has to flip an argmax before a
+    sampled id moves. It cost 0.49 nats/token and went unnoticed through a
+    full benchmark cycle.
+
+    ``prompt_logprobs`` is produced during prefill, one value per prompt
+    position, so it reads that pass directly and moves continuously with the
+    damage rather than only at a threshold. Recording it here means every
+    run carries a quality number instead of needing a separate probe to
+    notice a tier has gone quietly wrong.
+    """
+    timings, _ = await stream_many(
+        engine, list(CORRECTNESS_PROMPTS), 32, prompt_logprobs=True,
+    )
+    rows = []
+    for prompt, t in zip(CORRECTNESS_PROMPTS, timings, strict=True):
+        plp = t.prompt_logprobs
+        rows.append({
+            "prompt": prompt,
+            "token_ids": t.token_ids,
+            "text": t.text,
+            "prompt_tokens": t.prompt_tokens,
+            "prompt_logprob_sum": sum(plp) if plp else None,
+            "prompt_logprob_mean": (sum(plp) / len(plp)) if plp else None,
+        })
+    return rows
 
 
 async def run_single_stream(
@@ -521,6 +580,13 @@ def main() -> int:
         help="placement policy for the hybrid config",
     )
     parser.add_argument(
+        "--prefill-stream", action="store_true",
+        help="compute B70-owned routes on the 5090 from streamed weights "
+             "during prefill, above SHOOTING_BRAKE_B70_STREAM_T tokens per "
+             "forward. Decode is unaffected; pair a run with and without "
+             "it to read the effect.",
+    )
+    parser.add_argument(
         "--context-lengths", type=int, nargs="+",
         default=[512, 2048, 4096, 8192],
         help="prompt lengths for the context sweep and capacity frontier",
@@ -532,7 +598,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    apply_config_env(args.config, args.placement)
+    apply_config_env(args.config, args.placement, args.prefill_stream)
     result = asyncio.run(run(args))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

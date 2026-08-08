@@ -597,6 +597,41 @@ class HybridRoutedExperts(RoutedExperts):
             layer_idx, num_cuda,
         )
 
+    def _w13_is_reordered(self) -> bool:
+        """Whether the fused ``w13`` holds ``[up, gate]`` rather than
+        ``[gate, up]``.
+
+        vLLM reorders for the FlashInfer NVFP4 MoE kernels, under exactly the
+        condition reproduced here from
+        ``prepare_nvfp4_moe_layer_for_fi_or_cutlass``: a gated act-and-mul
+        layer on one of the three FlashInfer backends. VLLM_CUTLASS shares
+        that code path but is excluded from the reorder, so the backend
+        identity matters and "is it FlashInfer-ish" is not a safe proxy.
+
+        Read from vLLM's own enum rather than matched on a backend name, so
+        a renamed or newly added backend surfaces as an AttributeError at
+        load time instead of a silently swapped activation. Unknown or
+        missing backend means no reorder, which matches the default kernel
+        layout.
+        """
+        backend = getattr(self.quant_method, "nvfp4_backend", None)
+        if backend is None:
+            return False
+        from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+            NvFp4MoeBackend,
+        )
+
+        reordering = (
+            NvFp4MoeBackend.FLASHINFER_CUTLASS,
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.FLASHINFER_B12X,
+        )
+        return (
+            backend in reordering
+            and self.activation.is_gated
+            and self.moe_config.is_act_and_mul
+        )
+
     def _load_host_experts(self, layer_idx: int) -> None:
         """Copy this layer's host-resident experts into the DRAM arena, packed.
 
@@ -699,16 +734,28 @@ class HybridRoutedExperts(RoutedExperts):
 
         w13_q_cpu = w13_q.cpu()
         w2_q_cpu = w2_q.cpu()
+        # Which half of the fused w13 is gate depends on the NVFP4 backend.
+        # FlashInfer's kernels want [w3, w1], so
+        # prepare_nvfp4_moe_layer_for_fi_or_cutlass calls reorder_w1w3_to_w3w1
+        # and the first half becomes *up*, not gate
+        # (flashinfer_fp4_moe.py:336). Reading it as gate silently computes
+        # silu(x @ up) * (x @ gate) -- a different function, no error, and
+        # invisible to a self-check that splits its own reference the same
+        # way. Measured cost when it reached 94.7% of routes: 0.49
+        # nats/token, indistinguishable from dropping them entirely.
+        gate_first = not self._w13_is_reordered()
         for slot, expert_id in enumerate(host_ids):
             sf13 = linear_sf(w13_sf[slot], two_inter, hidden)
             sf2 = linear_sf(w2_sf[slot], hidden, inter)
             gs13 = float(w13_gs[slot])
+            lo_q, hi_q = w13_q_cpu[slot, :inter], w13_q_cpu[slot, inter:]
+            lo_sf, hi_sf = sf13[:inter], sf13[inter:]
+            gate_q, up_q = (lo_q, hi_q) if gate_first else (hi_q, lo_q)
+            gate_sf, up_sf = (lo_sf, hi_sf) if gate_first else (hi_sf, lo_sf)
             host.load_expert(
                 layer_idx, expert_id,
-                PackedPlane(w13_q_cpu[slot, :inter].contiguous(),
-                            sf13[:inter].contiguous(), gs13),
-                PackedPlane(w13_q_cpu[slot, inter:].contiguous(),
-                            sf13[inter:].contiguous(), gs13),
+                PackedPlane(gate_q.contiguous(), gate_sf.contiguous(), gs13),
+                PackedPlane(up_q.contiguous(), up_sf.contiguous(), gs13),
                 PackedPlane(w2_q_cpu[slot].contiguous(),
                             sf2.contiguous(), float(w2_gs[slot])),
             )
@@ -730,10 +777,18 @@ class HybridRoutedExperts(RoutedExperts):
             ref2 = dequantize_to_dtype(
                 w2_q[0], w2_sf[0], w2_gs[0], torch.float32,
             ).cpu()
+            # Split the reference by the same backend rule the load used.
+            # Hardcoding [:inter] as gate made this check agree with a load
+            # that had gate and up swapped -- self-consistent, and blind to
+            # the one thing it was written to catch.
+            ref_lo = ref13[:inter].contiguous()
+            ref_hi = ref13[inter:].contiguous()
+            ref_gate, ref_up = (
+                (ref_lo, ref_hi) if gate_first else (ref_hi, ref_lo)
+            )
             self._verify_cpu_expert(
                 host, layer_idx, host_ids[0],
-                ref13[:inter].contiguous(), ref13[inter:].contiguous(),
-                ref2.contiguous(),
+                ref_gate, ref_up, ref2.contiguous(),
             )
             del ref13, ref2
         del w13_q, w2_q, w13_q_cpu, w2_q_cpu

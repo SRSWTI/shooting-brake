@@ -92,6 +92,9 @@ class B70Poller {
     std::vector<PollLayer> snapshot;
     size_t known = 0;
     uint64_t sequence = 0;
+    // Fixed once the bank is loaded, and the poller only starts after
+    // that, so read it once rather than per dispatch on the hot path.
+    const size_t hidden = hidden_size();
 
     while (running_.load(std::memory_order_relaxed)) {
       // Refresh only when a new layer appeared, so the steady-state
@@ -120,7 +123,8 @@ class B70Poller {
             entry.weights, M);
         if (status == ProviderStatus::ok) {
           status = provider_->take(generation_, sequence, entry.output,
-                                   static_cast<size_t>(M) * kHidden, &result);
+                                   static_cast<size_t>(M) * hidden,
+                                   &result);
         }
         if (status != ProviderStatus::ok) errors_.fetch_add(1);
 
@@ -152,7 +156,18 @@ class B70Poller {
     }
   }
 
-  static constexpr size_t kHidden = 2048;
+  // Hidden size of the loaded bank, not a constant. This was 2048 — the
+  // 35B's — and it is the length this poller declares for the output
+  // buffer when it calls `take`. On any other geometry the provider sees
+  // a length that disagrees with what it produced and rejects every
+  // dispatch: 47 failures on the 122B, one per layer, with nothing else
+  // wrong, and invisible to any 35B test because 2048 is correct there.
+  // Read from the provider's own capability, which reports the geometry
+  // adopted from the bank header.
+  size_t hidden_size() const {
+    const auto sizes = provider_->capability().supported_hidden_sizes;
+    return sizes.empty() ? 0 : static_cast<size_t>(sizes.front());
+  }
 
   B70Provider* provider_;
   uint64_t generation_;

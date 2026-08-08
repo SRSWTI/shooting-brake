@@ -40,7 +40,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-MODEL = "unsloth/Qwen3.6-35B-A3B-NVFP4"
+# Overridable so the same harness can drive either qualified model; the
+# adapter's own gate is what decides whether the name is admissible.
+MODEL = os.environ.get(
+    "SHOOTING_BRAKE_MODEL", "unsloth/Qwen3.6-35B-A3B-NVFP4"
+)
 
 # Fixed prompt matrix: short and long prefills, and prompts that pull
 # different regions of the expert space, so route shares are not an
@@ -204,9 +208,24 @@ def apply_config_env(
 def build_engine(max_num_seqs: int, max_model_len: int) -> Any:
     from vllm.engine.arg_utils import AsyncEngineArgs
     from vllm.plugins import load_general_plugins
+
     from vllm.v1.engine.async_llm import AsyncLLM
 
     load_general_plugins()
+    # A prefill forward dispatches its whole token batch to the B70 in one
+    # call, and the provider rejects any batch above the max_batch it was
+    # loaded with. Chunked prefill sizes that batch from
+    # max_num_batched_tokens, which vLLM defaults to 2048 *regardless of
+    # max_model_len* — so capping the model length does not bound it.
+    #
+    # Raising max_batch instead is the wrong lever: the pinned and device
+    # staging buffers are per layer, so on the 122B's 47 layers each extra
+    # 1024 rows costs ~1.8 GiB of VRAM, straight out of the KV cache this
+    # tier exists to grow. Bounding the batch is free.
+    kwargs: dict[str, Any] = {}
+    cap = os.environ.get("SHOOTING_BRAKE_MAX_BATCHED_TOKENS")
+    if cap:
+        kwargs["max_num_batched_tokens"] = int(cap)
     args = AsyncEngineArgs(
         model=MODEL,
         enforce_eager=False,
@@ -217,6 +236,7 @@ def build_engine(max_num_seqs: int, max_model_len: int) -> Any:
         dtype="bfloat16",
         trust_remote_code=True,
         disable_log_stats=True,
+        **kwargs,
     )
     return AsyncLLM.from_engine_args(args)
 

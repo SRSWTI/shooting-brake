@@ -1054,6 +1054,49 @@ class HybridRoutedExperts(RoutedExperts):
                     f"vs bank {raw:.6e}/{act:.4f}={folded:.6e}"
                 )
 
+    def _verify_bank_wiring(
+        self, host: Any, layer_idx: int, expert_id: int,
+    ) -> None:
+        """Confirm the bank path put each plane in the slot it belongs to.
+
+        Reads the arena back and compares every slot against a reference
+        dequantized from the layer's own VRAM tensors — the same swizzled
+        source ``_verify_cpu_expert`` uses on the VRAM path, so this is a
+        genuinely independent oracle rather than the bank checking itself.
+
+        Only meaningful while VRAM still holds every expert, which is why
+        the caller gates it on that.
+        """
+        from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+            dequantize_to_dtype,
+            kE2M1ToFloat_handle,
+        )
+
+        qconfig = self.quant_method.moe_quant_config
+        device = self.w13_weight.device
+        kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(device)
+        ref13 = dequantize_to_dtype(
+            self.w13_weight.data[expert_id],
+            self.w13_weight_scale.data[expert_id],
+            qconfig._w1.alpha_or_gscale[expert_id].float(),
+            torch.float32,
+        ).cpu()
+        ref2 = dequantize_to_dtype(
+            self.w2_weight.data[expert_id],
+            self.w2_weight_scale.data[expert_id],
+            qconfig._w2.alpha_or_gscale[expert_id].float(),
+            torch.float32,
+        ).cpu()
+        inter = ref13.shape[0] // 2
+        lo, hi = ref13[:inter].contiguous(), ref13[inter:].contiguous()
+        # VRAM's halves are [up, gate] on the FlashInfer backends; the bank
+        # path wrote [gate, up]. Comparing without this rule would flag a
+        # correct load, or bless a swapped one.
+        gate, up = (lo, hi) if not self._w13_is_reordered() else (hi, lo)
+        self._verify_cpu_expert(
+            host, layer_idx, expert_id, gate, up, ref2.contiguous(),
+        )
+
     def _load_host_experts_from_bank(
         self, layer_idx: int, host_ids: tuple[int, ...],
     ) -> None:
@@ -1122,22 +1165,54 @@ class HybridRoutedExperts(RoutedExperts):
                             torch.from_numpy(np.ascontiguousarray(p.down_sf)),
                             gs2),
             )
-        # No CPU_VERIFY block here, deliberately. That check builds its
-        # reference with `dequantize_to_dtype`, which expects *swizzled*
-        # block scales — what VRAM holds. The bank's are linear, so feeding
-        # them to it produces a wrong reference: measured rel=5.9e-01
-        # against the VRAM path's 5.65e-07, while still printing OK, which
-        # is worse than no check at all.
+
+        if os.environ.get("SHOOTING_BRAKE_CPU_VERIFY") == "1" and host_ids:
+            # Checks the argument wiring above — which plane reached which
+            # slot, and with which scalar. The reference is built from
+            # *VRAM's* swizzled tensors, which is what `dequantize_to_dtype`
+            # expects; building it from the bank's linear scales reports
+            # rel=5.9e-01 while printing OK, and checks nothing.
+            #
+            # That reference only exists while VRAM still holds every
+            # expert, i.e. under post-hoc surgery, which is precisely what
+            # SHOOTING_BRAKE_ARENA_FROM_BANK=1 is for. Under pre-emptive the
+            # experts are absent and there is nothing to compare against, so
+            # the check declines rather than inventing a reference.
+            expert_id = host_ids[0]
+            if self.w13_weight.shape[0] != placement.num_experts:
+                logger.warning(
+                    "Shooting Brake: CPU_VERIFY needs post-hoc surgery to "
+                    "build a reference (run with "
+                    "SHOOTING_BRAKE_ARENA_FROM_BANK=1 instead); skipping"
+                )
+            else:
+                self._verify_bank_wiring(host, layer_idx, expert_id)
+        # What is and is not verified here, precisely.
         #
-        # The equivalence this function needs is established more strongly
-        # elsewhere. SHOOTING_BRAKE_ARENA_VERIFY_BANK=1 compares the arrays
-        # this path hands to `load_expert` against the ones the VRAM path
-        # hands over, byte for byte, for every host expert — 128 of them at
-        # allout:16:8:8, all six planes and both scalars each. Identical
-        # inputs to the same `load_expert` give an identical arena, so a
-        # second oracle over the same ground would add nothing; the
-        # comparison also distinguishes neighbouring experts (522k differing
-        # bytes), so passing it is a real result rather than a no-op.
+        # SHOOTING_BRAKE_ARENA_VERIFY_BANK=1 proves the bank *reader* agrees
+        # with the VRAM path byte for byte — 128 host experts at
+        # allout:16:8:8, six planes and two scalars each, zero mismatches,
+        # and the comparison distinguishes neighbouring experts by 522k
+        # bytes so passing it is a real result. But that gate runs inside
+        # `_load_host_experts`; it never watches *this* function call
+        # `load_expert`. The argument wiring below — which plane lands in
+        # which slot, and which scalar goes with it — is therefore verified
+        # by inspection against the VRAM path's identical call, not by an
+        # oracle. A gate/up slot swap here would pass every automated check
+        # in the tree, and at 3.3% of routes it would sit under the token
+        # harness's 0.11-nat floor.
+        #
+        # To close that: SHOOTING_BRAKE_ARENA_FROM_BANK=1 forces this path
+        # under post-hoc surgery, where VRAM still holds every expert and
+        # `_verify_cpu_expert`'s swizzled reference is constructible. Run
+        # 35B allout with it and SHOOTING_BRAKE_CPU_VERIFY=1 to check the
+        # wiring against a known-good oracle.
+        #
+        # No CPU_VERIFY block on this path in the meantime: that check
+        # builds its reference with `dequantize_to_dtype`, which expects
+        # swizzled block scales. The bank's are linear, so it reported
+        # rel=5.9e-01 against the VRAM path's 5.65e-07 while still printing
+        # OK — worse than no check.
 
         logger.info(
             "Shooting Brake: layer %d loaded %d host experts from the bank "
@@ -1213,7 +1288,13 @@ class HybridRoutedExperts(RoutedExperts):
         # byte-for-byte against the VRAM path under
         # SHOOTING_BRAKE_ARENA_VERIFY_BANK=1 on the 35B at allout:16:8:8,
         # across all 128 host experts.
-        if preemptive_surgery_enabled():
+        # The override forces this path under post-hoc surgery too, where
+        # VRAM still holds every expert — the one configuration in which
+        # the bank path's argument wiring can be checked against
+        # `_verify_cpu_expert`'s known-good swizzled reference.
+        if preemptive_surgery_enabled() or (
+            os.environ.get("SHOOTING_BRAKE_ARENA_FROM_BANK") == "1"
+        ):
             self._load_host_experts_from_bank(layer_idx, host_ids)
             return
 

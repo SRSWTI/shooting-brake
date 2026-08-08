@@ -55,8 +55,18 @@ def register() -> None:
 
     from vllm.model_executor.custom_op import PluggableLayer, op_registry_oot
 
-    from .routed_experts import HybridRoutedExperts
+    from .routed_experts import (
+        HybridRoutedExperts,
+        install_preemptive_alloc_hook,
+        preemptive_surgery_enabled,
+    )
     from .runner import HybridMoERunner
+
+    if preemptive_surgery_enabled():
+        # Must land before any layer is constructed: `create_weights` runs
+        # inside `RoutedExperts.__init__`, so an instance-level wrapper
+        # installed by the adapter would always be one layer too late.
+        install_preemptive_alloc_hook()
 
     registrations = {
         "RoutedExperts": HybridRoutedExperts,

@@ -47,6 +47,26 @@ def b70_prefill_stream_enabled() -> bool:
     return os.environ.get("SHOOTING_BRAKE_B70_PREFILL_STREAM") == "1"
 
 
+def preemptive_surgery_enabled() -> bool:
+    """Whether non-CUDA experts are never allocated in VRAM at all.
+
+    Default surgery is post-hoc: vLLM allocates all ``num_experts`` per
+    layer, the checkpoint loads into them, and ownership is sliced away
+    afterwards. That works only while the *whole* expert bank transiently
+    fits in VRAM. It does for the 35B (13.5 GiB) and does not for the 122B
+    (59.5 GiB against a 32 GiB card), where the load OOMs long before any
+    slice can run -- ``process_weights_after_loading`` does not fire until
+    the entire model is on device.
+
+    When enabled, ``create_weights`` allocates only the CUDA-owned experts
+    and vLLM's own loader skips the rest, so peak equals steady state. This
+    also makes the CUDA expert count a free parameter: post-hoc, it is
+    implicitly capped by a transient peak that has nothing to do with the
+    configuration being served.
+    """
+    return os.environ.get("SHOOTING_BRAKE_PREEMPTIVE_SURGERY") == "1"
+
+
 #: Token count at or above which B70 routes stream instead of dispatching.
 #:
 #: This counts tokens in the *forward pass*, not tokens per request, and the
@@ -177,6 +197,274 @@ _all_out_warned = False
 _SURGERY_HOOK_ATTR = "_shooting_brake_surgery_hook"
 
 
+def _reject_unsupported_preemptive_tiers(placement: Placement) -> None:
+    """Refuse the host tiers until they stop sourcing weights from VRAM.
+
+    ``_load_host_experts`` fills the DRAM arena by ``index_select``-ing the
+    layer's weight tensors with *global* expert ids. Post-hoc that is right:
+    the tensors still hold all 256 experts when it runs. Pre-emptive leaves
+    only the CUDA-owned ones there, so the same call either indexes out of
+    bounds or -- when an offloaded global id happens to fall below
+    ``num_cuda`` -- quietly loads a different expert than the one requested.
+    The checkpoint shards for offloaded experts are never read at all under
+    pre-emptive allocation, so there is no correct answer to fall back to.
+
+    A wrong arena produces plausible tokens, not a crash, so this fails
+    closed rather than risk it being found as a quality regression. The fix
+    is to source the arena from the expert bank, which holds every expert in
+    the provider's own layout and is built offline from the checkpoint.
+    """
+    if placement.cpu_count() == 0 and not b70_prefill_stream_enabled():
+        return
+    offender = (
+        "an all-out placement (CPU tier)" if placement.cpu_count()
+        else "SHOOTING_BRAKE_B70_PREFILL_STREAM=1"
+    )
+    raise RuntimeError(
+        "SHOOTING_BRAKE_PREEMPTIVE_SURGERY=1 cannot be combined with "
+        f"{offender}: the host arena still sources expert weights from "
+        "CUDA VRAM, which pre-emptive allocation never fills for offloaded "
+        "experts. Run without the CPU tier and without prefill streaming, "
+        "or use post-hoc surgery."
+    )
+
+
+def _preemptive_cuda_ids(layer: Any) -> tuple[int, ...] | None:
+    """CUDA-owned global expert ids for ``layer``, or ``None`` to allocate
+    the full bank.
+
+    Returns ``None`` for any layer the placement leaves entirely on CUDA, so
+    an all-CUDA layer (the FP8 tail) keeps stock behaviour and stock
+    indexing rather than a compact map that happens to be the identity.
+    """
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    placement = layer.shooting_brake_placement
+    layer_idx = extract_layer_index(layer.layer_name)
+    if placement.layer_b70_count(layer_idx) + placement.layer_cpu_count(
+        layer_idx
+    ) == 0:
+        return None
+    return placement.cuda_expert_ids(layer_idx)
+
+
+_ALLOC_HOOK_ATTR = "_shooting_brake_alloc_hook"
+
+
+def install_preemptive_alloc_hook() -> None:
+    """Make ``create_weights`` allocate only CUDA-owned experts.
+
+    Patched on the quant-method *class*, not an instance: ``create_weights``
+    runs inside ``RoutedExperts.__init__`` before the adapter regains
+    control, so there is no instance to wrap in time. ``layer.layer_name``
+    is already set at that point, which is what makes the placement lookup
+    possible this early.
+
+    Two param families need opposite treatment, and conflating them
+    corrupts the load silently:
+
+    * weights and per-block scales are indexed by *local* expert id, and
+      vLLM's loader returns early for ids the expert map marks ``-1``;
+    * the NVFP4 input global scales are indexed by *global* id whenever the
+      backend sets ``use_global_sf`` (every FlashInfer backend, including
+      ours), because the loader deliberately bypasses the ``-1`` skip for
+      them. Sized locally they would index out of bounds, so they stay
+      global — and stay that way. The same ``use_global_sf`` predicate
+      makes the consumer reduce them with a whole-tensor ``.max()`` before
+      expanding the scalar to the compact expert count, so their length
+      determines the activation scale's value, not its width. Compacting
+      them would silently tighten that scale relative to the stock path.
+    """
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa: E501
+        CompressedTensorsW4A4Nvfp4MoEMethod as _Method,
+    )
+
+    if getattr(_Method, _ALLOC_HOOK_ATTR, False):
+        return
+    original = _Method.create_weights
+
+    def create_weights(
+        self: Any,
+        layer: Any,
+        num_experts: int,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        cuda_ids = (
+            _preemptive_cuda_ids(layer)
+            if isinstance(layer, HybridRoutedExperts)
+            else None
+        )
+        if cuda_ids is None:
+            original(self, layer, num_experts, *args, **kwargs)
+            return
+
+        global_num_experts = num_experts
+        original(self, layer, len(cuda_ids), *args, **kwargs)
+
+        # Every param, including the NVFP4 input global scales, is
+        # allocated at the local count and indexed by local id. An earlier
+        # version special-cased the input scales to global length on the
+        # theory that `use_global_sf` makes the loader index them globally.
+        # It does not for this checkpoint: that predicate also requires
+        # `"input_scale" in weight_name`, and the tensors are named
+        # `input_global_scale`, which does not contain it. Measured — a
+        # global-length allocation left experts 8..255 unwritten, and the
+        # `1/x` in `process_weights_after_loading` turned that uninitialised
+        # memory into `inf`, which won the `.max()` and produced NaN logits.
+        #
+        # The consequence is a genuinely different activation scale, and it
+        # is upstream's own semantics for a partial expert set: in expert
+        # parallelism each rank reduces over the experts it holds. Measured
+        # on the 35B at subset:16:8, layer 16 — w13 is unaffected (all 256
+        # experts share one input scale, 54.75), while a2_scale moves from
+        # 1/154 to 1/173, ~11% tighter, because only the CUDA-owned experts
+        # are read. That is the source of the ~0.12 nats/token difference
+        # against post-hoc surgery, and it is a calibration difference
+        # rather than an error: the scale now covers exactly the experts
+        # this kernel computes.
+
+        # Drives both the loader's skip and vLLM's own bookkeeping.
+        layer.local_num_experts = len(cuda_ids)
+        layer._shooting_brake_cuda_ids = cuda_ids
+        expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+        for local_id, global_id in enumerate(cuda_ids):
+            expert_map[global_id] = local_id
+        layer.expert_map_manager._expert_map = expert_map
+        layer._expert_map = expert_map
+
+        logger.info(
+            "Shooting Brake pre-emptive surgery: %s — allocated %d/%d "
+            "experts, %d never enter VRAM",
+            layer.layer_name, len(cuda_ids), global_num_experts,
+            global_num_experts - len(cuda_ids),
+        )
+
+    _Method.create_weights = create_weights
+    setattr(_Method, _ALLOC_HOOK_ATTR, True)
+
+
+#: Highest CUDA allocation seen while weights were being loaded, in bytes.
+#: Sampled during the post-load hook, which is the last moment the load
+#: peak is still the process high-water mark: the KV cache is allocated
+#: afterwards and is far larger, so `max_memory_allocated` read at the end
+#: of a run describes the KV cache and is identical under both surgery
+#: strategies. This is the figure that decides whether a model loads.
+_load_peak_bytes = 0
+
+
+def _record_load_peak() -> None:
+    global _load_peak_bytes
+    if torch.cuda.is_available():
+        _load_peak_bytes = max(
+            _load_peak_bytes, torch.cuda.max_memory_allocated()
+        )
+
+
+def load_peak_gib() -> float:
+    """Peak CUDA allocation during weight loading, in GiB."""
+    return _load_peak_bytes / 2**30
+
+
+def _maybe_dump_weight_digest(layer: Any) -> None:
+    """Hash the post-surgery expert tensors, when asked.
+
+    A deterministic oracle for "does the compact layout hold the right
+    experts". Token-level comparison cannot answer that any more: two runs
+    of identical code disagree by ~0.11 nats and share only 4/8 sequences,
+    because B70 partials are accumulated asynchronously and the CUDA
+    kernel's reductions are not order-stable. Weights, by contrast, are
+    fixed once loading ends, so a digest is exact and the two surgery
+    strategies must produce identical bytes or one of them is wrong.
+
+    The scales matter as much as the weights. Post-hoc slices tensors that
+    stock processing has *already* transformed — `reorder_w1w3_to_w3w1`,
+    `swizzle_blockscale` — whereas pre-emptive runs that same processing on
+    an already-compact bank. Those steps are only equivalent if they
+    commute with slicing along the expert dimension. If they do not, the
+    digests differ and one path is feeding the kernel a layout it was never
+    validated against, which is worth knowing on its own.
+
+    Off unless ``SHOOTING_BRAKE_WEIGHT_DIGEST`` names an output file.
+    """
+    path = os.environ.get("SHOOTING_BRAKE_WEIGHT_DIGEST")
+    if not path:
+        return
+    import hashlib
+    import json as _json
+
+    def digest(t: Any) -> str | None:
+        """Hash raw bytes, never a converted copy.
+
+        The block scales are ``float8_e4m3fn`` after ``swizzle_blockscale``
+        and ``.numpy()`` raises ``unsupported ScalarType`` on them, which
+        would abort weight loading rather than skip a field. Reinterpreting
+        as uint8 also means the digest covers the exact bytes the kernel
+        reads, with no dtype conversion in between.
+        """
+        if t is None:
+            return None
+        c = t.detach().contiguous().cpu()
+        raw = c.view(torch.uint8) if c.element_size() == 1 else (
+            c.flatten().view(torch.uint8)
+        )
+        return hashlib.sha256(raw.numpy().tobytes()).hexdigest()[:16]
+
+    def span(t: Any) -> list[float] | None:
+        """Min/max as values. For the activation scalars a magnitude says
+        far more than 'the hashes differ' — an 11% spread is the difference
+        between reducing over the CUDA-owned experts and over all 256."""
+        if t is None:
+            return None
+        f = t.detach().float()
+        return [round(f.min().item(), 10), round(f.max().item(), 10)]
+
+    qconfig = layer.quant_method.moe_quant_config
+    record = {
+        "layer": layer.layer_index,
+        "num_experts": int(layer.w13_weight.shape[0]),
+        # Layer attributes.
+        "w13_weight": digest(layer.w13_weight),
+        "w2_weight": digest(layer.w2_weight),
+        "w13_weight_scale": digest(layer.w13_weight_scale),
+        "w2_weight_scale": digest(layer.w2_weight_scale),
+        # What the kernel is actually handed. The scale properties delegate
+        # to the quant config, and post-hoc surgery assigns these
+        # explicitly while pre-emptive leaves stock processing's own
+        # tensors in place — so they need not equal the layer attributes
+        # above, and a digest of the attribute alone could miss a
+        # divergence in the tensor that is really read.
+        "qc_w1_scale": digest(qconfig._w1.scale),
+        "qc_w2_scale": digest(qconfig._w2.scale),
+        # Values, not hashes: these are per-expert scalars, small enough to
+        # print and far more diagnostic. Kernel-format conversion folds the
+        # activation scalar into them, so when they differ the ratio says
+        # whether it is exactly that fold or a wrong-expert bug — a hash
+        # can only say "different".
+        "qc_w1_alpha": span(qconfig._w1.alpha_or_gscale),
+        "qc_w2_alpha": span(qconfig._w2.alpha_or_gscale),
+        "w13_weight_scale_2": span(
+            getattr(layer, "w13_weight_scale_2", None)
+        ),
+        "w2_weight_scale_2": span(getattr(layer, "w2_weight_scale_2", None)),
+        # Full per-expert vector. Min/max cannot separate a fold from a
+        # permutation that happens to preserve the extremes; the whole
+        # vector can. A fold multiplies every expert by one scalar, so the
+        # elementwise ratio between the two strategies is constant. An
+        # addressing bug permutes, and the ratios scatter.
+        "w2_alpha_vec": (
+            None if qconfig._w2.alpha_or_gscale is None else
+            [round(v, 12) for v in
+             qconfig._w2.alpha_or_gscale.detach().float().flatten().tolist()]
+        ),
+        "a1_gscale": span(qconfig._a1.alpha_or_gscale),
+        "a2_gscale": span(qconfig._a2.alpha_or_gscale),
+        "cuda_remap": digest(getattr(layer, "_cuda_remap", None)),
+    }
+    with open(path, "a") as f:
+        f.write(_json.dumps(record) + "\n")
+
+
 def _install_surgery_hook(quant_method: Any) -> None:
     """Run VRAM surgery as soon as weights finish loading.
 
@@ -197,6 +485,16 @@ def _install_surgery_hook(quant_method: Any) -> None:
     original = quant_method.process_weights_after_loading
 
     def process_weights_after_loading(layer: Any) -> None:
+        _record_load_peak()
+        # The NVFP4 input global scales are deliberately NOT compacted
+        # before this call. `prepare_nvfp4_moe_layer_for_fi_or_cutlass`
+        # reduces them with a whole-tensor `.max()` and then expands the
+        # scalar to `w13.shape[0]`, so their length sets the activation
+        # scale's *value*, never its width. Compacting them first would
+        # reduce over the CUDA-owned experts alone and hand the kernel a
+        # tighter scale than the stock path computes — measured as up to
+        # 0.12 nats/token of drift and greedy forks against post-hoc
+        # surgery. Leaving them global reproduces stock numerics exactly.
         original(layer)
         if isinstance(layer, HybridRoutedExperts):
             # Order matters: both host tiers source their weights from the
@@ -207,6 +505,7 @@ def _install_surgery_hook(quant_method: Any) -> None:
             if layer._cpu_active or b70_prefill_stream_enabled():
                 layer._load_host_experts(layer.layer_index)
             layer._maybe_perform_vram_surgery(layer.layer_index)
+            _maybe_dump_weight_digest(layer)
 
     quant_method.process_weights_after_loading = process_weights_after_loading
     setattr(quant_method, _SURGERY_HOOK_ATTR, True)
@@ -217,12 +516,19 @@ class HybridRoutedExperts(RoutedExperts):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         qualified_model = require_qualified_config(get_current_vllm_config())
-        super().__init__(*args, **kwargs)
-        self.shooting_brake_qualified_model = qualified_model
+        # Must precede `super().__init__`, which runs `create_weights`: the
+        # pre-emptive allocation hook reads ownership off this attribute to
+        # decide how many experts to allocate, and would otherwise see a
+        # half-built layer. Plain attributes assign fine before
+        # `nn.Module.__init__` — only Parameters and Modules may not.
         self.shooting_brake_placement: Placement = build_for_qualified(
             qualified_model,
             policy_name=_placement_policy_name(),
         )
+        if preemptive_surgery_enabled():
+            _reject_unsupported_preemptive_tiers(self.shooting_brake_placement)
+        super().__init__(*args, **kwargs)
+        self.shooting_brake_qualified_model = qualified_model
         self._device_map_cpu = build_device_map(self.shooting_brake_placement)
         self._b70_slot_map = _build_b70_slot_map(self.shooting_brake_placement)
         # Phase 8a: pinned host buffers for async B70 overlap.
@@ -472,15 +778,6 @@ class HybridRoutedExperts(RoutedExperts):
             return
         self._vram_surgery_done = True  # set early to prevent re-entry
 
-        if os.environ.get("SHOOTING_BRAKE_VRAM_SURGERY") != "1":
-            return
-        if os.environ.get("SHOOTING_BRAKE_B70_DEVICE") != "1":
-            logger.warning(
-                "SHOOTING_BRAKE_VRAM_SURGERY=1 requires "
-                "SHOOTING_BRAKE_B70_DEVICE=1; skipping surgery."
-            )
-            return
-
         placement = self.shooting_brake_placement
 
         # Skip layers with nothing offloaded (e.g. FP8 layers 32-39). Both
@@ -495,19 +792,42 @@ class HybridRoutedExperts(RoutedExperts):
         # Determine CUDA-owned expert IDs (sorted ascending for contiguous
         # index_select — even for interleaved placement this produces the
         # correct compact-to-global mapping).
-        cuda_global_ids = sorted(
-            e for e in range(placement.num_experts)
-            if placement.owners[layer_idx][e].device is Device.CUDA
-        )
+        cuda_global_ids = sorted(placement.cuda_expert_ids(layer_idx))
         device = self.w13_weight.device
+        num_cuda = len(cuda_global_ids)
+
+        # Deliberately ahead of the env gates below. Once `create_weights`
+        # has allocated a compact bank, the finalize step is a consequence
+        # of that allocation, not of the surgery flags: it builds
+        # `_cuda_remap` and retires the loader's `_expert_map`. Gated, a
+        # pre-emptive run without SHOOTING_BRAKE_VRAM_SURGERY would pair
+        # compact weights with a null remap and a live competing map, and
+        # index an 8-row bank with global ids — wrong tokens, no error.
+        if self.w13_weight.shape[0] == num_cuda:
+            logger.info(
+                "Shooting Brake: layer %d already compact at %d/%d experts "
+                "(%d B70 + %d CPU never allocated)",
+                layer_idx, num_cuda, placement.num_experts,
+                b70_count, cpu_count,
+            )
+            self._finalize_compact_experts(layer_idx, cuda_global_ids, device)
+            return
+
+        if os.environ.get("SHOOTING_BRAKE_VRAM_SURGERY") != "1":
+            return
+        if os.environ.get("SHOOTING_BRAKE_B70_DEVICE") != "1":
+            logger.warning(
+                "SHOOTING_BRAKE_VRAM_SURGERY=1 requires "
+                "SHOOTING_BRAKE_B70_DEVICE=1; skipping surgery."
+            )
+            return
+
         cuda_idx = torch.tensor(
             cuda_global_ids, device=device, dtype=torch.long,
         )
-        num_cuda = len(cuda_global_ids)
-
         logger.info(
-            "Shooting Brake VRAM surgery: layer %d — slicing %d→%d "
-            "CUDA experts (freeing %d B70 + %d CPU experts)",
+            "Shooting Brake VRAM surgery: layer %d — slicing %d→%d CUDA "
+            "experts (freeing %d B70 + %d CPU experts)",
             layer_idx, placement.num_experts, num_cuda, b70_count, cpu_count,
         )
 
@@ -566,6 +886,34 @@ class HybridRoutedExperts(RoutedExperts):
             1.0 / qconfig._a2.alpha_or_gscale
         ).clone()
 
+        self._finalize_compact_experts(layer_idx, cuda_global_ids, device)
+
+    def _finalize_compact_experts(
+        self,
+        layer_idx: int,
+        cuda_global_ids: list[int],
+        device: torch.device,
+    ) -> None:
+        """Bookkeeping both surgery strategies need once VRAM holds exactly
+        the CUDA-owned experts.
+
+        Separate from the slicing because pre-emptive allocation arrives
+        here with nothing to slice, and duplicating the remap construction
+        for that path is how the two strategies would silently diverge.
+        """
+        num_cuda = len(cuda_global_ids)
+
+        # --- Retire the loader's expert map ---
+        # It exists only so vLLM's weight loader skips non-CUDA experts
+        # during load. Leaving it live would hand the kernel a second,
+        # competing global→local mapping on top of `_cuda_remap` below —
+        # and unlike a crash, a double remap silently computes the wrong
+        # experts. Clearing it makes the forward path byte-identical to the
+        # post-hoc strategy, which is what lets the two be compared.
+        if getattr(self, "_expert_map", None) is not None:
+            self._expert_map = None
+            self.expert_map_manager._expert_map = None
+
         # --- Update metadata ---
         self.local_num_experts = num_cuda
 
@@ -586,7 +934,8 @@ class HybridRoutedExperts(RoutedExperts):
         # so 0 * E_0(x) = 0 contribution, and the real result comes
         # from the B70 device).
         self._cuda_remap = torch.zeros(
-            placement.num_experts, dtype=torch.long, device=device,
+            self.shooting_brake_placement.num_experts,
+            dtype=torch.long, device=device,
         )
         for local_id, global_id in enumerate(cuda_global_ids):
             self._cuda_remap[global_id] = local_id

@@ -7,9 +7,22 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 
-QUALIFIED_MODEL = "unsloth/Qwen3.6-35B-A3B-NVFP4"
+#: Models this adapter admits. Both share an architecture and text model
+#: type; what differs is geometry, and that is read from the model's own
+#: config rather than restated here. A second hard-coded shape is how the
+#: table and the checkpoint drift apart.
+QUALIFIED_MODELS = (
+    "unsloth/Qwen3.6-35B-A3B-NVFP4",
+    "unsloth/Qwen3.5-122B-A10B-NVFP4",
+)
+#: Default when SHOOTING_BRAKE_MODEL is unset, and the shape the phase
+#: tests pin against.
+QUALIFIED_MODEL = QUALIFIED_MODELS[0]
 QUALIFIED_ARCHITECTURE = "Qwen3_5MoeForConditionalGeneration"
 QUALIFIED_MODEL_TYPE = "qwen3_5_moe_text"
+
+#: The 35B's geometry. Retained because the phase tests describe that model
+#: specifically; `require_qualified_config` no longer compares against it.
 QUALIFIED_HIDDEN_SIZE = 2048
 QUALIFIED_LAYERS = 40
 QUALIFIED_EXPERTS = 256
@@ -17,7 +30,9 @@ QUALIFIED_TOP_K = 8
 QUALIFIED_MOE_INTERMEDIATE = 512
 # All 40 layers are MoE (256 routed experts each). Layers 0-31 are NVFP4 and
 # are extracted into the Phase-1 B70 bank; they are B70-capable. Layers 32-39
-# are FP8 and are not in the bank, so their experts are CUDA-forced.
+# are FP8 and are not in the bank, so their experts are CUDA-forced. The
+# 122B splits 47/1 the same way. Which layers a *run* can offload is read
+# from the bank header, not from these, so the two cannot disagree.
 QUALIFIED_BANK_LAYERS = 32
 QUALIFIED_BANK_EXPERTS_PER_LAYER = 256
 QUALIFIED_FP8_CUDA_ONLY_LAYERS = 8
@@ -49,8 +64,74 @@ def phase4_enabled() -> bool:
     """Whether this process explicitly selected the Phase-4 local adapter."""
     return (
         os.environ.get("SHOOTING_BRAKE_PHASE4") == "all-cuda"
-        and os.environ.get("SHOOTING_BRAKE_MODEL") == QUALIFIED_MODEL
+        and os.environ.get("SHOOTING_BRAKE_MODEL") in QUALIFIED_MODELS
     )
+
+
+#: `<8sIIIIIQQQQ` — magic, layers, experts/layer, hidden, intermediate, pad,
+#: then four record-section sizes. Written by phase1/extract_experts.py.
+_BANK_HEADER_FMT = "<8sIIIIIQQQQ"
+_BANK_MAGIC = b"SBEXP001"
+
+
+@dataclass(frozen=True)
+class BankHeader:
+    """Geometry the expert bank was actually built for."""
+
+    layers: int
+    experts_per_layer: int
+    hidden_size: int
+    moe_intermediate_size: int
+
+    #: A bank is absent, which is the truth for an all-CUDA run.
+    @staticmethod
+    def absent() -> "BankHeader":
+        return BankHeader(0, 0, 0, 0)
+
+
+def read_bank_header(path: str | None = None) -> BankHeader:
+    """Geometry from the expert bank's own header.
+
+    Which layers can be offloaded, and at what shape, are properties of the
+    bank that was built — not of constants in this file. Reading them here
+    means a bank built for one model cannot be silently paired with
+    another. That is not hypothetical: the default path holds whichever
+    bank was built last, and a 32-layer 35B bank is numerically compatible
+    with a 47-layer model's *bounds* while describing entirely different
+    weights.
+    """
+    import struct
+    from pathlib import Path
+
+    if path is None:
+        path = os.environ.get(
+            "SHOOTING_BRAKE_B70_BANK",
+            str(Path(__file__).resolve().parents[3] / "phase1" / "expert_bank.bin"),
+        )
+    bank = Path(path)
+    if not bank.is_file():
+        # Absent is the truth for an all-CUDA run. Under an offloading
+        # policy it is a trap: `b70_capable_layers` goes empty, every policy
+        # CUDA-forces every layer because it only assigns B70/CPU owners
+        # `if layer in b70_capable`, and the run completes as all-CUDA while
+        # its result JSON still records the hybrid placement it was asked
+        # for. A missing or mistyped bank path must not be able to produce a
+        # measurement that reads as authoritative.
+        if os.environ.get("SHOOTING_BRAKE_HYBRID") == "1":
+            raise QualificationError(
+                f"expert bank not found at {bank} — an offloading placement "
+                "cannot be served without it. Set SHOOTING_BRAKE_B70_BANK to "
+                "the bank built for this model."
+            )
+        return BankHeader.absent()
+    with bank.open("rb") as f:
+        raw = f.read(struct.calcsize(_BANK_HEADER_FMT))
+    magic, layers, experts, hidden, inter, *_rest = struct.unpack(
+        _BANK_HEADER_FMT, raw
+    )
+    if magic != _BANK_MAGIC:
+        raise QualificationError(f"{bank} is not a Shooting Brake expert bank")
+    return BankHeader(int(layers), int(experts), int(hidden), int(inter))
 
 
 def _architectures(hf_config: object) -> Iterable[str]:
@@ -66,8 +147,10 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
         raise QualificationError("missing vLLM model or parallel configuration")
 
     model = getattr(model_config, "model", None)
-    if model != QUALIFIED_MODEL:
-        raise QualificationError(f"unqualified model: {model!r}")
+    if model not in QUALIFIED_MODELS:
+        raise QualificationError(
+            f"unqualified model: {model!r} (admitted: {list(QUALIFIED_MODELS)})"
+        )
     # Graph mode is supported: the adapter's forward_modular is a pure
     # pass-through in all-CUDA mode (no Python logic on the hot path).
 
@@ -78,20 +161,64 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
     if getattr(text_config, "model_type", None) != QUALIFIED_MODEL_TYPE:
         raise QualificationError("unqualified Qwen text model type")
 
-    expected = {
-        "hidden_size": QUALIFIED_HIDDEN_SIZE,
-        "num_hidden_layers": QUALIFIED_LAYERS,
-        "num_experts": QUALIFIED_EXPERTS,
-        "num_experts_per_tok": QUALIFIED_TOP_K,
-        "moe_intermediate_size": QUALIFIED_MOE_INTERMEDIATE,
-    }
-    mismatches = {
-        name: (getattr(text_config, name, None), value)
-        for name, value in expected.items()
-        if getattr(text_config, name, None) != value
-    }
-    if mismatches:
-        raise QualificationError(f"unqualified Qwen dimensions: {mismatches}")
+    # Geometry comes from the model, not from a table. The admitted set
+    # above is the contract; restating each model's dimensions here would
+    # only create a second source of truth to drift from the checkpoint.
+    # What is still checked is that every dimension exists and is usable.
+    geometry = {}
+    for name in (
+        "hidden_size", "num_hidden_layers", "num_experts",
+        "num_experts_per_tok", "moe_intermediate_size",
+    ):
+        value = getattr(text_config, name, None)
+        if not isinstance(value, int) or value < 1:
+            raise QualificationError(
+                f"model config is missing a usable {name}: {value!r}"
+            )
+        geometry[name] = value
+
+    # NVFP4 packs two weights per byte and one block scale per 16, so a
+    # dimension that is not a multiple of 16 cannot be expressed in the
+    # bank's record layout at all.
+    for name in ("hidden_size", "moe_intermediate_size"):
+        if geometry[name] % 16:
+            raise QualificationError(
+                f"{name}={geometry[name]} is not a multiple of 16; the NVFP4 "
+                "expert-bank layout cannot represent it"
+            )
+
+    # Identity, not a bound. A stale 35B bank (32 layers, hidden 2048,
+    # intermediate 512) satisfies `32 <= 47` against the 122B and would be
+    # served happily, with the B70 returning experts of the wrong shape for
+    # every routed token. Comparing the shape the bank was built for
+    # against the model's own geometry is what makes that impossible.
+    bank = read_bank_header()
+    bank_layers = bank.layers
+    if bank_layers:
+        # Every dimension must match exactly. The layer count is the one
+        # exception, and only downward: the FP8 tail is deliberately absent
+        # from the bank, so a bank covering fewer layers than the model is
+        # normal, while one covering more is a different model's bank.
+        wrong: dict[str, tuple[int, int]] = {}
+        if bank_layers > geometry["num_hidden_layers"]:
+            wrong["layers"] = (bank_layers, geometry["num_hidden_layers"])
+        for name, got, want in (
+            ("experts_per_layer", bank.experts_per_layer,
+             geometry["num_experts"]),
+            ("hidden_size", bank.hidden_size, geometry["hidden_size"]),
+            ("moe_intermediate_size", bank.moe_intermediate_size,
+             geometry["moe_intermediate_size"]),
+        ):
+            if got != want:
+                wrong[name] = (got, want)
+        if wrong:
+            detail = ", ".join(
+                f"{k} bank={g} model={w}" for k, (g, w) in wrong.items()
+            )
+            raise QualificationError(
+                f"expert bank was built for a different model than {model}: "
+                f"{detail}. Point SHOOTING_BRAKE_B70_BANK at this model's bank."
+            )
 
     if getattr(parallel_config, "tensor_parallel_size", None) != 1:
         raise QualificationError("Phase 4 requires tensor parallel size one")
@@ -103,9 +230,11 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
     return QualifiedModel(
         model=model,
         architecture=QUALIFIED_ARCHITECTURE,
-        hidden_size=QUALIFIED_HIDDEN_SIZE,
-        num_layers=QUALIFIED_LAYERS,
-        num_experts=QUALIFIED_EXPERTS,
-        top_k=QUALIFIED_TOP_K,
-        moe_intermediate_size=QUALIFIED_MOE_INTERMEDIATE,
+        hidden_size=geometry["hidden_size"],
+        num_layers=geometry["num_hidden_layers"],
+        num_experts=geometry["num_experts"],
+        top_k=geometry["num_experts_per_tok"],
+        moe_intermediate_size=geometry["moe_intermediate_size"],
+        bank_layers=bank_layers,
+        bank_experts_per_layer=geometry["num_experts"],
     )

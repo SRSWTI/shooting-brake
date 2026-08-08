@@ -178,10 +178,28 @@ def collect_worker_stats(worker: Any) -> dict[str, Any]:
         "max_tokens": num_blocks * cache_config.block_size,
     }
 
+    # Function-local, matching `_iter_hybrid_layers`: a module-scope import
+    # would pull routed_experts' vLLM dependencies into the driver process,
+    # which imports this module only for `collect_worker_stats`.
+    from .routed_experts import load_peak_gib
+
     free_b, total_b = torch.cuda.mem_get_info()
     stats["cuda_memory"] = {
         "allocated_gib": torch.cuda.memory_allocated() / 2**30,
         "reserved_gib": torch.cuda.memory_reserved() / 2**30,
+        # Process high-water marks, read at end of run: they describe the
+        # KV cache, which fills to `gpu_memory_utilization x total` however
+        # the experts were allocated. NOT how the surgery strategies differ.
+        "peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
+        "peak_reserved_gib": torch.cuda.max_memory_reserved() / 2**30,
+        # This one is. Sampled during the post-load hook, before the KV
+        # cache exists, so it still describes the weights: post-hoc surgery
+        # carries the whole expert bank through that moment, pre-emptive
+        # allocation never materialises the offloaded part. On a model
+        # where both strategies run it is the only figure that moves — KV
+        # sizing sees identical freed memory either way, because post-hoc
+        # surgery completes before vLLM's profiling pass.
+        "load_peak_allocated_gib": load_peak_gib(),
         "free_gib": free_b / 2**30,
         "total_gib": total_b / 2**30,
     }

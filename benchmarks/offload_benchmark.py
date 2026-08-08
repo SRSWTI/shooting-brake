@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import statistics
@@ -142,7 +143,10 @@ ADAPTER_VARS = (
 
 
 def apply_config_env(
-    config: str, placement: str, prefill_stream: bool = False,
+    config: str,
+    placement: str,
+    prefill_stream: bool = False,
+    preemptive: bool = False,
 ) -> None:
     """Make the environment exactly describe ``config``.
 
@@ -192,6 +196,8 @@ def apply_config_env(
                 "there is nothing to stream in all-cuda"
             )
         env["SHOOTING_BRAKE_B70_PREFILL_STREAM"] = "1"
+    if preemptive:
+        env["SHOOTING_BRAKE_PREEMPTIVE_SURGERY"] = "1"
     os.environ.update(env)
 
 
@@ -280,6 +286,57 @@ async def stream_many(
     return list(timings), time.perf_counter() - start
 
 
+def adapter_source_sha() -> str:
+    """Digest of the adapter sources *and* this harness.
+
+    Each configuration runs as a fresh process, so an edit landing between
+    two legs of a comparison silently gives them different code. That is
+    invisible in the result JSON and fatal to any claim of the form "these
+    two runs differ in nothing but X" — which is exactly what a parity
+    comparison asserts.
+
+    The harness is included deliberately, not just the adapter: the first
+    such invalidation here came from this file, when correctness decoding
+    moved from concurrent to sequential between two legs. A digest covering
+    only `phase4/` would have missed it.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    sources = sorted((repo / "phase4" / "src").rglob("*.py"))
+    sources.append(Path(__file__).resolve())
+    digest = hashlib.sha256()
+    for path in sources:
+        digest.update(path.relative_to(repo).as_posix().encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
+async def stream_each(
+    engine: Any, prompts: list[str], max_tokens: int,
+    prompt_logprobs: bool = False,
+) -> list[StreamTiming]:
+    """Run prompts strictly one at a time.
+
+    Correctness comparisons need a reproducible instrument, and
+    ``stream_many`` is not one: it gathers every prompt at once, so the
+    engine batches them according to arrival timing, and NVFP4 MoE
+    reductions are not batch-invariant. The numerics therefore shift
+    run-to-run, greedy decoding turns any near-tie into a permanent fork,
+    and two runs of an *identical* configuration disagree. Measured on the
+    35B at subset:16:8: two runs that were numerically identical by
+    construction reported 5/8 and 3/8 matching sequences, with the same
+    prompt scoring -2.966058 and -2.978648 nats.
+
+    One prompt in flight means one batch shape, which makes a run
+    reproducible and lets a token-for-token comparison mean something.
+    Throughput phases deliberately keep using ``stream_many`` — there the
+    concurrency is the thing being measured.
+    """
+    return [
+        await stream_one(engine, p, max_tokens, prompt_logprobs)
+        for p in prompts
+    ]
+
+
 # --- workloads ---------------------------------------------------------
 
 
@@ -298,7 +355,11 @@ async def run_correctness(engine: Any) -> list[dict[str, Any]]:
     run carries a quality number instead of needing a separate probe to
     notice a tier has gone quietly wrong.
     """
-    timings, _ = await stream_many(
+    # Sequential, not gathered: see `stream_each`. Concurrent decoding
+    # makes batch composition timing-dependent, and the MoE reductions are
+    # not batch-invariant, so an identical configuration would not
+    # reproduce its own token ids run to run.
+    timings = await stream_each(
         engine, list(CORRECTNESS_PROMPTS), 32, prompt_logprobs=True,
     )
     rows = []
@@ -516,6 +577,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "placement": os.environ.get("SHOOTING_BRAKE_PLACEMENT", "all-cuda"),
             "max_num_seqs": args.max_num_seqs,
             "max_model_len": args.max_model_len,
+            "adapter_sha": adapter_source_sha(),
         }
         result["correctness"] = await run_correctness(engine)
 
@@ -587,6 +649,14 @@ def main() -> int:
              "it to read the effect.",
     )
     parser.add_argument(
+        "--preemptive", action="store_true",
+        help="never allocate offloaded experts in VRAM, instead of "
+             "allocating the full bank and slicing it afterwards. Required "
+             "for any model whose bank exceeds card capacity; on a model "
+             "where both fit, the two must agree token-for-token and differ "
+             "only in cuda_memory.peak_allocated_gib.",
+    )
+    parser.add_argument(
         "--context-lengths", type=int, nargs="+",
         default=[512, 2048, 4096, 8192],
         help="prompt lengths for the context sweep and capacity frontier",
@@ -598,7 +668,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    apply_config_env(args.config, args.placement, args.prefill_stream)
+    apply_config_env(
+        args.config, args.placement, args.prefill_stream, args.preemptive,
+    )
     result = asyncio.run(run(args))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

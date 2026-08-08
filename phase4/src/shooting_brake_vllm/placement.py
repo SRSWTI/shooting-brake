@@ -171,6 +171,19 @@ class Placement:
             if owner.device is Device.B70
         )
 
+    def cuda_expert_ids(self, layer: int) -> tuple[int, ...]:
+        """Global expert ids this layer keeps in CUDA VRAM, ascending.
+
+        The compact local id of a CUDA expert is its position in this
+        tuple, which is what makes ``index_select`` on a sorted id list and
+        a from-scratch compact allocation produce identical layouts. Both
+        surgery strategies read ownership from here so they cannot drift.
+        """
+        return tuple(
+            e for e, owner in enumerate(self.owners[layer])
+            if owner.device is Device.CUDA
+        )
+
     # -- (de)serialization for data-driven swapping ----------------------
 
     SCHEMA = "shooting-brake.placement.v1"

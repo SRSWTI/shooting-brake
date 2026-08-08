@@ -117,32 +117,37 @@ def collect_worker_stats(worker: Any) -> dict[str, Any]:
             "errors": cpu_poller.error_count,
             "service_mean_us": cpu_poller.service_mean_us,
         }
-        host = next(
-            (
-                layer._cpu_host for layer in layers
-                if getattr(layer, "_cpu_host", None) is not None
-            ),
-            None,
-        )
-        if host is not None:
-            stats["cpu_arena"] = {
-                "resident_experts": host.resident_count,
-                "used_gib": host.arena_used_bytes / 2**30,
-                # Must stay 0: a skipped route is a dropped contribution,
-                # which is a wrong answer rather than a slow one.
-                "skipped_routes": host.skipped_routes,
-            }
 
-        # Prefill weight streaming is otherwise invisible: it bypasses the
-        # poller entirely, so cpu_poller counts only the decode dispatches.
-        # Without this, a run that streamed gigabytes to the 5090 looks
-        # identical to one that streamed nothing.
-        try:
-            from .cpu_stream import _streamer_singleton
-        except ImportError:
-            _streamer_singleton = None
-        if _streamer_singleton is not None:
-            stats["cpu_stream"] = dict(_streamer_singleton.stats)
+    # Arena and streamer are reported independently of the CPU poller. Both
+    # were nested under it, which was right when only the cold tier used
+    # them: no poller meant no arena. B70 prefill streaming broke that
+    # assumption -- it populates the same arena and drives the same streamer
+    # on a hybrid placement that has no CPU poller at all, so the nesting
+    # silently reported nothing for exactly the configuration the feature
+    # runs in. A run that streamed gigabytes to the 5090 looked identical to
+    # one that streamed none.
+    host = next(
+        (
+            layer._cpu_host for layer in layers
+            if getattr(layer, "_cpu_host", None) is not None
+        ),
+        None,
+    )
+    if host is not None:
+        stats["cpu_arena"] = {
+            "resident_experts": host.resident_count,
+            "used_gib": host.arena_used_bytes / 2**30,
+            # Must stay 0: a skipped route is a dropped contribution,
+            # which is a wrong answer rather than a slow one.
+            "skipped_routes": host.skipped_routes,
+        }
+
+    try:
+        from .cpu_stream import _streamer_singleton
+    except ImportError:
+        _streamer_singleton = None
+    if _streamer_singleton is not None:
+        stats["cpu_stream"] = dict(_streamer_singleton.stats)
 
     # --- route histogram --------------------------------------------------
     # Present only under SHOOTING_BRAKE_ROUTE_STATS=1. The full table goes

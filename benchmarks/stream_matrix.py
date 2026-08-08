@@ -60,14 +60,26 @@ from offload_benchmark import (  # noqa: E402
 )
 
 #: Mode -> extra environment on top of the shared hybrid configuration.
-#: all-cuda is the ceiling; the two offload modes differ only in the flag,
+#: all-cuda is the ceiling; dispatch and stream differ only in the flag,
 #: which is the point -- placement, surgery and graph mode are held constant
-#: so the comparison isolates the prefill strategy.
-MODES: dict[str, dict[str, str]] = {
-    "all-cuda": {},
-    "dispatch": {},
+#: so the comparison isolates the prefill strategy. The all-out modes add the
+#: host-DRAM cold tier, which is a different placement and so needs its own
+#: entry rather than a flag on top of the hybrid one.
+#:
+#: ``placement=None`` means "use --placement".
+MODES: dict[str, dict] = {
+    "all-cuda": {"config": "all-cuda", "placement": "all-cuda", "env": {}},
+    "dispatch": {"config": "hybrid", "placement": None, "env": {}},
     "stream": {
-        "SHOOTING_BRAKE_B70_PREFILL_STREAM": "1",
+        "config": "hybrid", "placement": None,
+        "env": {"SHOOTING_BRAKE_B70_PREFILL_STREAM": "1"},
+    },
+    "all-out": {
+        "config": "all-out", "placement": "allout:16:8:8", "env": {},
+    },
+    "all-out-stream": {
+        "config": "all-out", "placement": "allout:16:8:8",
+        "env": {"SHOOTING_BRAKE_B70_PREFILL_STREAM": "1"},
     },
 }
 
@@ -109,16 +121,15 @@ async def cell(
 
 
 async def run_mode(mode: str, args: argparse.Namespace) -> dict:
-    env = dict(MODES[mode])
-    placement = "all-cuda" if mode == "all-cuda" else args.placement
-    config = "all-cuda" if mode == "all-cuda" else "hybrid"
-    apply_config_env(config, placement)
-    os.environ.update(env)
-    if mode != "stream":
-        # apply_config_env clears adapter vars, but the streaming flag is not
-        # one of them; drop it explicitly so a stray export cannot turn the
-        # dispatch baseline into a second streaming run wearing its label.
-        os.environ.pop("SHOOTING_BRAKE_B70_PREFILL_STREAM", None)
+    spec = MODES[mode]
+    placement = spec["placement"] or args.placement
+    apply_config_env(spec["config"], placement)
+    # apply_config_env clears the adapter vars it owns, but the streaming
+    # flag is not one of them. Clear it unconditionally and re-set it from
+    # the mode, so a stray export cannot turn a dispatch baseline into a
+    # second streaming run wearing the wrong label.
+    os.environ.pop("SHOOTING_BRAKE_B70_PREFILL_STREAM", None)
+    os.environ.update(spec["env"])
     os.environ["SHOOTING_BRAKE_B70_STREAM_T"] = str(args.threshold)
 
     result: dict = {

@@ -1,0 +1,101 @@
+{
+  "mode": "all-cuda",
+  "placement": "all-cuda",
+  "threshold": 1,
+  "cells": [
+    {
+      "ttft_ms_p50": 54.944376985076815,
+      "ttft_ms_p99": 54.944376985076815,
+      "ttft_ms_mean": 54.68388348526787,
+      "itl_ms_p50": 3.944709984352812,
+      "output_tok_per_s": 139.0537077981146,
+      "requests": 2,
+      "target_prompt_tokens": 256,
+      "concurrency": 1,
+      "wall_s": 0.25953288399614394,
+      "cpu_stream": null,
+      "poller": null
+    },
+    {
+      "ttft_ms_p50": 153.02321698982269,
+      "ttft_ms_p99": 158.2903110247571,
+      "ttft_ms_mean": 150.42792025087692,
+      "itl_ms_p50": 6.325302005279809,
+      "output_tok_per_s": 1131.6975331744468,
+      "requests": 32,
+      "target_prompt_tokens": 256,
+      "concurrency": 16,
+      "wall_s": 0.7150155199924484,
+      "cpu_stream": null,
+      "poller": null
+    },
+    {
+      "ttft_ms_p50": 56.536176009103656,
+      "ttft_ms_p99": 56.536176009103656,
+      "ttft_ms_mean": 56.388693512417376,
+      "itl_ms_p50": 3.9487539906986058,
+      "output_tok_per_s": 178.8761269314307,
+      "requests": 2,
+      "target_prompt_tokens": 1024,
+      "concurrency": 1,
+      "wall_s": 0.3579881170007866,
+      "cpu_stream": null,
+      "poller": null
+    },
+    {
+      "ttft_ms_p50": 252.4003279977478,
+      "ttft_ms_p99": 362.58288999670185,
+      "ttft_ms_mean": 259.42841609503375,
+      "itl_ms_p50": 6.249383004615083,
+      "output_tok_per_s": 917.3027809176695,
+      "requests": 32,
+      "target_prompt_tokens": 1024,
+      "concurrency": 16,
+      "wall_s": 1.1172420219809283,
+      "cpu_stream": null,
+      "poller": null
+    },
+    {
+      "ttft_ms_p50": 106.86993997660466,
+      "ttft_ms_p99": 106.86993997660466,
+      "ttft_ms_mean": 106.60245148756076,
+      "itl_ms_p50": 4.001606983365491,
+      "output_tok_per_s": 141.09270364088042,
+      "requests": 2,
+      "target_prompt_tokens": 4096,
+      "concurrency": 1,
+      "wall_s": 0.45371142399380915,
+      "cpu_stream": null,
+      "poller": null
+    },
+    {
+      "ttft_ms_p50": 718.1412810168695,
+      "ttft_ms_p99": 1216.8273860006593,
+      "ttft_ms_mean": 701.7238103744603,
+      "itl_ms_p50": 7.9201540211215615,
+      "output_tok_per_s": 345.88566113206366,
+      "requests": 32,
+      "target_prompt_tokens": 4096,
+      "concurrency": 16,
+      "wall_s": 2.9611562749778386,
+      "cpu_stream": null,
+      "poller": null
+    }
+  ],
+  "workers": [
+    {
+      "hybrid_layers": 40,
+      "kv_cache": {
+        "num_gpu_blocks": 96,
+        "block_size": 2096,
+        "max_tokens": 201216
+      },
+      "cuda_memory": {
+        "allocated_gib": 26.00627374649048,
+        "reserved_gib": 26.626953125,
+        "free_gib": 3.55242919921875,
+        "total_gib": 31.35833740234375
+      }
+    }
+  ]
+}

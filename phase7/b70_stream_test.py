@@ -153,7 +153,7 @@ def test_flag_and_threshold() -> None:
     # Above the analytic crossover (~311), where streaming's flat cost beats
     # dispatch's per-token cost with margin for routing that touches fewer
     # experts than the model assumes.
-    check("default is above the crossover", default >= 311, str(default))
+    check("default is above the analytic crossover", default >= 311, str(default))
     os.environ["SHOOTING_BRAKE_B70_STREAM_T"] = "77"
     check("threshold overridable", re_mod.b70_stream_threshold() == 77)
     os.environ.pop("SHOOTING_BRAKE_B70_STREAM_T", None)
@@ -201,27 +201,33 @@ def test_slot_ids_are_not_global_ids() -> None:
               "slots happen to be resident ids; the gate cannot detect misuse")
 
 
-
-
 def test_crossover_model_is_consistent() -> None:
-    """The documented threshold must sit where the cost curves actually cross.
+    """The default threshold must sit at the measured tie point.
 
-    Dispatch is per-token (measured 26.9 us/token/layer via
-    prefill_chunk_bench.py); streaming is flat per layer (0.41 GiB over the
-    5090's Gen5 x16). If either constant is ever re-measured, this catches a
-    default that no longer matches the arithmetic it claims to come from.
+    The analytic model (dispatch 26.9 us/token/layer against a flat 0.41 GiB
+    transfer) puts the crossover near 311 tokens. Measurement
+    (benchmarks/stream_matrix.py) puts it just under 1024: the model assumes
+    every route reaches a distinct expert so the whole bank always moves,
+    and at moderate M the touched set is smaller than that.
+
+    The default follows the measurement, and this gate keeps the two from
+    drifting apart silently -- if either constant is re-measured, the
+    documented reasoning has to be revisited with it.
     """
     print("\ncost model")
     from shooting_brake_vllm import routed_experts as re_mod
 
     us_per_token_layer = 26.9
     stream_ms = 0.41 * 1024 / 50.0          # GiB -> MiB / (GB/s) => ms
-    crossover = stream_ms * 1000 / us_per_token_layer
-    check("analytic crossover near 311", 250 < crossover < 400,
-          f"{crossover:.0f}")
-    check("default threshold >= crossover",
-          re_mod.b70_stream_threshold() >= crossover,
-          f"{re_mod.b70_stream_threshold()} vs {crossover:.0f}")
+    analytic = stream_ms * 1000 / us_per_token_layer
+    check("analytic crossover near 311", 250 < analytic < 400, f"{analytic:.0f}")
+    # Measured: 0.45x at M=256 (dispatch clearly better), 1.05x at M=1024.
+    check("default is the measured tie point",
+          re_mod.b70_stream_threshold() == 1024,
+          str(re_mod.b70_stream_threshold()))
+    check("default is above the analytic crossover",
+          re_mod.b70_stream_threshold() >= analytic,
+          f"{re_mod.b70_stream_threshold()} vs {analytic:.0f}")
 
 
 def main() -> int:

@@ -49,24 +49,34 @@ def b70_prefill_stream_enabled() -> bool:
 
 #: Token count at or above which B70 routes stream instead of dispatching.
 #:
-#: Distinct from the CPU tier's threshold because the two tiers have
-#: different dispatch costs against the same transfer cost. Measured on the
-#: qualified model (phase7/prefill_chunk_bench.py for the dispatch side,
-#: two chunk sizes agreeing at ~26.9 us/token/layer; the transfer side is
-#: 0.41 GiB per layer over the 5090's direct Gen5 x16 link):
+#: This counts tokens in the *forward pass*, not tokens per request, and the
+#: distinction is the main empirical finding. Sixteen concurrent 256-token
+#: prompts batch into one 4096-token forward and stream profitably, while a
+#: single 256-token prompt does not -- the same per-request length lands on
+#: opposite sides of the crossover depending on load. ``x.shape[0]`` is
+#: already the batched count, so the threshold reads the right quantity.
 #:
-#:       M      dispatch     streamed
-#:       1        0.03 ms      0.26 ms
-#:      80        2.15 ms      7.72 ms
-#:     311        8.37 ms      8.38 ms   <- crossover
-#:    2048       55.09 ms      8.38 ms
+#: Measured, benchmarks/stream_matrix.py, TTFT p50, dispatch / stream:
 #:
-#: Dispatch scales with tokens; streaming is flat once most of the bank has
-#: been touched. Default sits above the analytic crossover, not on it: the
-#: model assumes every route reaches a distinct expert, and the penalty for
-#: streaming too early (moving 0.41 GiB for a handful of routes) is far
-#: worse than for streaming too late.
-DEFAULT_B70_STREAM_THRESHOLD = 512
+#:      len  conc      dispatch      stream    ratio
+#:      256     1       145.2 ms    319.1 ms    0.45x   dispatch
+#:     1024     1       387.1 ms    369.1 ms    1.05x   tie
+#:      256    16      1163.7 ms   1015.5 ms    1.15x   stream
+#:     1024    16      3645.9 ms   1907.1 ms    1.91x   stream
+#:     4096     1      1423.9 ms    706.5 ms    2.02x   stream
+#:     4096    16     13127.4 ms   5497.5 ms    2.39x   stream
+#:
+#: The crossover sits just under 1024 tokens per forward, above the ~311 the
+#: cost model predicted from 26.9 us/token/layer against a flat 0.41 GiB
+#: transfer. The model overestimated streaming because it assumed every
+#: route reaches a distinct expert, so the full bank always moves; at
+#: moderate M the touched set is smaller and dispatch stays competitive
+#: longer.
+#:
+#: Default is the measured tie point rather than the analytic crossover.
+#: Below it streaming loses badly (0.45x at M=256) while above it the curve
+#: is shallow, so the asymmetry favours streaming late.
+DEFAULT_B70_STREAM_THRESHOLD = 1024
 
 
 def b70_stream_threshold() -> int:

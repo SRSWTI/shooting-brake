@@ -649,6 +649,86 @@ Consequences, recorded plainly:
   knapsack (`experiments--/misc/lucebox`, `moe_hybrid_placement.cpp`), which
   ranks marginal experts by count/bytes across layers under one byte budget.
 
+## B70 prefill streaming, and the bug it uncovered (2026-08-08)
+
+`SHOOTING_BRAKE_B70_PREFILL_STREAM=1`. Above a threshold, prefill computes
+B70-owned routes on the 5090 from streamed weights instead of dispatching
+tokens to the B70. Off by default; decode is never on this path.
+
+### The crossover is in tokens per forward, not tokens per request
+
+This is the finding that changes how the knob is set. Measured TTFT p50
+(`benchmarks/stream_matrix.py`, `subset:16:8`):
+
+| prompt len | conc | all-CUDA | dispatch | stream | ratio | winner |
+|---|---|---|---|---|---|---|
+| 256 | 1 | 54.9 | 145.2 | 319.1 | 0.45x | dispatch |
+| 1024 | 1 | 56.5 | 387.1 | 369.1 | 1.05x | tie |
+| 256 | 16 | 153.0 | 1163.7 | 1015.5 | 1.15x | stream |
+| 1024 | 16 | 252.4 | 3645.9 | 1907.1 | 1.91x | stream |
+| 4096 | 1 | 106.9 | 1423.9 | 706.5 | **2.02x** | stream |
+| 4096 | 16 | 718.1 | 13127.4 | 5497.5 | **2.39x** | stream |
+
+Sixteen concurrent 256-token prompts batch into one 4096-token forward and
+stream profitably; one 256-token prompt does not. Identical per-request
+length, opposite sides of the crossover, decided by load. The threshold
+therefore has to read batched tokens — `x.shape[0]` already does.
+
+Default is **1024**, the measured tie point, not the 311 the cost model
+predicted. The model assumed every route reaches a distinct expert so the
+full 0.41 GiB bank always moves; at moderate M the touched set is smaller
+and dispatch stays competitive longer. Below the tie point streaming loses
+badly (0.45x at M=256) while above it the curve is shallow, so the asymmetry
+argues for streaming late.
+
+Decode is unaffected, as designed: ITL p50 at concurrency 1 is 5.30/5.35/5.34
+ms dispatched against 5.47/5.38/5.36 streamed across the three lengths.
+
+Streaming does not reach all-CUDA — 5497 ms against 718 ms at the largest
+cell. It moves the hybrid from 18.3x behind to 7.7x behind on TTFT.
+
+### The gate/up swap
+
+Streaming initially measured **-0.4923 nats/token** on
+`phase7/prefill_probe.py` — the pre-Phase-6 regression floor, the signature
+of dropping every offloaded route.
+
+The cause predates the feature. The DRAM arena split the fused `w13` as
+`[gate, up]`, but under FlashInfer NVFP4 backends it is `[up, gate]`:
+`prepare_nvfp4_moe_layer_for_fi_or_cutlass` calls `reorder_w1w3_to_w3w1`
+(`flashinfer_fp4_moe.py:336`) because those kernels want `[w3, w1]`, and this
+deployment resolves to `FLASHINFER_CUTLASS`. `VLLM_CUTLASS` shares the code
+path and is excluded from the reorder, so backend identity decides it.
+
+Reading the halves the wrong way computes `silu(x @ up) * (x @ gate)` — a
+different function, no error, plausible output.
+
+`SHOOTING_BRAKE_CPU_VERIFY` could not catch it: it split its own reference
+with the same hardcoded `[:inter]`, comparing a wrongly-loaded arena against
+a wrongly-split reference, and passed at `rel=5.65e-07`. It now splits by the
+same backend rule the load uses.
+
+| | before | after |
+|---|---|---|
+| `phase6` (dispatch, unaffected) | -0.0069 | -0.0387 |
+| `allout` (cold tier) | -0.0476 | **-0.0296** |
+| `phase6-stream` | **-0.4923** | **-0.0248** |
+
+**The cold tier has carried this since it shipped.** It stayed invisible
+because CPU-owned experts take 3.7% of routes, so the damage sat inside
+run-to-run variation; the recorded "all-out verified working" result was
+measured through it. Streaming put the same arena on 94.7% of routes, where
+it was impossible to miss. The feature did not introduce the bug — it made an
+existing one loud enough to find, which is the argument for routing a new
+consumer through old shared machinery rather than around it.
+
+A second bug was caught the same way: `b70_ids` are compact provider slots
+while the arena is keyed by global expert id, and both are small non-negative
+ints of the same shape. Passing one for the other raised nothing until the
+engine died on "expert (layer=16, expert=2) is not resident".
+`phase7/b70_stream_test.py::test_slot_ids_are_not_global_ids` keeps the two
+spaces from being unified again.
+
 ## Next concrete deliverables
 
 Work proceeds in the Phase 0–10 order from [`../plan.md`](../plan.md). Phases 0

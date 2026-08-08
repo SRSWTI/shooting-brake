@@ -16,6 +16,7 @@ except ImportError:
     def eager_break_during_capture(fn):  # type: ignore[misc]
         return fn
 
+from . import route_stats
 from .config import require_qualified_config
 from .partition import (
     RoutePartition,
@@ -245,6 +246,11 @@ class HybridRoutedExperts(RoutedExperts):
             if self._b70_stats and self._b70_graph_mode
             else None
         )
+        # Per-(layer, expert) frequency histogram, opt-in via
+        # SHOOTING_BRAKE_ROUTE_STATS=1. Bound on the first forward (the
+        # device is known there); None means the flag is off and the hot
+        # path pays one attribute check.
+        self._route_histogram: Any = None
         if self._b70_graph_mode:
             # CUDA-side slot map (for graph-compatible gather).
             self._b70_slot_map_cuda = torch.tensor(
@@ -825,6 +831,12 @@ class HybridRoutedExperts(RoutedExperts):
             self._register_b70_poller(self.layer_index)
         if self._cpu_active:
             self._register_cpu_poller(self.layer_index)
+        if route_stats.enabled():
+            from .config import QUALIFIED_EXPERTS, QUALIFIED_LAYERS
+
+            self._route_histogram = route_stats.get_counter(
+                QUALIFIED_LAYERS, QUALIFIED_EXPERTS, topk_ids.device,
+            )
         self._first_forward_done = True
 
     def forward_modular(
@@ -859,6 +871,18 @@ class HybridRoutedExperts(RoutedExperts):
                     f"Shooting Brake Tier 3: {errors} B70 dispatch(es) "
                     "failed; routed-expert output is not trustworthy"
                 )
+
+        # Route histogram (SHOOTING_BRAKE_ROUTE_STATS=1), distinct from
+        # _route_counter, which is the 3-element B70/CPU share counter that
+        # telemetry reads. This sits above the all-CUDA passthrough
+        # deliberately: routing is decided by the router before any dispatch,
+        # so it does not depend on placement, and calibrating in all-CUDA
+        # mode is both faster and free of B70 round trips. The ids here are
+        # global -- the CUDA remap below rewrites them into compacted local
+        # indices, which would make the table describe the placement instead
+        # of the model.
+        if self._route_histogram is not None:
+            self._route_histogram.observe(self.layer_index, topk_ids)
 
         # A layer with nothing offloaded has no remote work to do at any
         # batch size.

@@ -144,6 +144,22 @@ def collect_worker_stats(worker: Any) -> dict[str, Any]:
         if _streamer_singleton is not None:
             stats["cpu_stream"] = dict(_streamer_singleton.stats)
 
+    # --- route histogram --------------------------------------------------
+    # Present only under SHOOTING_BRAKE_ROUTE_STATS=1. The full table goes
+    # to CSV via dump_route_histogram; this block is the liveness check --
+    # it confirms counting is happening without shipping 40x256 ints
+    # through every stats call.
+    from . import route_stats
+
+    hist = route_stats.peek()
+    if hist is not None:
+        counts, tokens = hist.to_cpu()
+        stats["route_histogram"] = {
+            "layers_observed": int((tokens > 0).sum()),
+            "tokens_per_layer_max": int(tokens.max()),
+            "total_routes": int(counts.sum()),
+        }
+
     # --- capacity -------------------------------------------------------
     # KV cache size is the metric that matters: it is what the freed
     # expert VRAM buys, and it caps how many requests can be in flight.
@@ -173,6 +189,29 @@ def reset_worker_stats(worker: Any) -> None:
         counter = getattr(layer, "_route_counter", None)
         if counter is not None:
             counter.zero_()
+    from . import route_stats
+
+    hist = route_stats.peek()
+    if hist is not None:
+        hist.counts.zero_()
+        hist.tokens.zero_()
 
 
-__all__ = ["collect_worker_stats", "reset_worker_stats"]
+def dump_route_histogram(worker: Any) -> str | None:
+    """Write the route histogram CSV from inside the worker.
+
+    Invoked through ``collective_rpc`` at the end of a calibration run. The
+    counter lives in the worker process, so the driver cannot reach it any
+    other way; the return value is the path, for the driver to report.
+    """
+    from . import route_stats
+
+    out = route_stats.dump()
+    return str(out) if out is not None else None
+
+
+__all__ = [
+    "collect_worker_stats",
+    "dump_route_histogram",
+    "reset_worker_stats",
+]

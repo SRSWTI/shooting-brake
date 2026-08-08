@@ -358,21 +358,45 @@ async def run_context_sweep(
 
 
 async def run_capacity_frontier(
-    engine: Any, lengths: list[int], decode_tokens: int
+    engine: Any, lengths: list[int], decode_tokens: int,
+    kv_tokens: int | None = None,
 ) -> list[dict[str, Any]]:
-    """How many concurrent long-context requests the engine serves.
+    """Throughput and latency across the prompt-length x concurrency grid.
 
-    At each prompt length, issue requests in waves of growing size and
-    record the largest wave that completes without preemption or KV
-    rejection. The hybrid's KV capacity is 4.2x the baseline, so this
-    gap is the direct, structural payoff of moving experts to the B70.
+    Every (length, wave) point is recorded, not just the largest wave that
+    completed. The intermediate points are the grid the offload tradeoff
+    actually lives on -- concurrency at one prompt length and prompt length at
+    concurrency one each show a slice, and the interesting behaviour is where
+    they cross.
+
+    ``max_completed_wave`` reads as completion, not as fit: vLLM preempts
+    rather than rejecting, so a wave whose KV footprint exceeds capacity still
+    finishes and still reports a wave number. Throughput and ITL are where
+    exhaustion actually shows up.
+
+    Waves are capped by measured KV capacity when it is known. Past that
+    ceiling every request is preempted, so the point measures the scheduler
+    rather than the placement -- and it is ruinously expensive to collect,
+    because each wave re-prefills every prompt. At 32k context the full wave
+    list is 6.8M prompt tokens per length, which at the hybrid's measured
+    prefill rate is most of an hour for a result that says nothing.
     """
     waves = [1, 4, 8, 12, 16, 24, 32, 48, 64]
     rows = []
     for length in lengths:
         prompt = _context_prompt(length)
-        last_ok: dict[str, Any] | None = None
-        for n in waves:
+        # One wave past the ceiling is kept deliberately: the first point that
+        # does not fit is the one that shows what exhaustion costs.
+        if kv_tokens:
+            fits = max(1, kv_tokens // max(length + decode_tokens, 1))
+            usable = [n for n in waves if n <= fits]
+            beyond = [n for n in waves if n > fits][:1]
+            wave_list = usable + beyond
+        else:
+            wave_list = waves
+        points: list[dict[str, Any]] = []
+        max_ok = 0
+        for n in wave_list:
             prompts = [prompt] * n
             try:
                 timings, wall = await stream_many(
@@ -383,21 +407,21 @@ async def run_capacity_frontier(
             if any(t.output_tokens == 0 for t in timings):
                 break
             total_out = sum(t.output_tokens for t in timings)
-            last_ok = {
-                "target_prompt_tokens": length,
+            itls = [v for t in timings for v in t.itls_s]
+            max_ok = n
+            points.append({
                 "concurrent_requests": n,
+                "actual_prompt_tokens": timings[0].prompt_tokens,
                 "total_output_tokens": total_out,
                 "output_tok_per_s": total_out / wall,
-                "itl_p50_ms": _pct(
-                    [v for t in timings for v in t.itls_s], 0.50
-                ) * 1e3,
-                "itl_p99_ms": _pct(
-                    [v for t in timings for v in t.itls_s], 0.99
-                ) * 1e3,
-            }
-        rows.append(last_ok or {
+                "ttft_p50_ms": _pct([t.ttft_s for t in timings], 0.50) * 1e3,
+                "itl_p50_ms": _pct(itls, 0.50) * 1e3,
+                "itl_p99_ms": _pct(itls, 0.99) * 1e3,
+            })
+        rows.append({
             "target_prompt_tokens": length,
-            "concurrent_requests": 0,
+            "max_completed_wave": max_ok,
+            "points": points,
         })
     return rows
 
@@ -435,18 +459,39 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "max_model_len": args.max_model_len,
         }
         result["correctness"] = await run_correctness(engine)
+
+        # Poller counters accumulate across every phase, so a single figure
+        # at the end averages decode dispatches together with prefill ones
+        # that touch far more experts -- which makes the kernel-vs-overhead
+        # split unreadable for the case that matters. Snapshot around the
+        # single-stream phase to get decode alone.
+        await reset_stats(engine)
         result["single_stream"] = await run_single_stream(
             engine, args.trials, args.decode_tokens
         )
+        result["workers_decode_only"] = await worker_stats(engine)
+        # Prefill is measured before the batched phase, not after. TTFT is
+        # sensitive to KV-cache occupancy, so running it downstream of a
+        # concurrency sweep made the figure depend on how wide that sweep
+        # went: all-CUDA prefill read 22282 tok/s after a conc<=8 phase and
+        # 6083 after conc<=64, on a code path neither run touched. Ordering
+        # it here keeps prefill comparable across runs.
+        result["prefill"] = await run_prefill(engine, args.trials)
         result["batched"] = await run_batched(
             engine, args.concurrency, args.batch_tokens
         )
-        result["prefill"] = await run_prefill(engine, args.trials)
         result["context_sweep"] = await run_context_sweep(
             engine, args.context_lengths, args.decode_tokens
         )
+        # Read KV capacity before the frontier so it can skip waves that
+        # cannot fit. Each wave re-prefills every prompt, so an uncapped list
+        # at long context costs hours to measure preemption.
+        kv_tokens = None
+        for w in (result.get("workers_decode_only") or []):
+            kv_tokens = (w.get("kv_cache") or {}).get("max_tokens") or kv_tokens
         result["capacity_frontier"] = await run_capacity_frontier(
-            engine, args.context_lengths, args.decode_tokens
+            engine, args.context_lengths, args.decode_tokens,
+            kv_tokens=kv_tokens,
         )
         result["workers"] = await worker_stats(engine)
         return result

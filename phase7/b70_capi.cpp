@@ -83,6 +83,9 @@ class B70Poller {
   uint64_t dispatch_count() const { return dispatches_.load(); }
   uint64_t error_count() const { return errors_.load(); }
   uint64_t service_ns() const { return service_ns_.load(); }
+  // Nonzero only under SHOOTING_BRAKE_B70_PROFILE=1; the provider does not
+  // timestamp commands otherwise.
+  uint64_t kernel_ns() const { return kernel_ns_.load(); }
 
  private:
   void loop() {
@@ -111,11 +114,11 @@ class B70Poller {
 
         const auto t0 = std::chrono::steady_clock::now();
         ++sequence;
+        shooting_brake::phase1::DispatchResult result;
         ProviderStatus status = provider_->issue(
             generation_, sequence, entry.layer, entry.hidden, entry.ids,
             entry.weights, M);
         if (status == ProviderStatus::ok) {
-          shooting_brake::phase1::DispatchResult result;
           status = provider_->take(generation_, sequence, entry.output,
                                    static_cast<size_t>(M) * kHidden, &result);
         }
@@ -125,6 +128,18 @@ class B70Poller {
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - t0)
                 .count()));
+
+        // The provider only fills kernel_us on a profiled queue; it is 0
+        // otherwise. Accumulating it here is what makes the round trip
+        // self-describing: service_ns is the whole dispatch, so
+        // service_ns - kernel_ns is submission and synchronisation
+        // overhead, which is the part engineering can remove. Guessing that
+        // split from the outside is how you end up optimising the wrong
+        // half.
+        if (result.kernel_us > 0.0) {
+          kernel_ns_.fetch_add(
+              static_cast<uint64_t>(result.kernel_us * 1000.0));
+        }
 
         // Always release the waiter, even on failure: the CUDA side is
         // parked in cuStreamWaitValue32, which has no timeout.
@@ -148,6 +163,7 @@ class B70Poller {
   std::atomic<uint64_t> dispatches_{0};
   std::atomic<uint64_t> errors_{0};
   std::atomic<uint64_t> service_ns_{0};
+  std::atomic<uint64_t> kernel_ns_{0};
   std::thread thread_;
 
 };
@@ -271,6 +287,11 @@ uint64_t sb_b70_poll_error_count(sb_b70_poller_t* poller) {
 uint64_t sb_b70_poll_service_ns(sb_b70_poller_t* poller) {
   if (!poller) return 0;
   return reinterpret_cast<B70Poller*>(poller)->service_ns();
+}
+
+uint64_t sb_b70_poll_kernel_ns(sb_b70_poller_t* poller) {
+  if (!poller) return 0;
+  return reinterpret_cast<B70Poller*>(poller)->kernel_ns();
 }
 
 void sb_b70_poll_destroy(sb_b70_poller_t* poller) {

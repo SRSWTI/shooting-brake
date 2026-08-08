@@ -394,7 +394,7 @@ The active architecture does not:
 - let the B70 recompute router/top-k or shared-expert work;
 - move attention, KV/GDN state, residuals, LM head, or sampling to the B70;
 - transfer or quantize expert weights during decode;
-- use CPU matrix compute in the normal path;
+- use CPU matrix compute in the normal path, except under the explicit opt-in described below;
 - silently enter a generic kernel for an unsupported model or shape;
 - assume every new upstream vLLM model is B70-compatible;
 - treat MXFP4, other W4 formats, and Colibri GS64 as interchangeable;
@@ -404,3 +404,30 @@ The active architecture does not:
 ## One-line definition
 
 > Shooting Brake keeps upstream vLLM scheduling and sequential model state on one RTX 5090 and uses one isolated B70 provider for qualified resident routed experts, joined through a versioned pinned-memory weighted-partial contract with no normal-path CPU matrix compute.
+
+### Amendment: all-out mode is a declared exception (2026-08-07)
+
+A third residency tier exists below CUDA and B70: rarely-routed experts held in
+host DRAM and computed on CPU cores. It does perform CPU matrix compute, and it
+is therefore an **exception to the invariant above, not a reinterpretation of
+it.**
+
+The exception is bounded so the original intent survives. That intent was never
+"CPU arithmetic is forbidden" — it was "inference must never quietly fall back
+to a tier an order of magnitude slower." So:
+
+- it requires `SHOOTING_BRAKE_ALL_OUT=1` **and** an `allout:` placement; either
+  alone is rejected, never silently downgraded;
+- no default, `subset:`, or `split:` placement can reach it;
+- which experts land there is fixed by the placement manifest, so the tier is
+  entered by declaration, never by pressure or fallback;
+- it logs a warning naming its cost once per process that enables it.
+
+It exists because capacity is freed by evicting experts from the 5090, and once
+the B70 is full there is nowhere else for the overflow to go. For a 122B-class
+model the routed-expert bank is 60.8 GiB against 32 GB of B70. Without this
+tier such a model does not load at all; with it, it loads and runs slowly in a
+measured, placement-controlled way.
+
+On models whose bank fits the B70 the tier is redundant and measurably harmful
+— see [`progress.md`](progress.md) — which is exactly why it is off by default.

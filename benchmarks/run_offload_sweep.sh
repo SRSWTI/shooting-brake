@@ -68,6 +68,12 @@ CONTEXT_LENGTHS="${CONTEXT_LENGTHS:-2048}"
 # so 8192 is a fast default; raise to 32768/131072 to also see the KV
 # capacity difference at long context (slower cells).
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+# Admission width. Must be at least the largest concurrency being swept, or
+# the extra requests queue instead of running and the cell measures nothing
+# new. All-CUDA additionally caps out near 83: GDN allocates one Mamba cache
+# block per decode sequence, and the baseline has the least VRAM spare for
+# them, so keeping this under that ceiling keeps every config comparable.
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
 # Seconds to idle the GPU between runs, so the card is not pinned at the
 # power cap for the whole sweep. Pair with gpu_power.sh cap <watts>.
 REST_BETWEEN="${REST_BETWEEN:-15}"
@@ -89,6 +95,7 @@ run_one () {
     --trials "$TRIALS" \
     --decode-tokens "$DECODE_TOKENS" \
     --batch-tokens 128 \
+    --max-num-seqs "$MAX_NUM_SEQS" \
     --concurrency $CONCURRENCY \
     --context-lengths $CONTEXT_LENGTHS
   # Let the card cool before the next process grabs the GPU.

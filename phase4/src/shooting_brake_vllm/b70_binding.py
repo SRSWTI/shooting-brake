@@ -98,6 +98,7 @@ class B70ProviderClient:
             "sb_b70_poll_dispatch_count",
             "sb_b70_poll_error_count",
             "sb_b70_poll_service_ns",
+            "sb_b70_poll_kernel_ns",
         ):
             fn = getattr(lib, counter)
             fn.restype = ctypes.c_uint64

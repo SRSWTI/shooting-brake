@@ -63,7 +63,7 @@ The following are forbidden:
 - renormalizing surviving routes;
 - accepting stale placement, weight, provider, sequence, or buffer generations;
 - silently changing activation, weight, scale, accumulation, or output precision; and
-- normal-path CPU matrix compute.
+- normal-path CPU matrix compute, except under the declared `SHOOTING_BRAKE_ALL_OUT=1` opt-in (see [`architecture.md`](architecture.md)).
 
 ## B70 transaction result
 
@@ -204,4 +204,4 @@ No document currently records the upstream-vLLM plus B70 production path as havi
 
 ## End-to-end acceptance
 
-The hybrid path is correctness-eligible only when all selected routes are accounted for exactly once; both artifacts trace to one higher-precision source; batched B70 partials pass their oracle; the CUDA join occurs before final TP/EP reduction; stale and ambiguous work cannot enter a request; exact failure recovery or explicit failure is demonstrated; no normal-path CPU matrix work occurs; and teacher-forced, recurrent/KV, logit, and generated-token behavior pass their declared gates.
+The hybrid path is correctness-eligible only when all selected routes are accounted for exactly once; both artifacts trace to one higher-precision source; batched B70 partials pass their oracle; the CUDA join occurs before final TP/EP reduction; stale and ambiguous work cannot enter a request; exact failure recovery or explicit failure is demonstrated; no normal-path CPU matrix work occurs outside the declared all-out opt-in; and teacher-forced, recurrent/KV, logit, and generated-token behavior pass their declared gates.

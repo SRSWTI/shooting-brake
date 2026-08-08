@@ -149,6 +149,24 @@ class B70Poller:
             return 0.0
         return int(self._lib.sb_b70_poll_service_ns(self._handle)) / n / 1000.0
 
+    @property
+    def kernel_mean_us(self) -> float:
+        """Mean on-device kernel time per dispatch.
+
+        Zero unless ``SHOOTING_BRAKE_B70_PROFILE=1``; the provider only
+        timestamps commands on a profiled queue.
+
+        Read against :attr:`service_mean_us` this splits the round trip into
+        the part set by B70 VRAM bandwidth, which is physics, and the
+        submission plus synchronisation remainder, which is not. Profiling
+        adds two marker submissions per dispatch, so take the service figure
+        from a separate unprofiled run.
+        """
+        n = self.dispatch_count
+        if n == 0:
+            return 0.0
+        return int(self._lib.sb_b70_poll_kernel_ns(self._handle)) / n / 1000.0
+
     def __del__(self) -> None:
         try:
             if self._handle:

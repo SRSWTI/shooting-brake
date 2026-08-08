@@ -295,4 +295,4 @@ The fabric is eligible only after:
 4. the completed Phase-3 provider gate remains reproducible for the weighted sum of exactly its B70-owned routes across `M=1..128`, all-remote and mixed ownership, compact remapping, duplicates, non-sorted and boundary IDs, and near-zero weights;
 5. the completed Phase-3 ring cases continue to preserve zero-remote no-publication, local-route invariance, exact status/identity/allocation accounting, and explicit split/fused failure publication;
 6. the CUDA+B70 partial joins before final TP/EP reduction and matches the all-CUDA layer oracle within the declared artifact/precision tolerance; and
-7. every failure produces exact route recovery or explicit request failure, with no normal-path CPU matrix work.
+7. every failure produces exact route recovery or explicit request failure, with no normal-path CPU matrix work outside the declared all-out opt-in (see [`architecture.md`](architecture.md)).

@@ -143,6 +143,19 @@ uint64_t sb_b70_poll_error_count(sb_b70_poller_t* poller);
 /** Accumulated service time in nanoseconds, for exposed-wait accounting. */
 uint64_t sb_b70_poll_service_ns(sb_b70_poller_t* poller);
 
+/**
+ * Accumulated on-device kernel time in nanoseconds.
+ *
+ * Zero unless SHOOTING_BRAKE_B70_PROFILE=1, which puts the provider's queue
+ * in profiling mode. Paired with sb_b70_poll_service_ns this splits the round
+ * trip: the kernel share is bounded by B70 VRAM bandwidth and cannot be
+ * engineered away, while the remainder is submission and synchronisation
+ * overhead and can. Profiling itself adds two marker submissions per
+ * dispatch, so compare against service time from a separate unprofiled run
+ * rather than within the same one.
+ */
+uint64_t sb_b70_poll_kernel_ns(sb_b70_poller_t* poller);
+
 /** Stop if running, then release the handle. */
 void sb_b70_poll_destroy(sb_b70_poller_t* poller);
 

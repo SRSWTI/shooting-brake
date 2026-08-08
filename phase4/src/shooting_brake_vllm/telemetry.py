@@ -90,10 +90,15 @@ def collect_worker_stats(worker: Any) -> dict[str, Any]:
         None,
     )
     if poller is not None:
+        # kernel_mean_us is 0 unless SHOOTING_BRAKE_B70_PROFILE=1. When set,
+        # service - kernel is the submission and synchronisation overhead:
+        # the removable half of the round trip, as opposed to the kernel's
+        # own B70 VRAM-bandwidth floor.
         stats["poller"] = {
             "dispatches": poller.dispatch_count,
             "errors": poller.error_count,
             "service_mean_us": poller.service_mean_us,
+            "kernel_mean_us": poller.kernel_mean_us,
         }
 
     cpu_poller = next(
@@ -127,6 +132,17 @@ def collect_worker_stats(worker: Any) -> dict[str, Any]:
                 # which is a wrong answer rather than a slow one.
                 "skipped_routes": host.skipped_routes,
             }
+
+        # Prefill weight streaming is otherwise invisible: it bypasses the
+        # poller entirely, so cpu_poller counts only the decode dispatches.
+        # Without this, a run that streamed gigabytes to the 5090 looks
+        # identical to one that streamed nothing.
+        try:
+            from .cpu_stream import _streamer_singleton
+        except ImportError:
+            _streamer_singleton = None
+        if _streamer_singleton is not None:
+            stats["cpu_stream"] = dict(_streamer_singleton.stats)
 
     # --- capacity -------------------------------------------------------
     # KV cache size is the metric that matters: it is what the freed

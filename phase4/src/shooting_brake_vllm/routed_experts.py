@@ -1413,10 +1413,21 @@ class HybridRoutedExperts(RoutedExperts):
 
         Both sides are implemented so the crossover can be measured rather
         than assumed — see phase7/stream_crossover_bench.py.
+
+        Streaming is skipped outright while a CUDA graph is being captured.
+        Choosing which experts to move is data-dependent, so the streamer
+        syncs to the host to read the expert list, and a host sync during
+        capture invalidates the whole graph. vLLM captures at token counts
+        driven by ``max_num_batched_tokens``, not just ``max_num_seqs``, so
+        a batch large enough to reach this path does get captured on real
+        configurations -- it aborted engine startup at max_num_seqs=80. The
+        flag-driven path below is pure stream operations and captures
+        cleanly, which is exactly why decode uses it.
         """
         from .cpu_stream import get_streamer, stream_threshold
 
-        if x.shape[0] >= stream_threshold():
+        capturing = torch.cuda.is_current_stream_capturing()
+        if x.shape[0] >= stream_threshold() and not capturing:
             streamer = get_streamer(
                 self._cpu_host, self.hidden_size, self._cpu_intermediate,
             )

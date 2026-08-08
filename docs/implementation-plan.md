@@ -19,7 +19,7 @@ upstream vLLM 0.26+ on one RTX 5090
     -> asynchronous CUDA copy and addition
 ```
 
-The CPU performs orchestration and exact emergency recovery only. Normal-path CPU matrix compute is prohibited.
+The CPU performs orchestration and exact emergency recovery only. Normal-path CPU matrix compute is prohibited, with one declared exception: the opt-in host-DRAM cold expert tier ("all-out mode"), gated behind `SHOOTING_BRAKE_ALL_OUT=1` plus an `allout:` placement and unreachable from any default placement. See the amendment in [`architecture.md`](architecture.md).
 
 ## Execution rules
 
@@ -31,7 +31,7 @@ The CPU performs orchestration and exact emergency recovery only. Normal-path CP
 6. vLLM remains the canonical router/top-k authority. The B70 consumes selected IDs and weights and never recomputes routing.
 7. Every selected route contributes exactly once, is recovered exactly, or causes explicit failure.
 8. The B70 returns one routing-weighted compact `[M_remote, hidden]` wire partial; the CUDA owner scatters it into the full `[M, hidden]` batch and joins it before final tensor/expert-parallel reduction.
-9. CPU matrix compute is allowed only for exact emergency recovery, never as an ordinary performance tier.
+9. CPU matrix compute is allowed for exact emergency recovery, and — only under the explicit `SHOOTING_BRAKE_ALL_OUT=1` opt-in with an `allout:` placement — as a declared cold residency tier for banks that exceed combined 5090+B70 VRAM. It is never an implicit fallback and never reachable by default.
 10. Unsupported protocol versions, shapes, layouts, quantization, top-k, models, provider generations, placement generations, or weight generations fail explicitly.
 11. Correctness and performance evidence remain separate. First invocation and warmed steady state, eager and graph mode, prefill and decode, and batch-one and continuous batching must not be conflated.
 12. Kernel or transport microbenchmarks do not establish end-to-end benefit.

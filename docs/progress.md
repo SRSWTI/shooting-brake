@@ -398,16 +398,215 @@ Batched throughput degrades with concurrency (70% of baseline at 4, 44% at 16), 
 a single physical B70 with one SYCL queue serializes every layer's dispatch while the
 5090 scales. Single-stream decode and prefill are the regimes where the hybrid holds up.
 
+## Phase 11 — host-DRAM cold expert tier ("all-out mode")
+
+A third residency tier below CUDA (hot) and B70 (warm): rarely-routed experts
+live in hugepage-backed host DRAM. **Opt-in only**, via
+`SHOOTING_BRAKE_ALL_OUT=1` together with an `allout:<K>:<cuda>:<cpu>`
+placement; either alone is rejected rather than silently downgraded. Default
+behaviour is unchanged, which is what keeps the "no normal-path CPU matrix
+compute" invariant intact — see the amendment in
+[`architecture.md`](architecture.md).
+
+### Why it exists, and why it does nothing on the 35B model
+
+KV cache lives on the 5090, so capacity is freed by *evicting from the 5090* —
+not by where the evicted expert lands. The cold tier's only capacity role is
+overflow once the B70 is full. On `Qwen3.6-35B-A3B-NVFP4` the whole expert bank
+is 13.5 GiB against 32 GB of B70, so the B70 never fills and the tier is
+redundant: it moves experts from fast VRAM to slow DRAM and buys nothing.
+Measured, `allout:16:8:8` returns 869,840 KV tokens against `subset:16:8`'s
+878,224 — marginally *worse*, for a third of the throughput.
+
+It earns its place on a 122B-class model, where the bank is 60.8 GiB and
+exceeds B70 capacity by ~26 GiB.
+
+### Weights stay packed NVFP4
+
+The arena originally dequantized to bf16 at load time. That is fine at 0.75 GiB
+and fatal at scale: NVFP4 is 0.5625 B/weight against bf16's 2, so a 122B bank
+inflates 60.8 GiB → 216 GiB, and the ~21 GiB overflow becomes 74 GiB against
+55 GiB of available host DRAM. The model could not load at all.
+
+Packed, the arena reconstructs `e2m1(nibble) * e4m3(blockscale) * gscale`,
+which is exactly what vLLM's `dequantize_to_dtype` evaluates. Correctness is
+anchored on that function applied to the identical bytes rather than
+re-derived, because the reference *quantiser* in the same vLLM module folds the
+global scale in the opposite direction and matching the wrong one yields
+plausible weights instead of an error. Agreement is 1.3e-7 relative
+(`phase7/cpu_packed_test.py`). Measured on the 35B model the arena went
+0.750 → 0.211 GiB for 128 experts — exactly the 3.56× the byte widths predict.
+
+### Prefill streams weights to the 5090
+
+Weight traffic per expert is fixed while arithmetic grows with tokens routed to
+it, so CPU cores cross from bandwidth-bound to compute-bound and then collapse.
+Above `SHOOTING_BRAKE_CPU_STREAM_T` the packed bytes are DMA'd to the 5090 and
+unpacked there with vLLM's fused `_triton_dequantize_nvfp4`
+(`phase7/stream_crossover_bench.py`, 8 cold experts):
+
+| M | CPU cores | streamed | speedup |
+|---|---|---|---|
+| 1 | 621 µs | 355 µs | 1.8× |
+| 32 | 9.7 ms | 0.84 ms | 11.5× |
+| 2048 | 130.4 ms | 1.47 ms | **89×** |
+
+Streaming is flat because its cost is the fixed weight transfer. It targets the
+5090 and only the 5090: the B70's Gen3 ×4 chipset link (~3.9 GB/s) is 16× too
+narrow to stage into.
+
+Streaming is skipped while a CUDA graph is being captured. Choosing which
+experts to move is data-dependent, so the streamer syncs to the host, and a
+host sync under capture invalidates the graph — this aborted engine startup at
+`max_num_seqs=80` before the guard was added. Decode therefore keeps CPU-core
+compute, which is also why per-token weight fetch cannot be a decode strategy:
+a captured graph bakes in its copy source addresses.
+
+### Measured three-way comparison (2026-08-07)
+
+`benchmarks/results/smoke2d`. 128 decode tokens, `max_num_seqs=80`,
+`max_model_len=8192`, `trials=2`, concurrency 1/8/32/64, prompt lengths
+512/2048/4096. Every figure below names the JSON field it came from.
+
+**Decode, single stream** — `single_stream`:
+
+| | all-CUDA | `subset:16:8` | `allout:16:8:8` |
+|---|---|---|---|
+| tok/s | 244.8 | 183.5 (75%) | 124.2 (51%) |
+| ITL p50 | 3.97 ms | 5.31 ms | 7.78 ms |
+| ITL p99 | 4.59 ms | 6.08 ms | 10.21 ms |
+
+**Decode, concurrency** — `batched[].output_tok_per_s`:
+
+| conc | all-CUDA | `subset:16:8` | `allout:16:8:8` |
+|---|---|---|---|
+| 1 | 245 | 180 (74%) | 126 (52%) |
+| 8 | 1274 | 751 (59%) | 368 (29%) |
+| 32 | 1929 | 1295 (67%) | 592 (31%) |
+| 64 | 2456 | 1499 (61%) | 839 (34%) |
+
+The hybrid ratio dips at concurrency 8 and then sits in a 59–67% band with no
+clear trend; an earlier run read 66% at concurrency 64 against 61% here, so
+treat the band, not the individual points, as the result.
+
+**Decode vs prompt length** — `context_sweep[]`. The ratio is essentially flat,
+which is the useful finding: offload does not get worse with context.
+
+| prompt tok | all-CUDA | `subset:16:8` | `allout:16:8:8` |
+|---|---|---|---|
+| 363 | 256.8 tok/s | 192.3 (75%) | 121.3 (47%) |
+| 1543 | 251.3 | 201.2 (80%) | 127.1 (51%) |
+| 3123 | 276.4 | 209.0 (76%) | 129.4 (47%) |
+
+**Capacity + VRAM** — `workers[].kv_cache` / `cuda_memory`:
+
+| | all-CUDA | `subset:16:8` | `allout:16:8:8` |
+|---|---|---|---|
+| KV tokens | 201,216 | **878,224 (4.36x)** | 869,840 (4.32x) |
+| GPU blocks | 96 | 419 | 415 |
+| allocated | 26.01 GiB | 25.99 | 25.97 |
+
+**Tier telemetry, decode only** — `workers_decode_only[]`:
+
+| | `subset:16:8` | `allout:16:8:8` |
+|---|---|---|
+| B70 dispatches | 6,144 | 6,144 |
+| B70 service mean | 253.7 µs | 252.9 µs |
+| B70 errors | 0 | 0 |
+| route share B70 | 94.7% | 91.1% |
+| route share CPU | — | 3.7% |
+| CPU dispatches | — | 5,440 |
+| CPU service mean | — | 218.6 µs |
+| CPU errors | — | 0 |
+| arena | — | 0.2109 GiB / 128 experts |
+| **skipped routes** | — | **0** |
+
+`kernel_mean_us` reads 0 here because profiling is off by default; the
+141.8 µs kernel / 146.5 µs overhead split comes from a separate
+`SHOOTING_BRAKE_B70_PROFILE=1` run.
+
+**Token agreement** — `correctness[].token_ids`, against all-CUDA: hybrid 7/8,
+all-out 5/8. Exact match is the wrong bar for a different kernel and a
+different accumulation order; it is recorded as a drift signal, not a gate.
+
+### Prefill is the dominant remaining cost, and it distorts other rows
+
+`prefill` (1487-token prompt, measured before the batched phase):
+
+| | all-CUDA | `subset:16:8` | `allout:16:8:8` |
+|---|---|---|---|
+| prefill tok/s | 26,096 | 2,115 (**12.3x slower**) | 2,008 (13.0x) |
+| TTFT | 57 ms | 703 ms | 740 ms |
+
+It shows up directly in TTFT as prompts grow (`context_sweep[].ttft_ms`):
+56/61/109 ms for all-CUDA at 363/1543/3123 tokens, against 253/721/1414 ms for
+the hybrid — 13x at the longest prompt.
+
+And it dominates the capacity frontier, which issues N identical prompts
+*concurrently* so every one pays a full prefill. That phase is therefore
+prefill-bound rather than capacity-bound, and its gap tracks the prefill gap
+rather than the decode gap:
+
+| prompt tok | all-CUDA tok/s | hybrid gap | all-out gap |
+|---|---|---|---|
+| 512 | 851 | 6.5x | 7.2x |
+| 2048 | 883 | 10.4x | 17.3x |
+| 4096 | 643 | 16.2x | 25.8x |
+
+Do not read those as capacity results. `max_completed_wave` reports 64 for
+every config and length, including where the footprint exceeds KV outright
+(64 x 4096 = 262,144 tokens against all-CUDA's 201,216) — vLLM preempts rather
+than rejecting, so the wave still completes. Throughput and ITL are the honest
+columns.
+
+The cause is the chunked B70 prefill dispatch: staging buffers are
+decode-sized, so each `SHOOTING_BRAKE_B70_MAX_BATCH`-token chunk re-reads the
+layer's whole expert working set. One shared large buffer set — layers run
+sequentially, so one set serves all 40 — collapses that to one dispatch per
+layer. It is the single highest-value fix outstanding, and it also cuts
+benchmark wall time: the capacity frontier issues 1.39M prompt tokens per
+config, which at 2,100 tok/s is 11 minutes of prefill alone.
+
+### Corrections to previously recorded figures
+
+- `moe_intermediate_size` is **512**, not 768. One 35B expert is 1.69 MiB
+  packed / 6.00 MiB bf16, not 9.0 MiB. Read from the checkpoint config, and it
+  now reconciles with arena telemetry exactly.
+- The prefill throughput figure is order-sensitive and only comparable *within*
+  one run. all-CUDA prefill read 22,282 tok/s in one run and 6,083 in another
+  on a code path neither run touched — TTFT depends on KV-cache occupancy left
+  by the preceding phase. `offload_benchmark.py` now measures prefill before the
+  concurrency sweep for this reason.
+
 ## Next concrete deliverables
 
 Work proceeds in the Phase 0–10 order from [`../plan.md`](../plan.md). Phases 0
 through 8 are complete; Phase 10 has a first controlled result. In priority order:
 
-1. **Close the remaining latency gap.** At `subset:16:8`, ITL is 5.34 ms against
-   3.99 ms all-CUDA: 1.35 ms over 16 active layers, ~84 µs exposed per layer
-   against 296 µs of poller service. The kernel is 46.5 µs, so most of the
-   service time is still dispatch overhead — three H2D copies per dispatch could
-   be one if the staging buffers were contiguous.
+1. **Close the remaining latency gap.** At `subset:16:8`, ITL is 5.32 ms
+   against 3.99 ms all-CUDA. The round trip now reports its own split:
+   under `SHOOTING_BRAKE_B70_PROFILE=1` the poller accumulates on-device
+   kernel time alongside total service, and over decode dispatches only
+   (5,952 samples, snapshotted around the single-stream phase) that is
+   288.4 µs service against 141.8 µs kernel — **51% submission and
+   synchronisation overhead**, ~2.3 ms of the 5.87 ms ITL across 16 active
+   layers. The kernel half is bounded by B70 VRAM bandwidth and is not
+   removable; the other half is. Two candidates, in order of expected
+   return: reuse a recorded command list per `(layer, M)` via
+   `sycl_ext_oneapi_graph` instead of rebuilding one every dispatch, and
+   merge the three H2D copies into one by carving the staging buffers from
+   a single contiguous allocation.
+
+   Measure the split before optimising it. An earlier figure averaged over
+   every benchmark phase read 915.6 µs service / 705.0 µs kernel — only 23%
+   overhead — and was arithmetically impossible for decode (16 × 915.6 µs
+   exceeds the observed ITL outright). Prefill dispatches touch far more
+   experts and skew the mean.
+
+   Multi-queue dispatch was considered and rejected: layers are strictly
+   sequential, so exactly one dispatch is ever in flight, and within a
+   dispatch the copy/kernel/copy chain is fully dependent. Extra queues
+   have nothing to overlap.
 2. **Broaden the workload matrix.** Measured so far: single-stream, a concurrency
    sweep at one prompt length, one 1487-token prefill, and an 8-prompt greedy
    agreement matrix. Not measured: SLO-style service metrics (throughput at a
@@ -417,10 +616,23 @@ through 8 are complete; Phase 10 has a first controlled result. In priority orde
    exactly where it should look best and are currently untested.
 3. **Sweep the placement curve.** `subset:<K>:<N>` trades capacity against
    active-layer count; only `split:128` and `subset:16:8` have been measured.
-4. **Explain the prefill pass-through.** Not a defect — an A/B shows the
-   pass-through and Tier 3 produce byte-identical output — but the code path
-   reads as though it should drop every B70 route, and that gap between
-   inspection and measurement is itself a risk.
+4. **Restore prefill throughput without giving up correctness.** The prefill
+   pass-through was not benign. It handed the parent kernel raw global expert
+   ids after VRAM surgery had compacted the CUDA weight tensor, so every
+   offloaded route contributed nothing. The earlier A/B that found
+   "byte-identical output" measured the wrong quantity: sampled tokens only
+   move when the damage flips an argmax. Prompt logprobs, which are produced
+   during prefill, put the cost at **0.49 nats/token** — 1.63× worse
+   perplexity — on an identical 138-token prompt (`phase7/prefill_probe.py`).
+
+   Prefill now assembles the same three partials as decode and lands within
+   0.004 nats of all-CUDA, but it dispatches to the B70 in
+   `SHOOTING_BRAKE_B70_MAX_BATCH`-sized chunks because the staging buffers
+   are decode-sized. Each chunk re-reads that layer's whole expert working
+   set, so a 2048-token prefill pays roughly 14× the expert traffic of a
+   single dispatch. One shared large buffer set — layers run sequentially, so
+   one set serves all 40, ~24 MiB rather than 24 MiB × 40 — collapses that
+   back to one dispatch per layer.
 5. **Phase 9 proper:** heartbeat, bounded timeouts, provider restart and
    generation bump, exact batched failed-route recovery, rollback, telemetry.
 6. **Phase 10 remaining arms:** CPU-cold-expert offload baseline, reduced-CUDA

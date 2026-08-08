@@ -578,6 +578,77 @@ config, which at 2,100 tok/s is 11 minutes of prefill alone.
   by the preceding phase. `offload_benchmark.py` now measures prefill before the
   concurrency sweep for this reason.
 
+## Two hypotheses measured, one refuted, one revised (2026-08-08)
+
+### Prefill chunking does not explain the prefill gap
+
+The recorded explanation for the hybrid's 12.3× prefill deficit (2,115 vs
+26,096 tok/s, `benchmarks/results/smoke2d`) was dispatch chunking: staging
+buffers are decode-sized, so a long prompt goes to the B70 in
+`SHOOTING_BRAKE_B70_MAX_BATCH`-sized pieces and every piece re-reads the
+layer's expert working set. That mechanism predicts TTFT roughly proportional
+to chunk count. Measured (`phase7/prefill_chunk_bench.py`, chunk size is an
+env var so this needed no code):
+
+| chunk | dispatches/layer @3123 tok | TTFT |
+|---|---|---|
+| 128 | 25 | 1416.4 ms |
+| 512 | 7 | 1400.6 ms |
+| 2048 | 2 | 1344.2 ms |
+
+12.5× fewer round trips bought 5.1%. **Refuted.** The gap is the B70 NVFP4
+kernel itself on prefill shapes: one layer's prefill is ~157 GFLOP and takes
+~88 ms — single-digit percent of the card's capability. The kernel is built
+for decode, where an expert sees a handful of rows. Raising the chunk default
+is still a free 5–8% and ~50 MiB of pinned staging, but no buffer change
+closes a 12× gap.
+
+The redirect: the CPU tier already solved this exact problem by not computing
+on the slow device. Above `stream_threshold()`, `ExpertStreamer` copies packed
+NVFP4 weights to the 5090 and computes there; the crossover benchmark has
+streaming winning from M=1 (213× at M=2048). The same applies to B70-owned
+experts at prefill — weights move once per layer regardless of token count,
+over the 5090's direct Gen5 ×16 link. Planned as
+`SHOOTING_BRAKE_B70_PREFILL_STREAM=1`; decode untouched.
+
+### Expert routing is mildly skewed — not hot/cold
+
+Nothing in the repo had ever counted routes per expert; every shipped policy
+is positional (`LayerSubsetPolicy` keeps experts `0..cuda_n-1` by index). Now
+counted: `SHOOTING_BRAKE_ROUTE_STATS=1`, 2,000 pile-10k documents through
+all-CUDA mode (routing is decided before dispatch, so the histogram is
+placement-independent), 52.6M tokens, 420.5M routes, 63 s of engine time.
+Profile: `docs/profiles/qwen36-35b-pile10k-2000docs.csv`.
+
+| finding | value |
+|---|---|
+| skew ratio (uniform = 1.0) | **1.39×** |
+| experts covering 80% of a layer's routes | 147 of 256 (median 149, range 103–181) |
+| top-10 experts' route share | 10.9% (uniform: 3.9%) |
+| oracle top-8/layer absorbs | 9.0% of routes |
+| oracle top-64/layer absorbs | 47.4% of routes |
+| **today** (experts 0–7 by index) | **3.3%** — uniform is 3.1% |
+
+Consequences, recorded plainly:
+
+- The README's founding claim — "a small set of hot experts handles most
+  tokens, and the rest sit idle" — is **not true of this model**. 147 experts
+  per layer is not a small set. The claim that survives measurement is
+  per-token sparsity (8 of 256 experts fire per token, so ~97% of expert
+  parameters are idle *for any given token*), which is what makes remote
+  placement viable at all — and the capacity win (4.36× KV) never depended on
+  skew.
+- Index-based placement is statistically indistinguishable from random
+  (3.3% vs 3.1%). A frequency-ranked top-8 at the same VRAM budget absorbs
+  9.0% — 2.7× better, for free.
+- The real lever is budget sizing: the head is dense enough that 25% of the
+  bank absorbs 47% of routes. Holding the top-64 per offloaded layer costs
+  ~1.5 GiB (≈5% of the KV win) and roughly halves B70 decode traffic.
+- Per-layer concentration varies 2× (top-16 share 11.1–23.5%), so per-layer
+  budgets beat any fixed-N policy — the shape of the Lucebox greedy density
+  knapsack (`experiments--/misc/lucebox`, `moe_hybrid_placement.cpp`), which
+  ranks marginal experts by count/bytes across layers under one byte budget.
+
 ## Next concrete deliverables
 
 Work proceeds in the Phase 0–10 order from [`../plan.md`](../plan.md). Phases 0
@@ -591,11 +662,21 @@ through 8 are complete; Phase 10 has a first controlled result. In priority orde
    288.4 µs service against 141.8 µs kernel — **51% submission and
    synchronisation overhead**, ~2.3 ms of the 5.87 ms ITL across 16 active
    layers. The kernel half is bounded by B70 VRAM bandwidth and is not
-   removable; the other half is. Two candidates, in order of expected
-   return: reuse a recorded command list per `(layer, M)` via
-   `sycl_ext_oneapi_graph` instead of rebuilding one every dispatch, and
-   merge the three H2D copies into one by carving the staging buffers from
-   a single contiguous allocation.
+   removable; the other half is. Bound the payoff before building it: sweep
+   offloaded-layer count (`subset:8:8` / `16:8` / `24:8`) and fit ITL against
+   B70 busy time. Only 1.34 ms of the 4.06 ms of per-token B70 service is
+   exposed — the other 67% already hides under concurrent CUDA compute — so
+   the ceiling on any overhead removal is parity at 252 tok/s, and how much
+   of the 146 µs is actually recordable command-list work is unmeasured.
+   Candidates, in order of expected return: reuse a recorded command list per
+   `(layer, M)` via `sycl_ext_oneapi_graph` instead of rebuilding one every
+   dispatch, and merge the three H2D copies into one by carving the staging
+   buffers from a single contiguous allocation.
+
+   A third lever is cheaper than either and is now measured: placement.
+   Today's index-based CUDA set absorbs 3.3% of routes against 3.1% uniform,
+   while a frequency-ranked top-8 absorbs 9.0% and a top-64 absorbs 47.4%.
+   Routes kept on CUDA are B70 service removed outright.
 
    Measure the split before optimising it. An earlier figure averaged over
    every benchmark phase read 915.6 µs service / 705.0 µs kernel — only 23%
@@ -626,13 +707,14 @@ through 8 are complete; Phase 10 has a first controlled result. In priority orde
    perplexity — on an identical 138-token prompt (`phase7/prefill_probe.py`).
 
    Prefill now assembles the same three partials as decode and lands within
-   0.004 nats of all-CUDA, but it dispatches to the B70 in
-   `SHOOTING_BRAKE_B70_MAX_BATCH`-sized chunks because the staging buffers
-   are decode-sized. Each chunk re-reads that layer's whole expert working
-   set, so a 2048-token prefill pays roughly 14× the expert traffic of a
-   single dispatch. One shared large buffer set — layers run sequentially, so
-   one set serves all 40, ~24 MiB rather than 24 MiB × 40 — collapses that
-   back to one dispatch per layer.
+   0.004 nats of all-CUDA, but it is 12.3× slower than all-CUDA. The chunking
+   explanation previously recorded here was measured and **refuted** — see
+   "Two hypotheses measured" above; 12.5× fewer dispatches buys 5.1%. The
+   cause is B70 kernel throughput on prefill shapes, and the fix is to stop
+   computing prefill on the B70: stream its experts to the 5090 and compute
+   there, reusing `ExpertStreamer` from the CPU tier
+   (`SHOOTING_BRAKE_B70_PREFILL_STREAM=1`). Weights then move once per layer
+   regardless of prompt length, over the 5090's direct Gen5 ×16 link.
 5. **Phase 9 proper:** heartbeat, bounded timeouts, provider restart and
    generation bump, exact batched failed-route recovery, rollback, telemetry.
 6. **Phase 10 remaining arms:** CPU-cold-expert offload baseline, reduced-CUDA

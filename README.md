@@ -9,9 +9,11 @@ A shooting brake was never for everyone — it's the rare machine that refuses t
 
 Modern MoE models are enormous. A 35-billion-parameter MoE like Qwen3.6-35B-A3B needs ~23 GB just for expert weights — and that's the *small* one. The models people actually want to serve (300B+ parameters) need 150+ GB. An RTX 5090 has 32 GB. You'd need five or six of them at $4,000 each to hold one model.
 
-But here's the thing: in a MoE model, a **small set of "hot" experts handles most tokens**, and the rest sit idle most of the time. You're paying $4,000 per 32 GB of NVIDIA VRAM to store experts that rarely fire. That's like buying a fleet of sports cars to use as storage units.
+But here's the thing: a MoE model only fires **8 of its 256 experts per token**. For any given token, ~97% of the expert parameters are dead weight — they still have to be *somewhere* addressable, but they don't have to be somewhere fast. You're paying $4,000 per 32 GB of NVIDIA VRAM to store parameters that sit idle on all but one token in thirty.
 
-**Shooting Brake asks: what if the hot experts live on the fast NVIDIA GPU, and the cold experts live on cheap Intel VRAM?**
+**Shooting Brake asks: what if the experts that must be fast live on the NVIDIA GPU, and the rest live on cheap Intel VRAM?**
+
+> **A note on "hot" and "cold."** Throughout this document those words mean *which device owns the expert*, not a claim about how often it fires. An earlier version of this README argued that "a small set of hot experts handles most tokens, and the rest sit idle." We measured that on Qwen3.6-35B and **it is not true**: covering 80% of a layer's routes takes 147 of 256 experts, and the overall skew is a mild 1.39× over uniform. The capacity argument above does not depend on skew — per-token sparsity is enough — and the measured 4.36× KV win never did. See [`docs/progress.md`](docs/progress.md) for the histogram (52.6M tokens, 420.5M routes).
 
 The Intel Arc Pro B70 gives you 32 GB for $900 — **$28 per GB versus $125 per GB for a 5090.** Same capacity class, one-quarter the price. The trade-off: it's a different vendor, different driver stack, and there's no direct peer-to-peer link between NVIDIA and Intel GPUs. Shooting Brake is the software fabric that bridges that gap.
 
@@ -153,9 +155,10 @@ At single-stream (M=1), payloads are tiny (~32 KB/layer), so PCIe **latency** ma
 | change | impact | why |
 |---|---|---|
 | **HEDT platform** (Threadripper Pro / Xeon W, 128+ PCIe 5.0 lanes) | **the single biggest lever** | Moves the B70 from PCH (3.9 GB/s) to direct CPU PCIe 5.0 x16 (64 GB/s) — 16× more bandwidth. Also enables multiple B70s, each on direct lanes. |
-| Multi-queue B70 dispatch (software) | **high** | Breaks the single-SYCL-queue serialization that limits batched throughput. Biggest software win. |
-| Frequency-aware placement (software) | **high** | Routes experts to B70 by measured hotness — hot experts stay on the 5090, cold ones go to B70. Fewer dispatches for the same capacity. |
-| Merged H2D copies (software) | **medium** | Contiguous pinned staging buffer, one memcpy per dispatch. Lowers the 91 µs dispatch floor. |
+| Frequency-aware placement (software) | **medium** (measured) | Ranks experts by measured route count instead of by index. Today's index-based set absorbs 3.3% of routes vs 3.1% for random; an oracle top-8 absorbs 9.0%, top-64 absorbs 47.4%. Real, but bounded by a mild 1.39× skew — not the "hot expert" jackpot originally assumed. |
+| Stream B70 experts at prefill (software) | **high** | Prefill is 12.3× off all-CUDA and the B70 kernel, not dispatch structure, is the cause. Move weights to the 5090 once per layer instead of computing remotely. |
+| Merged H2D copies (software) | **low** | ~10–20 µs against a measured 146 µs of non-kernel round trip, and subsumed by command-list reuse. |
+| Multi-queue B70 dispatch (software) | **rejected** | Layers are strictly sequential — one dispatch in flight at a time — and copy/kernel/copy within a dispatch is a dependency chain. Nothing to overlap. |
 | NUMA pinning | **N/A on current machine** | Single socket, single NUMA node — no cross-socket penalty. Would matter on dual-socket EPYC. |
 | Faster DRAM | **negligible** | DRAM (~80 GB/s) is 20× overprovisioned vs the B70's PCIe path (3.9 GB/s). Never the bottleneck. |
 
@@ -181,7 +184,7 @@ The NVIDIA GPU owns the parts the B70 **cannot do**:
 - **Attention** — FlashAttention and the GDN/flash-linear-attention kernels are CUDA-only. The B70 has no attention implementation.
 - **KV cache** — random-access memory pattern needs the 5090's 1,792 GB/s bandwidth.
 - **Prefill** — compute-bound; tensor cores dominate.
-- **Hot experts** — the small set of experts that fire most often should stay on the fastest available silicon.
+- **Latency-critical experts** — whichever experts we choose to keep resident, they should sit on the fastest silicon. Which ones to choose is a placement decision, now driven by a measured route histogram rather than by expert index.
 
 The B70 does exactly one thing: **dense FFN/expert computation via NVFP4 kernels.** That happens to be where most of a MoE model's *parameters* live.
 
@@ -209,10 +212,12 @@ This requires a HEDT platform (Threadripper Pro / Xeon W) to give each B70 a dir
 
 These squeeze maximum value from the existing 3.9 GB/s B70 path:
 
-1. **Frequency-aware placement** — collect route frequencies during serving, build a hot/cold manifest, keep hot experts on the 5090. Highest-value optimization.
-2. **Multi-queue B70 dispatch** — break single-SYCL-queue serialization. Biggest throughput lift at concurrency.
-3. **Merged H2D copies** — one contiguous pinned staging buffer, one memcpy. Lowers dispatch floor.
-4. **Shared pinned buffers** — module-level singletons, raise max batch for prefill through Tier 3.
+1. **Stream B70 experts to the 5090 at prefill** — prefill is 12.3× slower than all-CUDA, and chunking has been measured out as the cause (12.5× fewer dispatches bought 5.1%). The B70's NVFP4 kernel is built for decode shapes. Reuses `ExpertStreamer` from the CPU tier: weights move once per layer, decode is untouched. **Highest-value software item.**
+2. **Calibrated knapsack placement** — the route histogram now exists (`SHOOTING_BRAKE_ROUTE_STATS=1`). Today's index-based CUDA set absorbs 3.3% of routes against 3.1% for random; a frequency-ranked top-8 absorbs 9.0% at identical VRAM cost, and per-layer budgets matter because concentration varies 2× across layers.
+3. **Bound, then maybe build, SYCL command-list reuse** — 51% of the decode round trip is non-kernel, but only 33% of B70 service is exposed (the rest already hides under CUDA compute), and how much of that 51% is recordable is unmeasured. Sweep offloaded-layer count first.
+4. **Raise the prefill chunk default** — measured 5–8%, costs ~50 MiB of pinned staging. Free, small, and moot if item 1 lands.
+
+*Rejected after reading the code:* multi-queue B70 dispatch. Layers are strictly sequential, so exactly one dispatch is ever in flight, and within a dispatch the copy/kernel/copy chain is fully dependent — extra queues have nothing to overlap.
 
 ### Hardware upgrades
 

@@ -208,28 +208,44 @@ def test_placement_assigns_before_module_init() -> None:
     check(raised, "a Parameter still cannot be assigned pre-super")
 
 
-def test_host_tiers_are_rejected() -> None:
-    """An all-out placement must fail closed, not load a wrong arena.
+def test_host_tiers_require_a_bank() -> None:
+    """An all-out placement is admitted only when a bank exists.
 
-    The host arena still `index_select`s global expert ids out of the layer
-    weights. Pre-emptive allocation leaves only CUDA-owned experts there, so
-    a global id below `num_cuda` would silently address the wrong expert —
-    plausible tokens, no exception. Until the arena reads the expert bank
-    instead, the combination is refused.
+    The arena used to `index_select` global expert ids out of the layer
+    weights, which pre-emptive allocation leaves holding only the
+    CUDA-owned ones — so the combination was refused outright. It is now
+    served from the expert bank instead, verified byte-for-byte against
+    the VRAM path across all 128 host experts at allout:16:8:8.
+
+    What must still fail closed is a *missing* bank: the tier would load
+    nothing, its routes would contribute zero, and the output would be
+    plausible tokens rather than an error.
     """
     print("\n[tier guard]")
     subset = build(LayerSubsetPolicy(active_layers=16, cuda_per_layer=8))
     _reject_unsupported_preemptive_tiers(subset)
-    check(True, "subset placement is accepted (no CPU tier)")
+    check(True, "subset placement is accepted (no host tier, no bank needed)")
 
     allout = build(AllOutPolicy(active_layers=16, cuda_per_layer=8,
                                 cpu_per_layer=8))
+    _reject_unsupported_preemptive_tiers(allout)
+    check(True, "all-out is accepted when the bank is present")
+
+    import os
+
+    prev = os.environ.get("SHOOTING_BRAKE_B70_BANK")
+    os.environ["SHOOTING_BRAKE_B70_BANK"] = "/nonexistent/expert_bank.bin"
     try:
         _reject_unsupported_preemptive_tiers(allout)
         raised = False
     except RuntimeError:
         raised = True
-    check(raised, "all-out placement is refused")
+    finally:
+        if prev is None:
+            del os.environ["SHOOTING_BRAKE_B70_BANK"]
+        else:
+            os.environ["SHOOTING_BRAKE_B70_BANK"] = prev
+    check(raised, "all-out is refused when the bank is missing")
 
 
 def test_owner_device_matches_accessor() -> None:
@@ -255,7 +271,7 @@ def main() -> int:
         test_input_scales_are_locally_indexed,
         test_placement_assigns_before_module_init,
         test_owner_device_matches_accessor,
-        test_host_tiers_are_rejected,
+        test_host_tiers_require_a_bank,
     ):
         fn()
     print(f"\nall {CHECKS} checks passed")

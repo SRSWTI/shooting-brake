@@ -17,6 +17,7 @@ except ImportError:
         return fn
 
 from . import route_stats
+from .config import bank_path as _b70_bank_path
 from .config import require_qualified_config
 from .partition import (
     RoutePartition,
@@ -138,9 +139,7 @@ def _get_b70_provider(placement: Placement) -> Any:
     lib_path = os.environ.get(
         "SHOOTING_BRAKE_B70_LIB", "phase7/libsb_b70_provider.so"
     )
-    bank_path = os.environ.get(
-        "SHOOTING_BRAKE_B70_BANK", "phase1/expert_bank.bin"
-    )
+    bank_path = _b70_bank_path()
     # Every B70-active layer offloads the same expert ids — one resident
     # set covers the whole bank — but layer 0 is not necessarily active
     # (a subset policy may leave it entirely on CUDA), so read the set
@@ -198,35 +197,34 @@ _SURGERY_HOOK_ATTR = "_shooting_brake_surgery_hook"
 
 
 def _reject_unsupported_preemptive_tiers(placement: Placement) -> None:
-    """Refuse the host tiers until they stop sourcing weights from VRAM.
+    """Require a readable expert bank whenever a host tier is in play.
 
-    ``_load_host_experts`` fills the DRAM arena by ``index_select``-ing the
-    layer's weight tensors with *global* expert ids. Post-hoc that is right:
-    the tensors still hold all 256 experts when it runs. Pre-emptive leaves
-    only the CUDA-owned ones there, so the same call either indexes out of
-    bounds or -- when an offloaded global id happens to fall below
-    ``num_cuda`` -- quietly loads a different expert than the one requested.
-    The checkpoint shards for offloaded experts are never read at all under
-    pre-emptive allocation, so there is no correct answer to fall back to.
+    ``_load_host_experts`` used to fill the arena by ``index_select``-ing
+    the layer's weight tensors with global expert ids, which pre-emptive
+    allocation breaks: the offloaded experts are never created in VRAM, so
+    the call either indexes out of bounds or quietly addresses a different
+    expert. That combination was refused outright.
 
-    A wrong arena produces plausible tokens, not a crash, so this fails
-    closed rather than risk it being found as a quality regression. The fix
-    is to source the arena from the expert bank, which holds every expert in
-    the provider's own layout and is built offline from the checkpoint.
+    It no longer needs to be. ``_load_host_experts_from_bank`` reads those
+    experts from the bank, which holds all of them and is built offline
+    from the checkpoint — verified byte-for-byte against the VRAM path on
+    the 35B at ``allout:16:8:8`` across all 128 host experts.
+
+    What remains is that path's precondition: the bank must exist. Without
+    it the tier would load nothing and the routes it owns would contribute
+    zero, which is plausible tokens rather than an error.
     """
     if placement.cpu_count() == 0 and not b70_prefill_stream_enabled():
         return
-    offender = (
-        "an all-out placement (CPU tier)" if placement.cpu_count()
-        else "SHOOTING_BRAKE_B70_PREFILL_STREAM=1"
-    )
-    raise RuntimeError(
-        "SHOOTING_BRAKE_PREEMPTIVE_SURGERY=1 cannot be combined with "
-        f"{offender}: the host arena still sources expert weights from "
-        "CUDA VRAM, which pre-emptive allocation never fills for offloaded "
-        "experts. Run without the CPU tier and without prefill streaming, "
-        "or use post-hoc surgery."
-    )
+    from .config import read_bank_header
+
+    if read_bank_header().layers == 0:
+        raise RuntimeError(
+            "SHOOTING_BRAKE_PREEMPTIVE_SURGERY=1 with a host tier needs an "
+            f"expert bank: none found at {_b70_bank_path()}. Offloaded "
+            "experts are never placed in VRAM under pre-emptive allocation, "
+            "so the bank is their only source."
+        )
 
 
 def _preemptive_cuda_ids(layer: Any) -> tuple[int, ...] | None:
@@ -996,6 +994,158 @@ class HybridRoutedExperts(RoutedExperts):
             and self.moe_config.is_act_and_mul
         )
 
+    def _verify_bank_plane(
+        self, layer_idx: int, expert_id: int,
+        gate_q: torch.Tensor, up_q: torch.Tensor, down_q: torch.Tensor,
+        gate_sf: torch.Tensor, up_sf: torch.Tensor, down_sf: torch.Tensor,
+        gs13: float, gs2: float, a1: float, a2: float,
+    ) -> None:
+        """Check the bank would produce the same arena as VRAM does.
+
+        Runs under ``SHOOTING_BRAKE_ARENA_VERIFY_BANK=1``, against the
+        arrays about to be handed to ``load_expert`` — so equality here
+        implies equality in the arena, without needing an accessor to read
+        packed memory back out.
+
+        Reference configuration is post-hoc surgery with an ``allout``
+        placement: the cold tier's working setup, and the only one where
+        the VRAM path is valid at all.
+        """
+        import numpy as np
+
+        from .expert_bank import ExpertBank, global_scale_divisor
+
+        bank = getattr(self, "_verify_bank", None)
+        if bank is None:
+            bank = ExpertBank(_b70_bank_path())
+            self._verify_bank = bank
+
+        planes = bank.expert(layer_idx, expert_id)
+        checks = (
+            ("gate_q", gate_q, planes.gate), ("up_q", up_q, planes.up),
+            ("down_q", down_q, planes.down),
+            ("gate_sf", gate_sf, planes.gate_sf),
+            ("up_sf", up_sf, planes.up_sf),
+            ("down_sf", down_sf, planes.down_sf),
+        )
+        for name, from_vram, from_bank in checks:
+            got = from_vram.contiguous().cpu().numpy().view(np.uint8)
+            want = np.ascontiguousarray(from_bank).view(np.uint8)
+            if got.shape != want.shape or not np.array_equal(
+                got.reshape(-1), want.reshape(-1)
+            ):
+                raise RuntimeError(
+                    f"arena mismatch at layer={layer_idx} expert={expert_id} "
+                    f"plane={name}: VRAM {got.shape} vs bank {want.shape}, "
+                    f"{int((got.reshape(-1) != want.reshape(-1)).sum()) if got.shape == want.shape else 'shape'} "
+                    "bytes differ"
+                )
+
+        # The scalars are floats, so compare as ratios rather than bytes.
+        for name, from_vram, raw, act in (
+            ("w13", gs13, planes.w13_inv_global, a1),
+            ("w2", gs2, planes.w2_inv_global, a2),
+        ):
+            folded = raw / global_scale_divisor(act)
+            if abs(folded - from_vram) > 1e-6 * max(abs(from_vram), 1e-30):
+                raise RuntimeError(
+                    f"arena scale mismatch at layer={layer_idx} "
+                    f"expert={expert_id} plane={name}: VRAM {from_vram:.6e} "
+                    f"vs bank {raw:.6e}/{act:.4f}={folded:.6e}"
+                )
+
+    def _load_host_experts_from_bank(
+        self, layer_idx: int, host_ids: tuple[int, ...],
+    ) -> None:
+        """Fill the arena from the expert bank rather than from VRAM.
+
+        The path pre-emptive allocation requires: VRAM holds only the
+        CUDA-owned experts, so the host tiers' weights exist nowhere else.
+
+        Less work than the VRAM path, not more. The bank is written from
+        the raw checkpoint, so ``w13`` is already ``[gate, up]`` (no
+        ``reorder_w1w3_to_w3w1`` to undo) and the block scales are already
+        linear (no ``swizzle_blockscale`` to reverse).
+
+        The one thing the bank cannot supply is the activation global
+        scale, which the arena's per-plane scalar has folded in. That
+        scalar is per layer and uniform across experts, so it is read from
+        the quant config — which is valid even under pre-emptive, where the
+        *per-expert* alphas cover only the CUDA set and the host experts
+        are absent from it entirely.
+        """
+        from .cpu_expert_host import PackedPlane, get_cpu_host
+        from .expert_bank import ExpertBank, global_scale_divisor
+
+        placement = self.shooting_brake_placement
+        bank = getattr(self, "_arena_bank", None)
+        if bank is None:
+            bank = ExpertBank(_b70_bank_path())
+            self._arena_bank = bank
+        if bank.hidden != self.hidden_size:
+            raise RuntimeError(
+                f"expert bank hidden {bank.hidden} != model {self.hidden_size}"
+            )
+
+        qconfig = self.quant_method.moe_quant_config
+        a1 = float(qconfig._a1.alpha_or_gscale.flatten()[0])
+        a2 = float(qconfig._a2.alpha_or_gscale.flatten()[0])
+
+        inter = bank.intermediate
+        self._cpu_intermediate = inter
+        max_experts = placement.cpu_count() + (
+            placement.b70_count() if b70_prefill_stream_enabled() else 0
+        )
+        host = get_cpu_host(
+            num_layers=placement.num_layers,
+            num_experts=placement.num_experts,
+            hidden=bank.hidden,
+            intermediate=inter,
+            max_experts=max_experts,
+            num_threads=int(os.environ.get("SHOOTING_BRAKE_CPU_THREADS", "0")),
+        )
+        self._cpu_host = host
+
+        for expert_id in host_ids:
+            p = bank.expert(layer_idx, expert_id)
+            gs13 = p.w13_inv_global / global_scale_divisor(a1)
+            gs2 = p.w2_inv_global / global_scale_divisor(a2)
+            host.load_expert(
+                layer_idx, expert_id,
+                PackedPlane(torch.from_numpy(np.ascontiguousarray(p.gate)),
+                            torch.from_numpy(np.ascontiguousarray(p.gate_sf)),
+                            gs13),
+                PackedPlane(torch.from_numpy(np.ascontiguousarray(p.up)),
+                            torch.from_numpy(np.ascontiguousarray(p.up_sf)),
+                            gs13),
+                PackedPlane(torch.from_numpy(np.ascontiguousarray(p.down)),
+                            torch.from_numpy(np.ascontiguousarray(p.down_sf)),
+                            gs2),
+            )
+        # No CPU_VERIFY block here, deliberately. That check builds its
+        # reference with `dequantize_to_dtype`, which expects *swizzled*
+        # block scales — what VRAM holds. The bank's are linear, so feeding
+        # them to it produces a wrong reference: measured rel=5.9e-01
+        # against the VRAM path's 5.65e-07, while still printing OK, which
+        # is worse than no check at all.
+        #
+        # The equivalence this function needs is established more strongly
+        # elsewhere. SHOOTING_BRAKE_ARENA_VERIFY_BANK=1 compares the arrays
+        # this path hands to `load_expert` against the ones the VRAM path
+        # hands over, byte for byte, for every host expert — 128 of them at
+        # allout:16:8:8, all six planes and both scalars each. Identical
+        # inputs to the same `load_expert` give an identical arena, so a
+        # second oracle over the same ground would add nothing; the
+        # comparison also distinguishes neighbouring experts (522k differing
+        # bytes), so passing it is a real result rather than a no-op.
+
+        logger.info(
+            "Shooting Brake: layer %d loaded %d host experts from the bank "
+            "— arena %.2f / %.2f GiB",
+            layer_idx, len(host_ids),
+            host.arena_used_bytes / 2**30, host.arena_capacity_bytes / 2**30,
+        )
+
     def _load_host_experts(self, layer_idx: int) -> None:
         """Copy this layer's host-resident experts into the DRAM arena, packed.
 
@@ -1053,6 +1203,18 @@ class HybridRoutedExperts(RoutedExperts):
         b70_ids = placement.b70_expert_ids(layer_idx) if stream_b70 else ()
         host_ids = cpu_ids + b70_ids
         if not host_ids:
+            return
+
+        # Pre-emptive allocation never creates the offloaded experts in
+        # VRAM, so there is nothing here to slice: the bank is the only
+        # source that still holds them. It is also the cheaper one — the
+        # bank is raw checkpoint order with linear scales, so neither the
+        # w13 half-swap nor the un-swizzle below applies. Proven equivalent
+        # byte-for-byte against the VRAM path under
+        # SHOOTING_BRAKE_ARENA_VERIFY_BANK=1 on the 35B at allout:16:8:8,
+        # across all 128 host experts.
+        if preemptive_surgery_enabled():
+            self._load_host_experts_from_bank(layer_idx, host_ids)
             return
 
         device = self.w13_weight.device
@@ -1123,6 +1285,13 @@ class HybridRoutedExperts(RoutedExperts):
                 PackedPlane(w2_q_cpu[slot].contiguous(),
                             sf2.contiguous(), float(w2_gs[slot])),
             )
+            if os.environ.get("SHOOTING_BRAKE_ARENA_VERIFY_BANK") == "1":
+                self._verify_bank_plane(
+                    layer_idx, expert_id, gate_q, up_q, w2_q_cpu[slot],
+                    gate_sf, up_sf, sf2, gs13, float(w2_gs[slot]),
+                    float(qconfig._a1.alpha_or_gscale.flatten()[0]),
+                    float(qconfig._a2.alpha_or_gscale.flatten()[0]),
+                )
 
         if os.environ.get("SHOOTING_BRAKE_CPU_VERIFY") == "1":
             from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501

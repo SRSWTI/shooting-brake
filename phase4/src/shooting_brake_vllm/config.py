@@ -68,6 +68,21 @@ def phase4_enabled() -> bool:
     )
 
 
+def bank_path() -> str:
+    """The expert bank this run serves from.
+
+    One resolution point for the whole package. The provider, the
+    qualification gate and the host arena must name the same file, or the
+    arena is filled from a different model's weights than the B70
+    dispatches to. The default is repo-relative rather than cwd-relative,
+    so a run started from another directory reads the same bank.
+    """
+    from pathlib import Path
+
+    default = Path(__file__).resolve().parents[3] / "phase1" / "expert_bank.bin"
+    return os.environ.get("SHOOTING_BRAKE_B70_BANK", str(default))
+
+
 #: `<8sIIIIIQQQQ` — magic, layers, experts/layer, hidden, intermediate, pad,
 #: then four record-section sizes. Written by phase1/extract_experts.py.
 _BANK_HEADER_FMT = "<8sIIIIIQQQQ"
@@ -104,10 +119,7 @@ def read_bank_header(path: str | None = None) -> BankHeader:
     from pathlib import Path
 
     if path is None:
-        path = os.environ.get(
-            "SHOOTING_BRAKE_B70_BANK",
-            str(Path(__file__).resolve().parents[3] / "phase1" / "expert_bank.bin"),
-        )
+        path = bank_path()
     bank = Path(path)
     if not bank.is_file():
         # Absent is the truth for an all-CUDA run. Under an offloading

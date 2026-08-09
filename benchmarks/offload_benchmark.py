@@ -226,9 +226,19 @@ def build_engine(max_num_seqs: int, max_model_len: int) -> Any:
     cap = os.environ.get("SHOOTING_BRAKE_MAX_BATCHED_TOKENS")
     if cap:
         kwargs["max_num_batched_tokens"] = int(cap)
+    # The 122B checkpoint is a VL model, but every prompt this harness sends
+    # is text. Left on, vLLM profiles the vision tower with a dummy image at
+    # the maximum feature size, and that pass -- not the weights -- is what
+    # decides the KV budget. It was also the allocation that OOM'd at
+    # n_cuda=80, several GiB after the expert bank had already fitted.
+    kwargs["language_model_only"] = True
+    # Graph capture forbids the host sync that reading a data-dependent
+    # expert list needs. Eager trades launch overhead for that freedom, so
+    # the cost of the trade has to be a measured number, not an assumption.
+    eager = os.environ.get("SHOOTING_BRAKE_EAGER") == "1"
     args = AsyncEngineArgs(
         model=MODEL,
-        enforce_eager=False,
+        enforce_eager=eager,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.90,
         max_model_len=max_model_len,

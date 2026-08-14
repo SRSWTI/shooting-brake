@@ -1,0 +1,94 @@
+{
+  "chunk_size": 1024,
+  "placement": "subset:16:8",
+  "points": [
+    {
+      "prompt_tokens": 1153,
+      "ttft_ms": 540.3978366666706,
+      "ttft_ms_min": 536.6167150059482,
+      "prefill_tok_per_s": 2133.613278528345,
+      "dispatches_per_layer": 2,
+      "target_tokens": 1536
+    },
+    {
+      "prompt_tokens": 3123,
+      "ttft_ms": 1376.922638664837,
+      "ttft_ms_min": 1376.5912070084596,
+      "prefill_tok_per_s": 2268.1012805688815,
+      "dispatches_per_layer": 4,
+      "target_tokens": 4096
+    }
+  ],
+  "workers": [
+    {
+      "hybrid_layers": 40,
+      "routes": {
+        "b70": 0,
+        "cpu": 0,
+        "total": 27392,
+        "b70_share": 0.0,
+        "cpu_share": 0.0,
+        "per_layer_b70": {
+          "0": 0,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0,
+          "8": 0,
+          "9": 0,
+          "10": 0,
+          "11": 0,
+          "12": 0,
+          "13": 0,
+          "14": 0,
+          "15": 0,
+          "16": 0,
+          "17": 0,
+          "18": 0,
+          "19": 0,
+          "20": 0,
+          "21": 0,
+          "22": 0,
+          "23": 0,
+          "24": 0,
+          "25": 0,
+          "26": 0,
+          "27": 0,
+          "28": 0,
+          "29": 0,
+          "30": 0,
+          "31": 0,
+          "32": 0,
+          "33": 0,
+          "34": 0,
+          "35": 0,
+          "36": 0,
+          "37": 0,
+          "38": 0,
+          "39": 0
+        },
+        "per_layer_cpu": {}
+      },
+      "poller": {
+        "dispatches": 720,
+        "errors": 0,
+        "service_mean_us": 10529.0634375,
+        "kernel_mean_us": 0.0
+      },
+      "kv_cache": {
+        "num_gpu_blocks": 417,
+        "block_size": 2096,
+        "max_tokens": 874032
+      },
+      "cuda_memory": {
+        "allocated_gib": 26.182836055755615,
+        "reserved_gib": 26.640625,
+        "free_gib": 3.77703857421875,
+        "total_gib": 31.35833740234375
+      }
+    }
+  ]
+}

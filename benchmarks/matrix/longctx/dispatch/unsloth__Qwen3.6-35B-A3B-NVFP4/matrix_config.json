@@ -1,0 +1,38 @@
+{
+  "concurrent_rates": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "contexts": [
+    127000
+  ],
+  "cooldown": "0",
+  "disable_console": true,
+  "max_errors": 5,
+  "max_requests": 10,
+  "max_seconds": 600.0,
+  "metrics_url": "http://127.0.0.1:8000/metrics",
+  "model": "unsloth/Qwen3.6-35B-A3B-NVFP4",
+  "output_root": "/home/shooting-brake007/srswti/shooting-brake/bench-matrix/longctx/dispatch",
+  "output_tokens": 512,
+  "outputs": [
+    "json",
+    "csv",
+    "html"
+  ],
+  "profiles": [
+    "synchronous"
+  ],
+  "rampup": 10.0,
+  "random_seed": 42,
+  "request_format": "/v1/chat/completions",
+  "sample_interval": 5.0,
+  "skip_existing": true,
+  "sweep_steps": 3,
+  "target": "http://127.0.0.1:8000",
+  "warmup": "0"
+}

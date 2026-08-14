@@ -1,6 +1,0 @@
-self-hosted-runner:
-  # all labels self hosted
-  labels:
-    - self-hosted-bmg
-    - self-hosted-pvc
-    - self-hosted-pvc-cpu

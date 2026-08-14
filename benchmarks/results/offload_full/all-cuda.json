@@ -1,0 +1,751 @@
+{
+  "config": "all-cuda",
+  "model": "unsloth/Qwen3.6-35B-A3B-NVFP4",
+  "placement": "all-cuda",
+  "max_num_seqs": 64,
+  "max_model_len": 131072,
+  "adapter_sha": "fede998f0b0aca46",
+  "correctness": [
+    {
+      "prompt": "State the integer after 41.",
+      "token_ids": [
+        271,
+        760,
+        7308,
+        1238,
+        220,
+        19,
+        16,
+        369,
+        220,
+        19,
+        17,
+        13,
+        271,
+        1349,
+        279,
+        7308,
+        1518,
+        220,
+        18,
+        24,
+        13,
+        271,
+        760,
+        7308,
+        1518,
+        220,
+        18,
+        24,
+        369,
+        220,
+        18,
+        23
+      ],
+      "text": "\n\nThe integer after 41 is 42.\n\nState the integer before 39.\n\nThe integer before 39 is 38",
+      "prompt_tokens": 8,
+      "prompt_logprob_sum": -28.39659482240677,
+      "prompt_logprob_mean": -4.056656403200967
+    },
+    {
+      "prompt": "Write a Python function that reverses a linked list.",
+      "token_ids": [
+        271,
+        71093,
+        12305,
+        198,
+        1005,
+        5829,
+        25,
+        198,
+        262,
+        687,
+        1259,
+        2251,
+        3676,
+        701,
+        11,
+        795,
+        1590,
+        198,
+        285,
+        638,
+        2127,
+        283,
+        795,
+        198,
+        285,
+        638,
+        4381,
+        283,
+        2168,
+        271,
+        727,
+        9637
+      ],
+      "text": "\n\n```python\nclass Node:\n    def __init__(self, data):\n        self.data = data\n        self.next = None\n\ndef reverse",
+      "prompt_tokens": 11,
+      "prompt_logprob_sum": -20.54043318346885,
+      "prompt_logprob_mean": -2.054043318346885
+    },
+    {
+      "prompt": "Explain why the sky appears blue, in two sentences.",
+      "token_ids": [
+        271,
+        248068,
+        198,
+        8160,
+        579,
+        264,
+        7047,
+        1817,
+        25,
+        271,
+        16,
+        13,
+        220,
+        2972,
+        2014,
+        53983,
+        2570,
+        5396,
+        64700,
+        198,
+        256,
+        471,
+        2972,
+        14162,
+        64700,
+        79091,
+        3069,
+        279,
+        12515,
+        7701,
+        6105,
+        11
+      ],
+      "text": "\n\n<think>\nHere's a thinking process:\n\n1.  **Analyze User Input:**\n   - **Question:** Explain why the sky appears blue,",
+      "prompt_tokens": 12,
+      "prompt_logprob_sum": -26.29501737654209,
+      "prompt_logprob_mean": -2.39045612514019
+    },
+    {
+      "prompt": "Translate to French: The weather is pleasant today.",
+      "token_ids": [
+        271,
+        248068,
+        271,
+        248069,
+        271,
+        11707,
+        19092,
+        68501,
+        72163,
+        87236,
+        13,
+        248044
+      ],
+      "text": "\n\n<think>\n\n</think>\n\nIl fait beau aujourd\u2019hui.",
+      "prompt_tokens": 10,
+      "prompt_logprob_sum": -27.01598545908928,
+      "prompt_logprob_mean": -3.001776162121031
+    },
+    {
+      "prompt": "What is the derivative of x^3 * sin(x)?",
+      "token_ids": [
+        271,
+        1206,
+        1423,
+        279,
+        30761,
+        314,
+        17237,
+        830,
+        61,
+        18,
+        1088,
+        15470,
+        2007,
+        8,
+        1088,
+        681,
+        567,
+        958,
+        279,
+        1918,
+        5728,
+        13,
+        561,
+        1918,
+        5728,
+        5134,
+        421,
+        413,
+        488,
+        599,
+        1330,
+        5568
+      ],
+      "text": "\n\nTo find the derivative of \\( x^3 \\sin(x) \\), we use the product rule. The product rule states that if you have two functions",
+      "prompt_tokens": 12,
+      "prompt_logprob_sum": -21.449376594275236,
+      "prompt_logprob_mean": -1.949943326752294
+    },
+    {
+      "prompt": "List three causes of the fall of the Western Roman Empire.",
+      "token_ids": [
+        271,
+        248068,
+        271,
+        248069,
+        271,
+        760,
+        4255,
+        314,
+        279,
+        10550,
+        12386,
+        19825,
+        557,
+        264,
+        6150,
+        1817,
+        12571,
+        494,
+        264,
+        10286,
+        314,
+        5138,
+        29712,
+        321,
+        8976,
+        38432,
+        13,
+        5514,
+        513,
+        2250,
+        5839,
+        10814
+      ],
+      "text": "\n\n<think>\n\n</think>\n\nThe fall of the Western Roman Empire was a complex process resulting from a combination of internal decay and external pressures. Here are three primary causes",
+      "prompt_tokens": 12,
+      "prompt_logprob_sum": -19.273450819775462,
+      "prompt_logprob_mean": -1.75213189270686
+    },
+    {
+      "prompt": "Summarize the difference between TCP and UDP.",
+      "token_ids": [
+        271,
+        248068,
+        198,
+        8160,
+        579,
+        264,
+        7047,
+        1817,
+        25,
+        271,
+        16,
+        13,
+        220,
+        2972,
+        15771,
+        2598,
+        2570,
+        5952,
+        64700,
+        561,
+        1156,
+        6587,
+        264,
+        11782,
+        314,
+        279,
+        11461,
+        1881,
+        25804,
+        318,
+        88061,
+        7533
+      ],
+      "text": "\n\n<think>\nHere's a thinking process:\n\n1.  **Understand User Request:** The user wants a summary of the differences between TCP (Transmission Control",
+      "prompt_tokens": 10,
+      "prompt_logprob_sum": -17.64940631762147,
+      "prompt_logprob_mean": -1.9610451464023855
+    },
+    {
+      "prompt": "Write a haiku about winter mountains.",
+      "token_ids": [
+        271,
+        248068,
+        198,
+        90700,
+        8340,
+        25,
+        271,
+        16,
+        13,
+        220,
+        2972,
+        1847,
+        7355,
+        279,
+        1622,
+        64700,
+        198,
+        262,
+        348,
+        256,
+        31819,
+        25,
+        19488,
+        22767,
+        13,
+        198,
+        262,
+        348,
+        256,
+        3268,
+        25,
+        13697
+      ],
+      "text": "\n\n<think>\nThinking Process:\n\n1.  **Deconstruct the request:**\n    *   Topic: Winter mountains.\n    *   Form: Ha",
+      "prompt_tokens": 8,
+      "prompt_logprob_sum": -26.269292809069157,
+      "prompt_logprob_mean": -3.7527561155813083
+    }
+  ],
+  "single_stream": {
+    "trials": 3,
+    "output_tokens": 400,
+    "tok_per_s_mean": 250.63837174703588,
+    "tok_per_s_min": 250.45973904435337,
+    "tok_per_s_max": 250.9938049504952,
+    "decode_tok_per_s_mean": 252.59912596074153,
+    "itl_mean_ms": 3.958816304932123,
+    "itl_p50_ms": 3.9580900011060294,
+    "itl_p95_ms": 4.140017001191154,
+    "itl_p99_ms": 4.20624999969732,
+    "itl_max_ms": 4.38718700024765,
+    "ttft_mean_ms": 16.347811000741785,
+    "ttft_p95_ms": 16.740527000365546
+  },
+  "workers_decode_only": [
+    {
+      "hybrid_layers": 40,
+      "kv_cache": {
+        "num_gpu_blocks": 185,
+        "block_size": 2096,
+        "max_tokens": 387760
+      },
+      "cuda_memory": {
+        "allocated_gib": 27.190682888031006,
+        "reserved_gib": 27.6484375,
+        "peak_allocated_gib": 27.3907208442688,
+        "peak_reserved_gib": 28.248046875,
+        "load_peak_allocated_gib": 22.50200319290161,
+        "free_gib": 2.68341064453125,
+        "total_gib": 31.35833740234375
+      },
+      "host_memory": {
+        "rss_gib": 4.2683258056640625,
+        "peak_rss_gib": 6.424625396728516
+      },
+      "cuda_power": {
+        "watts": 302.813,
+        "limit_watts": 575.0,
+        "temperature_c": 44
+      }
+    }
+  ],
+  "prefill": {
+    "prompt_tokens": 1487,
+    "ttft_s_mean": 0.17173053666677637,
+    "prefill_tok_per_s": 8658.914301801518
+  },
+  "batched": [
+    {
+      "concurrency": 1,
+      "wall_s": 0.5163231250007811,
+      "total_output_tokens": 128,
+      "output_tok_per_s": 247.90677349538885,
+      "requests_per_s": 1.9367716679327254,
+      "itl_mean_ms": 3.952542944881409,
+      "itl_p50_ms": 3.963600000133738,
+      "itl_p95_ms": 4.1003450023708865,
+      "itl_p99_ms": 4.143958001805004,
+      "itl_max_ms": 4.229540998494485,
+      "ttft_mean_ms": 14.265936999436235,
+      "ttft_p95_ms": 14.265936999436235
+    },
+    {
+      "concurrency": 4,
+      "wall_s": 0.6875553270001546,
+      "total_output_tokens": 512,
+      "output_tok_per_s": 744.6673451486251,
+      "requests_per_s": 5.817713633973634,
+      "itl_mean_ms": 5.1093509507806205,
+      "itl_p50_ms": 5.162207999092061,
+      "itl_p95_ms": 5.569094999373192,
+      "itl_p99_ms": 5.779482999059837,
+      "itl_max_ms": 6.492542001069523,
+      "ttft_mean_ms": 36.70235175104608,
+      "ttft_p95_ms": 37.108151002030354
+    },
+    {
+      "concurrency": 8,
+      "wall_s": 0.8073672409991559,
+      "total_output_tokens": 1024,
+      "output_tok_per_s": 1268.3199763378443,
+      "requests_per_s": 9.908749815139409,
+      "itl_mean_ms": 6.057423963581433,
+      "itl_p50_ms": 6.1712189999525435,
+      "itl_p95_ms": 6.75054299790645,
+      "itl_p99_ms": 6.887339000968495,
+      "itl_max_ms": 6.956211000215262,
+      "ttft_mean_ms": 35.65008024952476,
+      "ttft_p95_ms": 36.30171799886739
+    },
+    {
+      "concurrency": 16,
+      "wall_s": 1.2380204629989748,
+      "total_output_tokens": 2048,
+      "output_tok_per_s": 1654.2537552561407,
+      "requests_per_s": 12.9238574629386,
+      "itl_mean_ms": 6.831420766237589,
+      "itl_p50_ms": 7.081515999743715,
+      "itl_p95_ms": 7.933309996587923,
+      "itl_p99_ms": 8.156040003086673,
+      "itl_max_ms": 8.262764000392053,
+      "ttft_mean_ms": 368.6526515623427,
+      "ttft_p95_ms": 369.6431060016039
+    },
+    {
+      "concurrency": 32,
+      "wall_s": 1.1811381340012304,
+      "total_output_tokens": 4096,
+      "output_tok_per_s": 3467.841636883204,
+      "requests_per_s": 27.09251278815003,
+      "itl_mean_ms": 8.70681864271623,
+      "itl_p50_ms": 8.930400999815902,
+      "itl_p95_ms": 10.319126999092987,
+      "itl_p99_ms": 10.686461999284802,
+      "itl_max_ms": 10.7570050022332,
+      "ttft_mean_ms": 72.45318249988486,
+      "ttft_p95_ms": 74.26877299803891
+    },
+    {
+      "concurrency": 64,
+      "wall_s": 2.9200804790016264,
+      "total_output_tokens": 8192,
+      "output_tok_per_s": 2805.4021315196214,
+      "requests_per_s": 21.917204152497042,
+      "itl_mean_ms": 10.430982316312043,
+      "itl_p50_ms": 9.937352002452826,
+      "itl_p95_ms": 12.93662299940479,
+      "itl_p99_ms": 13.236344999313587,
+      "itl_max_ms": 15.308518999518128,
+      "ttft_mean_ms": 569.4634289371834,
+      "ttft_p95_ms": 1834.69493800294
+    }
+  ],
+  "context_sweep": [
+    {
+      "target_prompt_tokens": 2048,
+      "actual_prompt_tokens": 1543,
+      "output_tokens": 275,
+      "decode_tok_per_s": 251.78693393825927,
+      "ttft_ms": 57.45376300183125,
+      "itl_p50_ms": 3.971721002017148,
+      "itl_p99_ms": 4.224961001455085
+    },
+    {
+      "target_prompt_tokens": 8192,
+      "actual_prompt_tokens": 6273,
+      "output_tokens": 265,
+      "decode_tok_per_s": 250.12715460227344,
+      "ttft_ms": 224.99861699907342,
+      "itl_p50_ms": 4.001982000772841,
+      "itl_p99_ms": 4.301043998566456
+    },
+    {
+      "target_prompt_tokens": 32768,
+      "actual_prompt_tokens": 25173,
+      "output_tokens": 254,
+      "decode_tok_per_s": 240.04657730922264,
+      "ttft_ms": 985.9255629999097,
+      "itl_p50_ms": 4.178299001068808,
+      "itl_p99_ms": 4.424448998179287
+    },
+    {
+      "target_prompt_tokens": 131072,
+      "actual_prompt_tokens": 100793,
+      "output_tokens": 362,
+      "decode_tok_per_s": 216.11972815041705,
+      "ttft_ms": 8711.603910000122,
+      "itl_p50_ms": 4.676968997955555,
+      "itl_p99_ms": 4.880956999841146
+    }
+  ],
+  "capacity_frontier": [
+    {
+      "target_prompt_tokens": 2048,
+      "max_completed_wave": 64,
+      "points": [
+        {
+          "concurrent_requests": 1,
+          "actual_prompt_tokens": 1543,
+          "total_output_tokens": 8,
+          "output_tok_per_s": 93.84713875617705,
+          "ttft_p50_ms": 57.86330900082248,
+          "itl_p50_ms": 3.943659001379274,
+          "itl_p99_ms": 4.163977999269264
+        },
+        {
+          "concurrent_requests": 4,
+          "actual_prompt_tokens": 1543,
+          "total_output_tokens": 1034,
+          "output_tok_per_s": 590.1232541127465,
+          "ttft_p50_ms": 208.37319500060403,
+          "itl_p50_ms": 5.307485000230372,
+          "itl_p99_ms": 5.7426029998168815
+        },
+        {
+          "concurrent_requests": 8,
+          "actual_prompt_tokens": 1543,
+          "total_output_tokens": 909,
+          "output_tok_per_s": 460.53282247263155,
+          "ttft_p50_ms": 310.59064700093586,
+          "itl_p50_ms": 5.384887997934129,
+          "itl_p99_ms": 52.606607001507655
+        },
+        {
+          "concurrent_requests": 12,
+          "actual_prompt_tokens": 1543,
+          "total_output_tokens": 1117,
+          "output_tok_per_s": 560.2814833311363,
+          "ttft_p50_ms": 365.27233900051215,
+          "itl_p50_ms": 5.3557760002149735,
+          "itl_p99_ms": 53.28432399983285
+        },
+        {
+          "concurrent_requests": 16,
+          "actual_prompt_tokens": 1543,
+          "total_output_tokens": 2164,
+          "output_tok_per_s": 858.6627823246912,
+          "ttft_p50_ms": 421.8457560018578,
+          "itl_p50_ms": 6.407599001249764,
+          "itl_p99_ms": 49.96500000197557
+        },
+        {
+          "concurrent_requests": 24,
+          "actual_prompt_tokens": 1543,
+          "total_output_tokens": 3482,
+          "output_tok_per_s": 1110.6767729806602,
+          "ttft_p50_ms": 578.8266620002105,
+          "itl_p50_ms": 7.853077997424407,
+          "itl_p99_ms": 51.40963899975759
+        },
+        {
+          "concurrent_requests": 32,
+          "actual_prompt_tokens": 1543,
+          "total_output_tokens": 4287,
+          "output_tok_per_s": 1061.4333197714911,
+          "ttft_p50_ms": 722.0188430001144,
+          "itl_p50_ms": 7.922289998532506,
+          "itl_p99_ms": 50.96962999959942
+        },
+        {
+          "concurrent_requests": 48,
+          "actual_prompt_tokens": 1543,
+          "total_output_tokens": 6901,
+          "output_tok_per_s": 1385.788812835479,
+          "ttft_p50_ms": 1003.761273001146,
+          "itl_p50_ms": 9.15437000003294,
+          "itl_p99_ms": 51.87420700167422
+        },
+        {
+          "concurrent_requests": 64,
+          "actual_prompt_tokens": 1543,
+          "total_output_tokens": 7272,
+          "output_tok_per_s": 1240.6010187236595,
+          "ttft_p50_ms": 1296.6155739995884,
+          "itl_p50_ms": 10.53406599748996,
+          "itl_p99_ms": 52.38019799799076
+        }
+      ]
+    },
+    {
+      "target_prompt_tokens": 8192,
+      "max_completed_wave": 48,
+      "points": [
+        {
+          "concurrent_requests": 1,
+          "actual_prompt_tokens": 6273,
+          "total_output_tokens": 268,
+          "output_tok_per_s": 208.91838373656515,
+          "ttft_p50_ms": 215.08127600100124,
+          "itl_p50_ms": 4.007382001873339,
+          "itl_p99_ms": 4.27680299981148
+        },
+        {
+          "concurrent_requests": 4,
+          "actual_prompt_tokens": 6273,
+          "total_output_tokens": 543,
+          "output_tok_per_s": 265.02493128561173,
+          "ttft_p50_ms": 555.2374489998328,
+          "itl_p50_ms": 5.109327001264319,
+          "itl_p99_ms": 52.99500199907925
+        },
+        {
+          "concurrent_requests": 8,
+          "actual_prompt_tokens": 6273,
+          "total_output_tokens": 837,
+          "output_tok_per_s": 298.43662614938944,
+          "ttft_p50_ms": 866.6754509977181,
+          "itl_p50_ms": 5.5808959987189155,
+          "itl_p99_ms": 55.63189999884344
+        },
+        {
+          "concurrent_requests": 12,
+          "actual_prompt_tokens": 6273,
+          "total_output_tokens": 1568,
+          "output_tok_per_s": 418.2303405781203,
+          "ttft_p50_ms": 1184.3423649988836,
+          "itl_p50_ms": 6.825365999247879,
+          "itl_p99_ms": 57.198061997041805
+        },
+        {
+          "concurrent_requests": 16,
+          "actual_prompt_tokens": 6273,
+          "total_output_tokens": 2668,
+          "output_tok_per_s": 508.798567234222,
+          "ttft_p50_ms": 1499.0198369996506,
+          "itl_p50_ms": 6.853386999864597,
+          "itl_p99_ms": 57.03292600082932
+        },
+        {
+          "concurrent_requests": 24,
+          "actual_prompt_tokens": 6273,
+          "total_output_tokens": 2575,
+          "output_tok_per_s": 405.2007461318127,
+          "ttft_p50_ms": 2137.203338999825,
+          "itl_p50_ms": 8.541846000298392,
+          "itl_p99_ms": 57.16024099820061
+        },
+        {
+          "concurrent_requests": 32,
+          "actual_prompt_tokens": 6273,
+          "total_output_tokens": 4893,
+          "output_tok_per_s": 579.1049788609416,
+          "ttft_p50_ms": 2834.753952000028,
+          "itl_p50_ms": 10.2883159997873,
+          "itl_p99_ms": 57.96720299986191
+        },
+        {
+          "concurrent_requests": 48,
+          "actual_prompt_tokens": 6273,
+          "total_output_tokens": 8298,
+          "output_tok_per_s": 661.2766240675355,
+          "ttft_p50_ms": 4144.768527999986,
+          "itl_p50_ms": 11.677872000291245,
+          "itl_p99_ms": 59.47734500296065
+        }
+      ]
+    },
+    {
+      "target_prompt_tokens": 32768,
+      "max_completed_wave": 12,
+      "points": [
+        {
+          "concurrent_requests": 1,
+          "actual_prompt_tokens": 25173,
+          "total_output_tokens": 8,
+          "output_tok_per_s": 7.935989365256286,
+          "ttft_p50_ms": 984.0335249973577,
+          "itl_p50_ms": 4.150607001065509,
+          "itl_p99_ms": 4.375247001007665
+        },
+        {
+          "concurrent_requests": 4,
+          "actual_prompt_tokens": 25173,
+          "total_output_tokens": 494,
+          "output_tok_per_s": 99.0553542826649,
+          "ttft_p50_ms": 2851.2935009966895,
+          "itl_p50_ms": 5.397248001827393,
+          "itl_p99_ms": 100.18795999712893
+        },
+        {
+          "concurrent_requests": 8,
+          "actual_prompt_tokens": 25173,
+          "total_output_tokens": 1094,
+          "output_tok_per_s": 111.02930480730687,
+          "ttft_p50_ms": 4710.880466001981,
+          "itl_p50_ms": 5.954731001111213,
+          "itl_p99_ms": 92.28221099692746
+        },
+        {
+          "concurrent_requests": 12,
+          "actual_prompt_tokens": 25173,
+          "total_output_tokens": 1707,
+          "output_tok_per_s": 123.62703336527923,
+          "ttft_p50_ms": 6618.028814002173,
+          "itl_p50_ms": 7.545505002781283,
+          "itl_p99_ms": 101.89552900192211
+        }
+      ]
+    },
+    {
+      "target_prompt_tokens": 131072,
+      "max_completed_wave": 4,
+      "points": [
+        {
+          "concurrent_requests": 1,
+          "actual_prompt_tokens": 100793,
+          "total_output_tokens": 8,
+          "output_tok_per_s": 0.9098251693295833,
+          "ttft_p50_ms": 8778.951932999917,
+          "itl_p50_ms": 0.03498900059639709,
+          "itl_p99_ms": 4.842815997108119
+        },
+        {
+          "concurrent_requests": 4,
+          "actual_prompt_tokens": 100793,
+          "total_output_tokens": 689,
+          "output_tok_per_s": 18.854835514085863,
+          "ttft_p50_ms": 25953.658656002517,
+          "itl_p50_ms": 7.303844999114517,
+          "itl_p99_ms": 288.8180270019802
+        }
+      ]
+    }
+  ],
+  "workers": [
+    {
+      "hybrid_layers": 40,
+      "kv_cache": {
+        "num_gpu_blocks": 185,
+        "block_size": 2096,
+        "max_tokens": 387760
+      },
+      "cuda_memory": {
+        "allocated_gib": 27.19849681854248,
+        "reserved_gib": 28.09765625,
+        "peak_allocated_gib": 27.505380153656006,
+        "peak_reserved_gib": 28.248046875,
+        "load_peak_allocated_gib": 22.50200319290161,
+        "free_gib": 2.23419189453125,
+        "total_gib": 31.35833740234375
+      },
+      "host_memory": {
+        "rss_gib": 4.336849212646484,
+        "peak_rss_gib": 6.424625396728516
+      },
+      "cuda_power": {
+        "watts": 369.733,
+        "limit_watts": 575.0,
+        "temperature_c": 57
+      }
+    }
+  ]
+}

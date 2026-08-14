@@ -17,6 +17,7 @@
 #   bash benchmarks/serve_hybrid.sh                 # 131k, subset:16:8
 #   MAX_MODEL_LEN=32768 bash benchmarks/serve_hybrid.sh
 #   PLACEMENT=split:128 PORT=8001 bash benchmarks/serve_hybrid.sh
+#   PREFILL_STREAM=1 bash benchmarks/serve_hybrid.sh   # 2.2x at long context
 #
 # Env overrides (defaults shown):
 #   MODEL=unsloth/Qwen3.6-35B-A3B-NVFP4
@@ -25,6 +26,21 @@
 #   GPU_MEM_UTIL=0.90
 #   PLACEMENT=subset:16:8        # offload policy, see track_b_offload_sweep.sh
 #   PORT=8000
+#   PREFILL_STREAM=0             # see below
+#
+# PREFILL_STREAM=1 sends the B70-owned expert weights from a host-DRAM mirror
+# to the 5090 once per forward, instead of shipping every prompt token to the
+# B70 once per active layer. Measured 2026-08-13 on this machine, 10/10
+# requests per cell, `benchmarks/matrix/longctx/RESULT.md`:
+#
+#     ctx      TTFT  63.6s -> 26.7s      e2e  8.5 -> 18.7 tok/s   (127,000)
+#              TTFT  31.0s -> 11.2s      e2e 16.5 -> 38.8 tok/s   ( 65,536)
+#
+# Decode ITL and KV capacity are unchanged (the mirror lives in host DRAM, not
+# 5090 VRAM); it costs ~4-6 GiB of host RAM. Default is 0 only because short
+# prompts have not been re-measured with it on -- SHOOTING_BRAKE_B70_STREAM_T
+# (default 1024 tokens) is supposed to keep them on the dispatch path, but that
+# has not been verified here. Turn it on for long-context serving.
 #
 # Stop with:  pkill -INT -f 'vllm serve'
 #
@@ -59,11 +75,13 @@ export SHOOTING_BRAKE_B70_DEVICE=1
 export SHOOTING_BRAKE_VRAM_SURGERY=1
 export SHOOTING_BRAKE_B70_GRAPH=1
 export SHOOTING_BRAKE_B70_STATS=1
+export SHOOTING_BRAKE_B70_PREFILL_STREAM="${PREFILL_STREAM:-0}"
 # Bank and provider .so resolve relative to the repo root.
 export SHOOTING_BRAKE_B70_BANK="$REPO_ROOT/phase1/expert_bank.bin"
 export SHOOTING_BRAKE_B70_LIB="$REPO_ROOT/phase7/libsb_b70_provider.so"
 
-echo "[track_a] serving $MODEL hybrid ($PLACEMENT) max_model_len=$MAX_MODEL_LEN on :$PORT"
+echo "[track_a] serving $MODEL hybrid ($PLACEMENT) max_model_len=$MAX_MODEL_LEN on :$PORT" \
+     "prefill=$([ "${PREFILL_STREAM:-0}" = 1 ] && echo stream || echo dispatch)"
 
 exec "$REPO_ROOT/.venv/bin/vllm" serve "$MODEL" \
   --host 0.0.0.0 --port "$PORT" \

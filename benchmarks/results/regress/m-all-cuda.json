@@ -1,0 +1,36 @@
+{
+  "mode": "all-cuda",
+  "placement": "all-cuda",
+  "threshold": 1024,
+  "cells": [
+    {
+      "ttft_ms_p50": 54.896884015761316,
+      "ttft_ms_p99": 55.49552498268895,
+      "ttft_ms_mean": 54.42297799163498,
+      "itl_ms_p50": 3.9908640028443187,
+      "output_tok_per_s": 228.52941669491267,
+      "requests": 3,
+      "target_prompt_tokens": 1024,
+      "concurrency": 1,
+      "wall_s": 1.6807711290020961,
+      "cpu_stream": null,
+      "poller": null
+    }
+  ],
+  "workers": [
+    {
+      "hybrid_layers": 40,
+      "kv_cache": {
+        "num_gpu_blocks": 96,
+        "block_size": 2096,
+        "max_tokens": 201216
+      },
+      "cuda_memory": {
+        "allocated_gib": 25.998467445373535,
+        "reserved_gib": 26.47265625,
+        "free_gib": 3.70672607421875,
+        "total_gib": 31.35833740234375
+      }
+    }
+  ]
+}

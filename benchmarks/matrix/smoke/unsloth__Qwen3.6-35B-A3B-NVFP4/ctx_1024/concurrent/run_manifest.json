@@ -1,0 +1,10 @@
+{
+  "context_tokens": 1024,
+  "finished_at": 1786039153.556356,
+  "metrics_path": "/home/shooting-brake007/srswti/shooting-brake/bench-matrix/smoke/unsloth__Qwen3.6-35B-A3B-NVFP4/ctx_1024/concurrent/vllm_metrics.jsonl",
+  "profile": "concurrent",
+  "return_code": 0,
+  "started_at": 1786038946.3381453,
+  "stderr_path": "/home/shooting-brake007/srswti/shooting-brake/bench-matrix/smoke/unsloth__Qwen3.6-35B-A3B-NVFP4/ctx_1024/concurrent/guidellm_stderr.log",
+  "stdout_path": "/home/shooting-brake007/srswti/shooting-brake/bench-matrix/smoke/unsloth__Qwen3.6-35B-A3B-NVFP4/ctx_1024/concurrent/guidellm_stdout.log"
+}

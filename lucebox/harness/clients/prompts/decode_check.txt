@@ -1,6 +1,0 @@
-Explain what this Python function does. End your answer with OK_DONE.
-
-def clamp(x, lo, hi):
-    if lo > hi:
-        raise ValueError("bad bounds")
-    return min(max(x, lo), hi)

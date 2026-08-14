@@ -1,0 +1,94 @@
+{
+  "chunk_size": 512,
+  "placement": "subset:16:8",
+  "points": [
+    {
+      "prompt_tokens": 1153,
+      "ttft_ms": 548.4681920012614,
+      "ttft_ms_min": 546.9334049994359,
+      "prefill_tok_per_s": 2102.218536671947,
+      "dispatches_per_layer": 3,
+      "target_tokens": 1536
+    },
+    {
+      "prompt_tokens": 3123,
+      "ttft_ms": 1400.6115309991098,
+      "ttft_ms_min": 1400.1484030013671,
+      "prefill_tok_per_s": 2229.740317625576,
+      "dispatches_per_layer": 7,
+      "target_tokens": 4096
+    }
+  ],
+  "workers": [
+    {
+      "hybrid_layers": 40,
+      "routes": {
+        "b70": 0,
+        "cpu": 0,
+        "total": 27392,
+        "b70_share": 0.0,
+        "cpu_share": 0.0,
+        "per_layer_b70": {
+          "0": 0,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0,
+          "8": 0,
+          "9": 0,
+          "10": 0,
+          "11": 0,
+          "12": 0,
+          "13": 0,
+          "14": 0,
+          "15": 0,
+          "16": 0,
+          "17": 0,
+          "18": 0,
+          "19": 0,
+          "20": 0,
+          "21": 0,
+          "22": 0,
+          "23": 0,
+          "24": 0,
+          "25": 0,
+          "26": 0,
+          "27": 0,
+          "28": 0,
+          "29": 0,
+          "30": 0,
+          "31": 0,
+          "32": 0,
+          "33": 0,
+          "34": 0,
+          "35": 0,
+          "36": 0,
+          "37": 0,
+          "38": 0,
+          "39": 0
+        },
+        "per_layer_cpu": {}
+      },
+      "poller": {
+        "dispatches": 1040,
+        "errors": 0,
+        "service_mean_us": 7357.655569230768,
+        "kernel_mean_us": 0.0
+      },
+      "kv_cache": {
+        "num_gpu_blocks": 429,
+        "block_size": 2096,
+        "max_tokens": 899184
+      },
+      "cuda_memory": {
+        "allocated_gib": 26.18390417098999,
+        "reserved_gib": 26.662109375,
+        "free_gib": 3.75555419921875,
+        "total_gib": 31.35833740234375
+      }
+    }
+  ]
+}

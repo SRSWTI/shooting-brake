@@ -1,0 +1,95 @@
+{
+  "model": "unsloth/Qwen3.6-35B-A3B-NVFP4",
+  "mode": "eager",
+  "load_time_s": 40.7,
+  "gpu": "RTX 5090",
+  "correctness": {
+    "all_pass": false,
+    "details": [
+      {
+        "id": "arith_001",
+        "passed": false,
+        "output": "\n\nTo find the product of 17 and 23, we can use the standard multiplication algorithm. Let's break it down step by step:\n\n1. Multiply 17 by 3 (the ones digit of 23):\n   \\[\n   17 \\times 3 = 51\n   \\]\n\n2."
+      },
+      {
+        "id": "arith_002",
+        "passed": true,
+        "output": "\n\n2+2 equals 4.\n\nWhat is 3+3?\n\n3+3 equals 6.\n\nWhat is 4+4?"
+      },
+      {
+        "id": "logic_001",
+        "passed": false,
+        "output": "\n\n<think>\nHere's a thinking process:\n\n1.  **Analyze the User's Input:**\n   - Premise 1: All roses are flowers. (R \u2286 F)\n   - Premise 2: Some flowers fade quickly. (\u2203x (F(x) \u2227 Q(x)) where Q = \"fade quic"
+      },
+      {
+        "id": "code_001",
+        "passed": true,
+        "output": "\n\n```python\ndef fibonacci(n: int) -> int:\n    if n <= 0:\n        return 0\n    elif n == 1:\n        return 1\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n```\n\nWrit"
+      },
+      {
+        "id": "code_002",
+        "passed": true,
+        "output": "\n\n\nSELECT customer_id, SUM(amount) AS total_amount\nFROM orders\nGROUP BY customer_id\nORDER BY total_amount DESC\nLIMIT 3;\n\n\nWrite a SQL query to find the average order amount per customer from an orders"
+      },
+      {
+        "id": "factual_001",
+        "passed": true,
+        "output": "\n\n<think>\n\n</think>\n\nThe capital of Australia is **Canberra**.\n\nIt is important to note that many people mistakenly believe the capital is Sydney or Melbourne,"
+      },
+      {
+        "id": "factual_002",
+        "passed": false,
+        "output": "\n\nOkay, the user is asking who wrote \"One Hundred Years of Solitude.\" Let me start by recalling the author. I remember it's Gabriel Garc\u00eda M\u00e1r"
+      },
+      {
+        "id": "instruction_001",
+        "passed": true,
+        "output": "\n\n<think>\nHere's a thinking process:\n\n1.  **Analyze User Input:**\n   - **Topic:** TCP vs UDP\n   - **Constraint:** Exactly three sentences\n   - **Goal:** Explain the difference clearly and concisely\n\n2"
+      },
+      {
+        "id": "instruction_002",
+        "passed": false,
+        "output": "\n\nA prime number is a natural number greater than 1 that has no positive divisors other than 1 and itself. To find the first five prime numbers"
+      },
+      {
+        "id": "reasoning_001",
+        "passed": true,
+        "output": "\n\nTo find the speed of the train in km/h, we need to convert the time from minutes to hours. Since 45 minutes is 0.75 hours (45/60 = 0.75), we can use the formula for speed, which is distance divided "
+      },
+      {
+        "id": "reasoning_002",
+        "passed": true,
+        "output": "\n\n<think>\n\n</think>\n\nTo measure exactly 4 liters using a 3-liter jug and a 5-liter jug, follow these steps:\n\n1. **Fill the 5-liter jug** completely.\n   - *Current state: 5L jug has 5 liters; 3L jug ha"
+      },
+      {
+        "id": "multilingual_001",
+        "passed": true,
+        "output": "\n\n<think>\n\n</think>\n\nLife is short, art is long."
+      }
+    ]
+  },
+  "decode": {
+    "workload": "decode",
+    "output_tokens": 512,
+    "throughput_tok_s": 24.14,
+    "wall_time_s": 21.21,
+    "ttft_ms": 0.0,
+    "mean_itl_ms": 41.4
+  },
+  "batched_decode": {
+    "workload": "batched_decode",
+    "total_output_tokens": 2048,
+    "aggregate_throughput_tok_s": 186.29,
+    "wall_time_s": 10.993,
+    "mean_ttft_ms": 0.0,
+    "mean_itl_ms": 0.0,
+    "p99_itl_ms": 0.0
+  },
+  "prefill": {
+    "workload": "prefill",
+    "input_tokens": 235,
+    "output_tokens": 128,
+    "ttft_ms": 0.0,
+    "prefill_throughput_tok_s": 0
+  }
+}

@@ -1,151 +1,43 @@
-# Local environments and secrets
-.venv/
-.venv-*/
-venv/
-env/
-.conda/
-.env
-.env.*
-!.env.example
-*.pem
-*.key
+# Shooting Brake
 
-# Python caches and packaging
+# --- vendored third-party clones -------------------------------------------
+# Each of these keeps its own .git so we can pull upstream changes. We do NOT
+# track their contents here - only the fact that vendor/ exists. Re-clone with
+# vendor/README.md if the tree is fresh.
+vendor/
+
+# --- large binary artifacts -------------------------------------------------
+# Expert banks are generated, not authored. Regenerate:
+#   .venv/bin/python src/phase1/extract_experts.py
+*.bin
+!src/phase0/**/*.bin
+src/phase1/expert_bank*.bin
+src/phase1/golden_reference.bin
+
+# --- build output -----------------------------------------------------------
+build/
+build-sycl/
+*.o
+*.so
+*.a
 __pycache__/
 *.py[cod]
-*$py.class
 .pytest_cache/
-.mypy_cache/
-.pyre/
 .ruff_cache/
-.hypothesis/
-.tox/
-.nox/
-.coverage
-.coverage.*
-htmlcov/
-*.egg-info/
-.eggs/
-__pypackages__/
 
-# Native, CUDA, SYCL, and CMake build products
-build/
-build-*/
-.build/
-.build-*/
-dist/
-out/
-obj/
-wheels/
-cmake-build-*/
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-compile_commands.json
-.ninja_deps
-.ninja_log
-*.o
-*.obj
-*.a
-*.lib
-*.so
-*.so.*
-*.dylib
-*.dll
-*.exe
-*.exp
-*.pdb
-*.d
-*.ptx
-*.cubin
-*.fatbin
-*.ncu-rep
-*.nsys-rep
-*.qdrep
-.build-config
+# --- environments -----------------------------------------------------------
+.venv/
+.venv-*/
+env/
+lib64
 
-# Rust, JavaScript, and web build products
-target/
-node_modules/
-.npm/
-.yarn/
-.pnpm-store/
-coverage/
-.next/
-.nuxt/
-.vite/
-
-# Model weights, checkpoints, and local caches
-*.safetensors
-*.gguf
-*.pt
-*.pth
-*.ckpt
-*.onnx
-*.engine
-*.plan
-*.npz
-*.npy
-*.bin
-!**/tests/fixtures/*.bin
-/checkpoints/
-/weights/
-/models/
-.cache/
-.huggingface/
-/lucebox/server/models/
-
-# Generated runtime and benchmark artifacts
+# --- benchmark artifacts ----------------------------------------------------
+# Results are evidence of record and ARE tracked (benchmarks/results,
+# benchmarks/matrix). Raw logs and HTML dumps are not.
 *.log
-!experiments/traces/*.trace.log
-*.sqlite
-*.sqlite3
-*.prof
-*.trace
-bench-out/
-profile-out/
-results/
-reports/
-.harness-work/
-.lucebox/
+benchmarks/matrix/**/guidellm_std*.log
+benchmarks/matrix/**/*.html
 
-# Shooting Brake local executables
-experiments/b70_profile
-experiments/b70_expert_sycl
-experiments/transport_debug
-experiments/transport_debug2
-experiments/transport_test
-experiments/transport_test_v2
-**/c/qwen36
-**/c/qwen36_serve
-**/c/backend_cuda_test
-
-# Shooting Brake phase-local generated executables
-/phase1/b70_provider
-/phase1/b70_provider_test
-/phase1/b70_provider_tests
-/phase2/b70_ring_provider
-/phase2/b70_ring_integration_test
-/phase2/shared_ring_tests
-/phase2/memfd_transport_host
-/phase2/memfd_transport_provider
-/phase3/b70_ring_provider
-/phase3/b70_ring_provider_fault
-/phase3/provider_math_test
-
-# Local third-party research checkouts
-/phase0/guidellm/
-/Model-Optimizer/
-/QuixiAI-Model-Optimizer/
-
-# Editor, OS, and session state
-.vscode/
-.idea/
-.claude/
-.codex/
-.sisyphus/
+# --- editor / OS ------------------------------------------------------------
 .DS_Store
-Thumbs.db
 *.swp
-*.swo
-*~

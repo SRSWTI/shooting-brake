@@ -1,0 +1,64 @@
+{
+  "token_agreement": {
+    "exact": 3,
+    "total": 8,
+    "mean_common_prefix": 18.25,
+    "common_prefix": [
+      32,
+      32,
+      3,
+      9,
+      11,
+      25,
+      32,
+      2
+    ]
+  },
+  "kv_cache_tokens": {
+    "all_cuda": 211696,
+    "hybrid": 888704
+  },
+  "single_stream": {
+    "all_cuda_tok_per_s": 247.9050064510116,
+    "hybrid_tok_per_s": 186.27095925768387,
+    "all_cuda_itl_p50_ms": 3.9927749894559383,
+    "hybrid_itl_p50_ms": 5.339187977369875
+  },
+  "batched": [
+    {
+      "concurrency": 1,
+      "all_cuda_tok_per_s": 241.8568453572162,
+      "hybrid_tok_per_s": 181.8914559141847,
+      "all_cuda_itl_p50_ms": 3.983238013461232,
+      "hybrid_itl_p50_ms": 5.314523004926741
+    },
+    {
+      "concurrency": 4,
+      "all_cuda_tok_per_s": 714.8930432490819,
+      "hybrid_tok_per_s": 505.4328268831999,
+      "all_cuda_itl_p50_ms": 5.214805016294122,
+      "hybrid_itl_p50_ms": 7.489483978133649
+    },
+    {
+      "concurrency": 16,
+      "all_cuda_tok_per_s": 2080.0568629432037,
+      "hybrid_tok_per_s": 919.0215206099693,
+      "all_cuda_itl_p50_ms": 7.062199001666158,
+      "hybrid_itl_p50_ms": 14.450781978666782
+    },
+    {
+      "concurrency": 32,
+      "all_cuda_tok_per_s": 1945.1992835441185,
+      "hybrid_tok_per_s": 1194.1122093013178,
+      "all_cuda_itl_p50_ms": 9.136860026046634,
+      "hybrid_itl_p50_ms": 22.842248959932476
+    },
+    {
+      "concurrency": 64,
+      "all_cuda_tok_per_s": 2310.996543415907,
+      "hybrid_tok_per_s": 1611.8569754972375,
+      "all_cuda_itl_p50_ms": 9.147186006885022,
+      "hybrid_itl_p50_ms": 38.48880302393809
+    }
+  ]
+}

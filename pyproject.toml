@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shooting-brake"
+version = "0.2.0"
+description = "Heterogeneous LLM inference across an RTX 5090 and Intel Arc Pro B70s"
+readme = "README.md"
+requires-python = ">=3.12"
+
+# Runtime deps for the harness, benchmarks and the vLLM plugin.
+#
+# torch and vllm are deliberately NOT pinned to a CUDA-specific build here:
+# the working venv has torch 2.11.0+cu130 installed from NVIDIA's index, and a
+# plain `pip install torch` would silently replace it with a different CUDA
+# build. Install those two first, from the right index, then `pip install -e .`
+# for everything else. See [project.optional-dependencies].
+dependencies = [
+    "numpy>=2.3",
+    "requests>=2.34",
+    "httpx>=0.28",
+    "prometheus-client>=0.26",
+    "safetensors>=0.8",
+    "transformers>=5.14",
+    "huggingface-hub>=1.26",
+    "datasets>=3",
+    "compressed-tensors",
+]
+
+[project.optional-dependencies]
+# The two that must match the local CUDA/XPU stack. Install these yourself:
+#   .venv/bin/pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
+#   .venv/bin/pip install vllm==0.26.0
+engine = ["torch==2.11.0", "vllm==0.26.0"]
+
+# Track A SLO matrix driver.
+bench = ["guidellm==0.7.3"]
+
+dev = ["pytest>=8", "ruff>=0.9"]
+
+# The out-of-tree vLLM plugin. Registered so `VLLM_PLUGINS=shooting_brake_vllm`
+# resolves without a second editable install.
+[project.entry-points."vllm.general_plugins"]
+shooting_brake_vllm = "shooting_brake_vllm:register"
+
+[tool.setuptools.packages.find]
+where = ["src/phase4/src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["vendor", "experiments", ".venv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src/phase5", "src/phase6"]

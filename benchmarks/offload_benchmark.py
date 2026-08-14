@@ -328,7 +328,7 @@ def adapter_source_sha() -> str:
     The harness is included deliberately, not just the adapter: the first
     such invalidation here came from this file, when correctness decoding
     moved from concurrent to sequential between two legs. A digest covering
-    only `phase4/` would have missed it.
+    only `src/phase4/` would have missed it.
     """
     repo = Path(__file__).resolve().parent.parent
     sources = sorted((repo / "phase4" / "src").rglob("*.py"))

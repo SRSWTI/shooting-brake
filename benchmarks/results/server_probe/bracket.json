@@ -1,0 +1,1659 @@
+{
+  "target": "http://127.0.0.1:8000",
+  "model": "unsloth/Qwen3.6-35B-A3B-NVFP4",
+  "max_tokens": 32,
+  "cells": [
+    {
+      "target_prompt_tokens": 1024,
+      "actual_prompt_tokens": 894,
+      "concurrency": 1,
+      "repeat": 0,
+      "wall_s": 0.6994966769998427,
+      "ttft_min_s": 0.511716652996256,
+      "ttft_p50_s": 0.511716652996256,
+      "ttft_max_s": 0.511716652996256,
+      "prefill_tok_per_s": 1747.0605945015843,
+      "us_per_token": 572.3899921658344,
+      "itl_p50_ms": 5.495101002452429,
+      "itl_p99_ms": 11.70560999889858,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 45.747179439434554,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 3
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 3
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 3
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "2.5 GT/s x16",
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 3
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 1024,
+      "actual_prompt_tokens": 894,
+      "concurrency": 1,
+      "repeat": 1,
+      "wall_s": 0.6341843499976676,
+      "ttft_min_s": 0.4407042679958977,
+      "ttft_p50_s": 0.4407042679958977,
+      "ttft_max_s": 0.4407042679958977,
+      "prefill_tok_per_s": 2028.5712322811492,
+      "us_per_token": 492.9577941788565,
+      "itl_p50_ms": 5.482811000547372,
+      "itl_p99_ms": 11.806885006080847,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 50.458514153049805,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 3
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 3
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 3
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 3
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 1024,
+      "actual_prompt_tokens": 894,
+      "concurrency": 4,
+      "repeat": 0,
+      "wall_s": 2.0651609519991325,
+      "ttft_min_s": 1.1179628610043437,
+      "ttft_p50_s": 1.6288587620001636,
+      "ttft_max_s": 1.7971222099949955,
+      "prefill_tok_per_s": 799.6687825540624,
+      "us_per_token": 1250.517741615597,
+      "itl_p50_ms": 7.928428996820003,
+      "itl_p99_ms": 168.47093700198457,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 61.98064120672652,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 9
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 9
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 9
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 9
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 1024,
+      "actual_prompt_tokens": 894,
+      "concurrency": 4,
+      "repeat": 1,
+      "wall_s": 1.999995329999365,
+      "ttft_min_s": 1.1050068589975126,
+      "ttft_p50_s": 1.590377864005859,
+      "ttft_max_s": 1.7413450469975942,
+      "prefill_tok_per_s": 809.0447518226784,
+      "us_per_token": 1236.025569348448,
+      "itl_p50_ms": 7.7283709979383275,
+      "itl_p99_ms": 151.39846999954898,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 64.00014944036927,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 8
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 8
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 8
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 8
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 8192,
+      "actual_prompt_tokens": 7167,
+      "concurrency": 1,
+      "repeat": 0,
+      "wall_s": 3.6473715269967215,
+      "ttft_min_s": 3.464596794998215,
+      "ttft_p50_s": 3.464596794998215,
+      "ttft_max_s": 3.464596794998215,
+      "prefill_tok_per_s": 2068.6389857390873,
+      "us_per_token": 483.4096267612969,
+      "itl_p50_ms": 5.488871000125073,
+      "itl_p99_ms": 8.844415002386086,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 8.773441302358657,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 15
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 15
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 15
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 15
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 8192,
+      "actual_prompt_tokens": 7167,
+      "concurrency": 1,
+      "repeat": 1,
+      "wall_s": 3.779784484002448,
+      "ttft_min_s": 3.5739759049974964,
+      "ttft_p50_s": 3.5739759049974964,
+      "ttft_max_s": 3.5739759049974964,
+      "prefill_tok_per_s": 2005.3296917806222,
+      "us_per_token": 498.6711183197288,
+      "itl_p50_ms": 5.477769998833537,
+      "itl_p99_ms": 14.59529699786799,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 8.466091158222573,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 16
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 16
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 16
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 16
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 8192,
+      "actual_prompt_tokens": 7167,
+      "concurrency": 4,
+      "repeat": 0,
+      "wall_s": 14.00974202699581,
+      "ttft_min_s": 4.725490254997567,
+      "ttft_p50_s": 11.533908165998582,
+      "ttft_max_s": 13.764465391002886,
+      "prefill_tok_per_s": 1516.6680308821608,
+      "us_per_token": 659.3400662756476,
+      "itl_p50_ms": 8.250471997598652,
+      "itl_p99_ms": 993.6506609956268,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 9.1364994268526,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 56
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 56
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 56
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 56
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 8192,
+      "actual_prompt_tokens": 7167,
+      "concurrency": 4,
+      "repeat": 1,
+      "wall_s": 13.59539572000358,
+      "ttft_min_s": 4.440403947002778,
+      "ttft_p50_s": 11.11661296999955,
+      "ttft_max_s": 13.346977977002098,
+      "prefill_tok_per_s": 1614.042345142415,
+      "us_per_token": 619.5624315617104,
+      "itl_p50_ms": 8.081964995653834,
+      "itl_p99_ms": 953.8384979969123,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 9.41495213792617,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 55
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 55
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 55
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 55
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 16384,
+      "actual_prompt_tokens": 14334,
+      "concurrency": 1,
+      "repeat": 0,
+      "wall_s": 7.020718732004752,
+      "ttft_min_s": 6.8403600079982425,
+      "ttft_p50_s": 6.8403600079982425,
+      "ttft_max_s": 6.8403600079982425,
+      "prefill_tok_per_s": 2095.5037429666936,
+      "us_per_token": 477.2122232453079,
+      "itl_p50_ms": 5.587954001384787,
+      "itl_p99_ms": 8.737151001696475,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 4.557937900876776,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 29
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 29
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 29
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 29
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 16384,
+      "actual_prompt_tokens": 14334,
+      "concurrency": 1,
+      "repeat": 1,
+      "wall_s": 6.934588586002064,
+      "ttft_min_s": 6.751211100003275,
+      "ttft_p50_s": 6.751211100003275,
+      "ttft_max_s": 6.751211100003275,
+      "prefill_tok_per_s": 2123.1746108476814,
+      "us_per_token": 470.99282126435565,
+      "itl_p50_ms": 5.582244994002394,
+      "itl_p99_ms": 8.93937899672892,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 4.614549169448085,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 28
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 28
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 28
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 28
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 16384,
+      "actual_prompt_tokens": 14334,
+      "concurrency": 4,
+      "repeat": 0,
+      "wall_s": 27.154351283003052,
+      "ttft_min_s": 7.387530496002,
+      "ttft_p50_s": 21.791782173000684,
+      "ttft_max_s": 26.92273074699915,
+      "prefill_tok_per_s": 1940.29655887814,
+      "us_per_token": 515.385132970699,
+      "itl_p50_ms": 8.405157997913193,
+      "itl_p99_ms": 1025.5187419970753,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 4.713793331535786,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 109
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 109
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 109
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 109
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 16384,
+      "actual_prompt_tokens": 14334,
+      "concurrency": 4,
+      "repeat": 1,
+      "wall_s": 27.188751298999705,
+      "ttft_min_s": 7.444103001995245,
+      "ttft_p50_s": 21.780876324999554,
+      "ttft_max_s": 26.95465715300088,
+      "prefill_tok_per_s": 1925.551002741103,
+      "us_per_token": 519.3318684243927,
+      "itl_p50_ms": 8.43816000269726,
+      "itl_p99_ms": 978.8432240020484,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 4.707829300152862,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 109
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 109
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 109
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 109
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 32768,
+      "actual_prompt_tokens": 28671,
+      "concurrency": 1,
+      "repeat": 0,
+      "wall_s": 13.973578912002267,
+      "ttft_min_s": 13.793874674003746,
+      "ttft_p50_s": 13.793874674003746,
+      "ttft_max_s": 13.793874674003746,
+      "prefill_tok_per_s": 2078.5312812819757,
+      "us_per_token": 481.10894890320344,
+      "itl_p50_ms": 5.595525006356183,
+      "itl_p99_ms": 9.120226997765712,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 2.290036088930258,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 56
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 56
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 56
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 56
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 32768,
+      "actual_prompt_tokens": 28671,
+      "concurrency": 1,
+      "repeat": 1,
+      "wall_s": 13.942175149000832,
+      "ttft_min_s": 13.757071634005115,
+      "ttft_p50_s": 13.757071634005115,
+      "ttft_max_s": 13.757071634005115,
+      "prefill_tok_per_s": 2084.0917865928836,
+      "us_per_token": 479.8253159640443,
+      "itl_p50_ms": 5.728659998567309,
+      "itl_p99_ms": 9.288902998378035,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 2.295194233181993,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 56
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 56
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 56
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 56
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 32768,
+      "actual_prompt_tokens": 28671,
+      "concurrency": 4,
+      "repeat": 0,
+      "wall_s": 55.37490259599872,
+      "ttft_min_s": 14.577562529004354,
+      "ttft_p50_s": 43.066365589998895,
+      "ttft_max_s": 55.16164960699825,
+      "prefill_tok_per_s": 1966.7897114455545,
+      "us_per_token": 508.4427654774634,
+      "itl_p50_ms": 941.3884379973751,
+      "itl_p99_ms": 1042.632490003598,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 2.311516481281342,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 222
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 222
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 222
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 222
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 32768,
+      "actual_prompt_tokens": 28671,
+      "concurrency": 4,
+      "repeat": 1,
+      "wall_s": 54.94313200000033,
+      "ttft_min_s": 14.40355609999824,
+      "ttft_p50_s": 42.62728756100114,
+      "ttft_max_s": 54.72672330500063,
+      "prefill_tok_per_s": 1990.5500975556656,
+      "us_per_token": 502.3736911861547,
+      "itl_p50_ms": 944.295465000323,
+      "itl_p99_ms": 1026.505581998208,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 2.3296815332624146,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 220
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 220
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 220
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 220
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 40960,
+      "actual_prompt_tokens": 35838,
+      "concurrency": 1,
+      "repeat": 0,
+      "wall_s": 17.36333669599844,
+      "ttft_min_s": 17.188324105998618,
+      "ttft_p50_s": 17.188324105998618,
+      "ttft_max_s": 17.188324105998618,
+      "prefill_tok_per_s": 2085.020027490217,
+      "us_per_token": 479.61170003902606,
+      "itl_p50_ms": 5.6898590046330355,
+      "itl_p99_ms": 8.60189599916339,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 1.8429637436780644,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 70
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 70
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 70
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 70
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 40960,
+      "actual_prompt_tokens": 35838,
+      "concurrency": 1,
+      "repeat": 1,
+      "wall_s": 17.563226414000383,
+      "ttft_min_s": 17.369299537000188,
+      "ttft_p50_s": 17.369299537000188,
+      "ttft_max_s": 17.369299537000188,
+      "prefill_tok_per_s": 2063.2956397382445,
+      "us_per_token": 484.6615195323452,
+      "itl_p50_ms": 5.692759004887193,
+      "itl_p99_ms": 11.233330995310098,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 1.821988696478425,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 71
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 71
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 71
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 71
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 40960,
+      "actual_prompt_tokens": 35838,
+      "concurrency": 4,
+      "repeat": 0,
+      "wall_s": 70.55964252700505,
+      "ttft_min_s": 19.222280191999744,
+      "ttft_p50_s": 54.128108612996584,
+      "ttft_max_s": 70.33466318199498,
+      "prefill_tok_per_s": 1864.3990016811674,
+      "us_per_token": 536.3658739884967,
+      "itl_p50_ms": 967.1492660054355,
+      "itl_p99_ms": 1079.9458520050393,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 1.8140681473975864,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 282
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 282
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 282
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 282
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 40960,
+      "actual_prompt_tokens": 35838,
+      "concurrency": 4,
+      "repeat": 1,
+      "wall_s": 69.77368894699612,
+      "ttft_min_s": 18.671131611998135,
+      "ttft_p50_s": 53.614376108002034,
+      "ttft_max_s": 69.56586777100165,
+      "prefill_tok_per_s": 1919.4337410685046,
+      "us_per_token": 520.9869862156966,
+      "itl_p50_ms": 946.9315039968933,
+      "itl_p99_ms": 1128.4467009973014,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 1.8345024024347594,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 279
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 279
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 279
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 279
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 49152,
+      "actual_prompt_tokens": 43008,
+      "concurrency": 1,
+      "repeat": 0,
+      "wall_s": 20.708077142000548,
+      "ttft_min_s": 20.52538930499577,
+      "ttft_p50_s": 20.52538930499577,
+      "ttft_max_s": 20.52538930499577,
+      "prefill_tok_per_s": 2095.356115342089,
+      "us_per_token": 477.2458450752364,
+      "itl_p50_ms": 5.688857992936391,
+      "itl_p99_ms": 8.964960994489957,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 1.5452907472078585,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 83
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 83
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 83
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 83
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 49152,
+      "actual_prompt_tokens": 43008,
+      "concurrency": 1,
+      "repeat": 1,
+      "wall_s": 20.859379195004294,
+      "ttft_min_s": 20.662309860999812,
+      "ttft_p50_s": 20.662309860999812,
+      "ttft_max_s": 20.662309860999812,
+      "prefill_tok_per_s": 2081.4710595923143,
+      "us_per_token": 480.4294517531578,
+      "itl_p50_ms": 5.785642999398988,
+      "itl_p99_ms": 10.489991997019388,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 1.5340820884863067,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 84
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 84
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 84
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 84
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 49152,
+      "actual_prompt_tokens": 43008,
+      "concurrency": 4,
+      "repeat": 0,
+      "wall_s": 82.6128353919994,
+      "ttft_min_s": 21.23154192900256,
+      "ttft_p50_s": 63.39088806400105,
+      "ttft_max_s": 82.41285178199905,
+      "prefill_tok_per_s": 2025.6654059237458,
+      "us_per_token": 493.6649444057515,
+      "itl_p50_ms": 955.8441019980819,
+      "itl_p99_ms": 1029.0752869987045,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 1.5493960398845734,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 331
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 331
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 331
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 331
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 49152,
+      "actual_prompt_tokens": 43008,
+      "concurrency": 4,
+      "repeat": 1,
+      "wall_s": 82.62121020699851,
+      "ttft_min_s": 21.147713587997714,
+      "ttft_p50_s": 63.3908006789934,
+      "ttft_max_s": 82.42082848100108,
+      "prefill_tok_per_s": 2033.6950290649381,
+      "us_per_token": 491.7158107328337,
+      "itl_p50_ms": 955.0726999950712,
+      "itl_p99_ms": 1047.785948998353,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 1.5492389869297465,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 331
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 331
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 331
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 331
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 57344,
+      "actual_prompt_tokens": 50175,
+      "concurrency": 1,
+      "repeat": 0,
+      "wall_s": 24.823140376000083,
+      "ttft_min_s": 24.63855755500117,
+      "ttft_p50_s": 24.63855755500117,
+      "ttft_max_s": 24.63855755500117,
+      "prefill_tok_per_s": 2036.4422668816262,
+      "us_per_token": 491.05246746389975,
+      "itl_p50_ms": 5.856634998053778,
+      "itl_p99_ms": 9.683948999736458,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 1.2891197292240577,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 100
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 100
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 100
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 100
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 57344,
+      "actual_prompt_tokens": 50175,
+      "concurrency": 1,
+      "repeat": 1,
+      "wall_s": 24.785926249998738,
+      "ttft_min_s": 24.609652362996712,
+      "ttft_p50_s": 24.609652362996712,
+      "ttft_max_s": 24.609652362996712,
+      "prefill_tok_per_s": 2038.834163925191,
+      "us_per_token": 490.4763799301786,
+      "itl_p50_ms": 5.745930997363757,
+      "itl_p99_ms": 9.16190799762262,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 1.291055241480097,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 100
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 100
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 100
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 100
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 57344,
+      "actual_prompt_tokens": 50175,
+      "concurrency": 4,
+      "repeat": 0,
+      "wall_s": 97.14217601300334,
+      "ttft_min_s": 25.287149843003135,
+      "ttft_p50_s": 73.79780295400269,
+      "ttft_max_s": 96.95148925599642,
+      "prefill_tok_per_s": 1984.209383481913,
+      "us_per_token": 503.9790701146614,
+      "itl_p50_ms": 957.3660130045027,
+      "itl_p99_ms": 1057.3681440000655,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 1.3176562977430737,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 389
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 389
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 389
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 389
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 57344,
+      "actual_prompt_tokens": 50175,
+      "concurrency": 4,
+      "repeat": 1,
+      "wall_s": 91.87729015699733,
+      "ttft_min_s": 25.441435065004043,
+      "ttft_p50_s": 70.36977879299957,
+      "ttft_max_s": 91.69736670300335,
+      "prefill_tok_per_s": 1972.176485791802,
+      "us_per_token": 507.0540122571807,
+      "itl_p50_ms": 882.7264020001167,
+      "itl_p99_ms": 965.5388609971851,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 1.3931625517173742,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 368
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 368
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 368
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 368
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 65536,
+      "actual_prompt_tokens": 57342,
+      "concurrency": 1,
+      "repeat": 0,
+      "wall_s": 26.034536793005827,
+      "ttft_min_s": 25.86255754800368,
+      "ttft_p50_s": 25.86255754800368,
+      "ttft_max_s": 25.86255754800368,
+      "prefill_tok_per_s": 2217.182113314474,
+      "us_per_token": 451.0229421367179,
+      "itl_p50_ms": 5.843995000759605,
+      "itl_p99_ms": 6.165106999105774,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 1.22913652178351,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 105
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 105
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 105
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 105
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 65536,
+      "actual_prompt_tokens": 57342,
+      "concurrency": 1,
+      "repeat": 1,
+      "wall_s": 27.746917623000627,
+      "ttft_min_s": 27.556119852000847,
+      "ttft_p50_s": 27.556119852000847,
+      "ttft_max_s": 27.556119852000847,
+      "prefill_tok_per_s": 2080.917063359209,
+      "us_per_token": 480.55735502774314,
+      "itl_p50_ms": 5.806783003208693,
+      "itl_p99_ms": 9.720170994114596,
+      "output_tokens_total": 32,
+      "output_tok_per_s": 1.1532812557699674,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 111
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 111
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 111
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 111
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 65536,
+      "actual_prompt_tokens": 57342,
+      "concurrency": 4,
+      "repeat": 0,
+      "wall_s": 105.4345619559972,
+      "ttft_min_s": 26.450537167998846,
+      "ttft_p50_s": 79.57927886999823,
+      "ttft_max_s": 105.24586951899983,
+      "prefill_tok_per_s": 2167.895481131293,
+      "us_per_token": 461.2768506155845,
+      "itl_p50_ms": 906.2898589982069,
+      "itl_p99_ms": 1046.3045090000378,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 1.2140231592503834,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 422
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 422
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 422
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 422
+        }
+      }
+    },
+    {
+      "target_prompt_tokens": 65536,
+      "actual_prompt_tokens": 57342,
+      "concurrency": 4,
+      "repeat": 1,
+      "wall_s": 106.97915128900058,
+      "ttft_min_s": 28.785240321005404,
+      "ttft_p50_s": 82.46734641000512,
+      "ttft_max_s": 106.80321720400389,
+      "prefill_tok_per_s": 1992.062576533569,
+      "us_per_token": 501.99226258249456,
+      "itl_p50_ms": 906.8334909970872,
+      "itl_p99_ms": 997.4695249984507,
+      "output_tokens_total": 128,
+      "output_tok_per_s": 1.1964948165854512,
+      "errors": [],
+      "pcie": {
+        "b70_gpu": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 428
+        },
+        "b70_downstream_port": {
+          "best_speed_gts": 2.5,
+          "best_width": 1,
+          "states_seen": [
+            "2.5 GT/s x1"
+          ],
+          "n_samples": 428
+        },
+        "b70_upstream_port": {
+          "best_speed_gts": 16.0,
+          "best_width": 4,
+          "states_seen": [
+            "16.0 GT/s x4"
+          ],
+          "n_samples": 428
+        },
+        "rtx5090": {
+          "best_speed_gts": 32.0,
+          "best_width": 16,
+          "states_seen": [
+            "32.0 GT/s x16"
+          ],
+          "n_samples": 428
+        }
+      }
+    }
+  ],
+  "pcie_static": {
+    "b70_gpu": {
+      "speed_gts": 2.5,
+      "width": 1
+    },
+    "b70_downstream_port": {
+      "speed_gts": 2.5,
+      "width": 1
+    },
+    "b70_upstream_port": {
+      "speed_gts": 16.0,
+      "width": 4
+    },
+    "rtx5090": {
+      "speed_gts": 32.0,
+      "width": 16
+    }
+  },
+  "wall_s": 1133.883541584015
+}

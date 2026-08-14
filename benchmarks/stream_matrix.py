@@ -157,9 +157,14 @@ async def run_mode(mode: str, args: argparse.Namespace) -> dict:
                 row["wall_s"] = time.monotonic() - t0
                 stats = await worker_stats(engine)
                 if stats:
-                    w = stats[0]
-                    row["cpu_stream"] = w.get("cpu_stream")
-                    row["poller"] = w.get("poller")
+                    # reset_stats() ran before the cell, so this snapshot is a
+                    # per-cell delta for every counter that resets. Keep the
+                    # whole thing rather than two fields: route shares, poller
+                    # service/errors, arena, KV capacity, device memory and
+                    # power are all needed to read a capacity-vs-throughput
+                    # tradeoff, and re-running a multi-hour sweep to recover
+                    # one missing field is not an option.
+                    row["worker"] = stats[0]
                 result["cells"].append(row)
                 print(
                     f"  {mode:9} len={length:<6} conc={conc:<4} "

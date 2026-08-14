@@ -1,0 +1,30 @@
+{
+  "command": [
+    "/home/shooting-brake007/srswti/shooting-brake/.venv/bin/python",
+    "-m",
+    "guidellm",
+    "run",
+    "--backend",
+    "kind=openai_http,target=http://127.0.0.1:8000,model=unsloth/Qwen3.6-35B-A3B-NVFP4,request_format=/v1/chat/completions",
+    "--profile",
+    "kind=concurrent",
+    "--data",
+    "kind=synthetic_text,prompt_tokens=98304,output_tokens=512",
+    "--override",
+    "profile.streams",
+    "1,2,3,4,5,6",
+    "--constraint",
+    "kind=max_duration,seconds=720",
+    "--constraint",
+    "kind=max_requests,count=20",
+    "--constraint",
+    "kind=max_errors,count=5",
+    "--output",
+    "kind=json,path=/home/shooting-brake007/srswti/shooting-brake/bench-matrix/hybrid_131k_c6/unsloth__Qwen3.6-35B-A3B-NVFP4/ctx_98304/concurrent/report.json",
+    "--output",
+    "kind=csv,path=/home/shooting-brake007/srswti/shooting-brake/bench-matrix/hybrid_131k_c6/unsloth__Qwen3.6-35B-A3B-NVFP4/ctx_98304/concurrent/report.csv",
+    "--output",
+    "kind=html,path=/home/shooting-brake007/srswti/shooting-brake/bench-matrix/hybrid_131k_c6/unsloth__Qwen3.6-35B-A3B-NVFP4/ctx_98304/concurrent/report.html",
+    "--disable-console"
+  ]
+}

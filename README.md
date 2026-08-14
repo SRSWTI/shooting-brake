@@ -1,6 +1,467 @@
 # Shooting Brake
 
 ![Shooting Brake](assets/Indecent-Porsche-911-Shooting-Brake-1.webp)
+
+> A shooting brake was never for everyone - it's the rare machine that refuses to
+> sacrifice speed for capacity, built in limited numbers for people who wanted both.
+
+Heterogeneous LLM inference: an **RTX 5090 (32 GB)** and an **Intel Arc Pro B70
+(32 GB)** serving one MoE model together, with the B70 holding and computing a
+slice of the routed experts so the 5090's VRAM can go to KV cache instead of
+dead weight.
+
+**This file is the single source of truth for status, measurements and
+direction.** Everything below the `DEPRECATED` marker is the previous README,
+kept for history; where the two disagree, this half wins.
+
+---
+
+## Status at a glance (2026-08-13)
+
+| | state |
+|---|---|
+| Decode, hybrid | **working and measured** - 74.5% of all-CUDA speed for 2.91x KV |
+| Prefill, dispatch | working, **slow** - ~2,000 tok/s |
+| Prefill, streaming | **working, 2.2-2.8x better** - not yet default |
+| Grouped NVFP4 MoE kernel | built, correct, **1.55x slower**, parked behind a false gate |
+| Biggest unexploited cost | **~123 us/layer of orchestration overhead** (see below) |
+
+The single most important number in this repo right now:
+
+```
+B70 decode dispatch, per layer, measured 186.1 us
+  |- real MoE kernel work ........  52.8 us   (28%)
+  |- transport + launch ..........  10.5 us   ( 6%)
+  '- orchestration overhead ...... ~123   us   (66%)   <- nobody has touched this
+```
+
+---
+
+## Two B70s: the hub architecture (2026-08-13)
+
+A second Arc Pro B70 was added. Topology, measured from sysfs `max_link_speed`
+(hard caps, not idle downtraining) and confirmed by
+`experiments/b70_multi_topology.cpp`:
+
+```
+5090   01:00.0 -> 00:01.1                      Gen5 x16, own CPU lanes
+B70-A  15:00.0 -> 0a:08.0   Gen4 x4   (original)
+B70-B  11:00.0 -> 0a:04.0   Gen3 x4   (newly added)
+                    both -> 09:00.0   Gen4 x4   SHARED uplink
+```
+
+| measurement | result |
+|---|---|
+| B70-A alone, host->device | **6.24 GB/s** |
+| B70-B alone, host->device | **2.91 GB/s** (Gen3 x4 cap) |
+| Both concurrently, aggregate | **4.53 GB/s** |
+| Sum if they were independent | 9.15 GB/s |
+| **B70 <-> B70 via host DRAM** | **1.89 GB/s** |
+| Peer-access capability query | reports YES both directions |
+
+Two facts drive the design. The cards are **asymmetric** (2.1x difference in
+host bandwidth), and running both at once yields **less aggregate bandwidth
+than the fast card alone** - the shared uplink does not merely fail to scale,
+it degrades. Intel VRAM doubled to 64 GB and local Intel bandwidth doubled
+(~608 GB/s per card), but host<->Intel bandwidth did not increase at all.
+
+### Why we do not need a collective library
+
+The in-tree dual-B70 journal (`intel-xpu/vllm-xpu/b70_ai_things/`, a different
+physical box) is Intel-only and dead-ended on exactly this: with two B70s and no
+hub, tensor parallelism requires ~80 all-reduces per token over a ~1.2 GB/s
+link. Measured there: **TP=2 decode 4.18 tok/s against TP=1 at 7.84** - two
+cards slower than one. Its own MoE analysis (JOURNAL.md:2477-2495) prices the
+options per token: TP=2 ~80 all-reduces (~23 ms, ~25 tok/s ceiling), EP=2 ~80
+all-to-alls, **PP=2 one handoff (~0.3 ms)**. It settled on data-parallel
+replicas because collectives were unaffordable.
+
+**Shooting Brake has a hub, so it has no collective.** Each B70 owns a disjoint
+expert set, computes its own partials, and returns them to the 5090 - which
+already performs the combine. That is scatter/gather to a hub, not all-reduce:
+
+```
+5090 (attn, router, KV) --4 KiB--> B70-A experts --partials--> 5090 sums
+                        --4 KiB--> B70-B experts --partials-->
+```
+
+Consequences, each removing a documented failure mode:
+- **B70<->B70 traffic is zero.** The worst number on this machine (1.89 GB/s)
+  is not on the critical path.
+- **No oneCCL**, so none of its 11 failure modes from the journal.
+- **No P2P**, so no IOMMU-off reboot and no `UR_RESULT_ERROR_DEVICE_LOST`
+  wedging the driver (journal: recovery needs `modprobe -r xe; modprobe xe`).
+- **No graph-capture-versus-collective conflict** - the `CCL_ENABLE_SYCL_KERNELS`
+  0-vs-1 dilemma that consumed much of that journal simply does not arise.
+
+### The transport we do need
+
+Not a collective library. A hub-and-spoke activation transport, specified by
+the measurements above:
+
+| requirement | measured justification |
+|---|---|
+| Star topology, 5090 at centre, never B70<->B70 | 1.89 GB/s D2D vs 6.24 GB/s to host |
+| Throughput-weighted, asymmetry-aware split | 6.24 vs 2.91 GB/s - roughly 68/32, never 50/50 |
+| Stagger transfers, do not blast both at once | concurrent aggregate 4.53 < single card 6.24 |
+| Latency-first, not bandwidth-first | payload is 12 KiB/token/layer; the enemy is the 123 us |
+| Cross-runtime doorbell in pinned host memory | CUDA and Level Zero both poll; no CPU thread in the path |
+
+Neither NCCL, oneCCL nor UCCL targets this shape. UCCL in particular is an
+RDMA/NIC library (400G CX-7, RoCE, IBGDA, cross-rack) - there is no network in
+this problem. oneCCL remains the right answer for Intel-to-Intel collectives,
+which this architecture deliberately avoids needing.
+
+### External reference point
+
+Puget Systems ran the same model family (Qwen3.6-35B-A3B MoE, FP16) on **4x B70
+with TP=4** and measured **16.3 tok/s** single-user. Shooting Brake measures
+**188.3 tok/s** on that model with one 5090 and one B70. Different quantization
+(FP16 ~70 GB vs NVFP4 ~25 GB), so not a like-for-like capacity comparison - but
+as evidence that putting a fast hub in front beats pure-Intel tensor
+parallelism, it is decisive.
+
+---
+
+## Hardware reality (measured, not spec sheets)
+
+Gigabyte X870E AORUS MASTER, BIOS F8, Ryzen 9 9950X3D, 59.4 GiB DDR5.
+
+| | 5090 | B70 |
+|---|---|---|
+| VRAM | 31.8 GiB | 31.9 GiB |
+| Attachment | CPU lanes, Gen5 x16 | **chipset**, Gen4 x4 upstream |
+| Measured bandwidth | - | **6.23 GB/s H2D, 6.15 GB/s D2H** |
+| Idle link state | trains down, recovers | trains down to Gen1 x1, recovers under load |
+
+The B70 sits behind an AMD 600-series switch *and* an Intel switch inside the
+card. `sysfs` reports `2.5 GT/s x1` at idle, which is the parked state, not a
+fault - a direct SYCL bandwidth test measures 6.2 GB/s, i.e. **79% of Gen4 x4
+theoretical**. The link is fine. Do not chase it.
+
+**Design consequence:** optimize for *round-trip count*, not bytes. Activations
+are ~12 KiB per token per layer; weights are gigabytes. What crosses the wire is
+already small - what costs you is how *often* you cross.
+
+---
+
+## Measured results
+
+### Long context: prefill dispatch vs streaming
+
+Both arms 10/10 requests, zero truncation, one machine, one code state, same
+script. `subset:16:8`, 512 output tokens, single stream.
+Artifacts: `benchmarks/matrix/longctx/`, writeup in `benchmarks/matrix/longctx/RESULT.md`.
+
+| ctx | TTFT dispatch | TTFT stream | ITL disp | ITL stream | e2e disp | e2e stream | gain |
+|---|---|---|---|---|---|---|---|
+| 65,536 | 30.98 s | **11.21 s** | 6.20 ms | 6.14 ms | 16.5 tok/s | **38.8** | 2.35x |
+| 98,304 | 47.98 s | **18.81 s** | 6.38 ms | 6.33 ms | 11.0 tok/s | **25.4** | 2.30x |
+| 127,000 | 63.62 s | **26.66 s** | 6.49 ms | 6.50 ms | 8.5 tok/s | **18.7** | 2.21x |
+
+Decode ITL is untouched (within 1%) and KV capacity is untouched (842,038 vs
+840,052 tokens) - the streaming mirror lives in **host DRAM**, not 5090 VRAM.
+Costs ~4-6 GiB of system RAM.
+
+```bash
+PREFILL_STREAM=1 bash benchmarks/serve_hybrid.sh
+```
+
+Default is still 0 only because short prompts have not been re-measured with it
+on. Turn it on for long-context serving.
+
+### There is no "65K cliff"
+
+The dispatch arm decays *smoothly* with flat ~2,000 tok/s prefill and reproduces
+the old matrix (16.5 vs 16.5, 11.0 vs 11.3, 8.5 vs 8.7 tok/s). The apparent wall
+in `benchmarks/matrix/hybrid_131k_c6` sat on a **seam**, not a threshold:
+
+- contexts 1K-32K: measured **2026-08-06**, previous motherboard, *before* commit
+  `1fbecdc0` "fix silent prefill route loss"
+- contexts 65K+: measured **2026-08-12/13**, current board, *after* the fix
+- `--skip-existing` welded them into one table
+
+Before that fix, B70-owned routes were **silently dropped during prefill** -
+global expert ids were passed into a surgically compacted weight tensor, so those
+contributions fell out of the sum. Prefill therefore ran at all-CUDA speed
+(20,320 tok/s at 32K) while producing ~0.49 nats/token worse logprobs and
+identical output tokens. Fast because it was wrong.
+
+**The 1K-32K cells are invalid and must be re-run before being quoted.**
+
+### Decode placement trade (Track B, `benchmarks/results/offload_full/`)
+
+| placement | decode tok/s | % all-CUDA | KV tokens | KV x | B70 route share |
+|---|---|---|---|---|---|
+| all-cuda | 252.6 | 100% | 387,760 | 1.00x | - |
+| subset:8:8 | 214.7 | 85.0% | 786,000 | 2.03x | 96.1% |
+| subset:16:8 | 188.3 | 74.5% | 1,129,744 | 2.91x | 96.4% |
+| subset:24:64 | 171.4 | 67.9% | 1,238,736 | 3.19x | 73.0% |
+| split:128 | 159.9 | 63.3% | 1,146,512 | 2.96x | 50.7% |
+
+**Offload the minimum that makes the model fit, never the maximum possible.**
+
+### Dispatch latency decomposition (synthetic, `experiments/b70_dispatch_latency.cpp`)
+
+No model required - decode dispatch is pure latency, so it is reproducible with
+synthetic payloads.
+
+| measurement | result |
+|---|---|
+| Empty kernel, submit only | 1.16 us |
+| Empty kernel, submit + wait | 5.12 us |
+| 12 KiB pinned round trip | 16.84 us |
+| **Full decode dispatch** (H2D 4 KiB + kernel + D2H 8 KiB + wait) | **10.46 us** |
+| Real B70 MoE kernel, M=1, top_k 8 | 52.8 us |
+| **Production dispatch service time** | **186.1 us** |
+
+The SYCL side is fast. The gap between 63 us of real work and 186 us of measured
+service is the **CUDA -> CPU poller -> SYCL -> CPU -> `cuStreamWaitValue32`**
+handoff. That is software you own.
+
+### Grouped NVFP4 MoE kernel - built, correct, parked
+
+`src/QuixiCore-XPU/kernels/moe/nvfp4_moe/variants/xpu_sycl/nvfp4_moe_grouped.sycl.cpp`
+
+Sorts routes by expert, then runs each expert's rows as a DPAS GEMM so a
+dequantized weight tile is reused across 32 rows. Cuts logical weight reads ~28x
+at M=2048. **It is 1.55x slower than the per-route kernel** (91.1 ms vs 58.9 ms).
+
+Stage profiling: `gate_up` 78%, `down` 21%, sort prepass **0.2%**. The sort is
+free; the GEMMs are the problem. `nvfp4_moe_grouped_profitable()` returns false
+unconditionally and a smoke test asserts it stays false.
+
+Details, including the two fp16 bugs found (overflow, and subnormal collapse
+costing 3-18% weight error on realistic block scales):
+`src/QuixiCore-XPU/perf/results/nvfp4_moe_grouped.md`.
+
+---
+
+## Where the time actually goes, and how to attack it
+
+Decode is strictly serial per layer:
+
+```
+attn -> router -> [ B70 round trip ] -> combine -> next layer
+```
+
+The round trip cannot overlap its own layer's work. That is the whole problem:
+~84 us exposed x N layers, on the critical path.
+
+### The objective function nobody writes down
+
+Standard parallelism schemes assume homogeneous devices and a fast interconnect.
+Neither holds here. The constraints invert the usual objective:
+
+1. **Heterogeneous** (~4x speed difference) -> every split should be
+   *throughput-weighted*, never even.
+2. **Slow interconnect, generous local memory** -> minimize **round-trip count**,
+   not bytes.
+3. **Device- and quant-agnostic** -> each device runs its native-best format and
+   a kernel written for it.
+
+**"Minimize round trips, split by throughput ratio, native format per device"**
+is not a configuration of TP/EP/PD. It is a different objective.
+
+### The split is ~4.8x off throughput-optimal
+
+Balanced when both devices finish together:
+
+```
+f_5090 = B_5090 / (B_5090 + B_B70) = 1800 / (1800 + 456) ~ 80%
+```
+
+The 5090 should take ~80% of routes, the B70 ~20%. **`subset:16:8` gives the B70
+96.4%.** That is deliberate - VRAM freed scales with B70 share - but it explains
+the 74.5% decode number exactly. You cannot maximize capacity and speed at once.
+
+### Attack vectors, ranked
+
+| # | attack | targets | effort | status |
+|---|---|---|---|---|
+| 1 | **Instrument the dispatch path** | locate the ~123 us | hours | **not started** |
+| 2 | Sequence-level expert locality | may remove trips entirely | hours | **not started** |
+| 3 | Heterogeneous pipeline parallelism | 48 round trips -> 2 | weeks | not started |
+| 4 | Microbatch pipelining | residual exposure | week | not started |
+| 5 | Expert prefetch by prediction | the serial dependency | weeks | not started |
+| 6 | Multi-queue on B70 | batched throughput | days | not started |
+| - | ~~Persistent kernel + doorbell~~ | **demoted, see below** | - | measured out |
+
+**1. Instrument the dispatch path.** Timestamp every hop in `src/phase1/b70_provider.cpp`
+and the `phase7` poller: CUDA signal -> poller wakeup -> SYCL submit -> kernel ->
+completion -> `cuStreamWaitValue32` release. The synthetic harness proves the
+~123 us is *not* on the SYCL side, so it is in this glue, and it has never been
+measured. Everything else here is guesswork until it is.
+
+**Why the persistent kernel got demoted.** It was ranked #1 on the assumption
+that per-dispatch launch overhead dominated. `experiments/b70_dispatch_latency.cpp`
+measured a *complete* SYCL dispatch - H2D 4 KiB, kernel, D2H 8 KiB, wait - at
+**10.46 us**, with an empty submit+wait at 5.12 us. Removing kernel launch
+entirely can therefore save at most ~5 us of 186 us, about 3%. The B70 and its
+runtime are not slow; the orchestration around them is. A persistent kernel may
+still help later as part of a redesigned handoff, but it is not the lever.
+
+**2. Sequence-level expert locality.** `benchmarks/route_stats.csv` proves there
+is no *global* hot set (147 of 256 experts for 80% coverage). Nobody has checked
+whether **consecutive tokens in one sequence** reuse experts. If they do, an LRU
+cache of expert weights in 5090 VRAM skips the round trip on hits. Hours of work
+against data already on disk, and the answer determines whether #5 matters.
+
+**3. Heterogeneous pipeline parallelism.** The hedge, and it works *whatever*
+the 123 us turns out to be, because it reduces how many times the event happens
+rather than how long it takes. Give the B70 a *contiguous block of layers
+entirely* - weights, attention, and their KV. Activations cross only at stage
+boundaries: **48 round trips become 2**. The B70's VRAM then holds KV for its own
+layers too. Split by throughput (~10 of 48 layers), not evenly. Standard PP
+assumes homogeneous devices; the asymmetric split is the part nobody publishes.
+
+**4. Microbatch pipelining.** While microbatch A waits on the B70 for layer N,
+the 5090 runs layer N for microbatch B. Converts exposed latency into throughput.
+Awkward under CUDA graph capture; you currently get none of it.
+
+**5. Expert prefetch by prediction.** Layer N+1's routing depends on layer N's
+output but is predictable (60-80% in published MoE-offloading work). Start the
+B70 speculatively, fall back on a miss.
+
+**6. Multi-queue.** Concurrent dispatches instead of one serialized queue.
+
+### Format strategy for a bigger model
+
+NVFP4 = 4 bits + E4M3/16 = **4.5 bits/param**. int4 g32 + fp16 scale = 4 + 16/32
+= **4.5 bits/param**. Same size, so per-device formats cost nothing in capacity.
+
+- **Quantize each format from the bf16 source.** Never NVFP4 -> int4; NVFP4 is
+  already ~16-18% relative RMSE against bf16 and stacking compounds it.
+- The B70 has **no FP4 tensor path** - Xe2 DPAS eats fp16/bf16/int8/int4, so FP4
+  is storage-only there and always pays dequant. **int4 is the B70's native
+  shape**, and `llm-scaler/sglang/custom-esimd-kernels/moe_prefill_int4.sycl`
+  already implements the exact grouped, sorted, DPAS-tiled MoE prefill kernel
+  this repo needs - for int4, not NVFP4.
+- `src/phase1/expert_bank.bin` is already a custom artifact. Nothing forces the B70's
+  copy to match the 5090's format.
+
+### Capacity headroom
+
+The whole 35B expert bank is **13.5 GiB**; the B70 has 31.9 GiB. **The card is
+more than half empty.** Budget for a bigger MoE:
+
+| tier | ceiling | params |
+|---|---|---|
+| Experts -> B70 | ~30 GiB | ~57B expert params |
+| Non-expert + KV -> 5090 | ~20 GiB weights + ~11 GiB KV | ~20B non-expert |
+| **Total** | **~50 GiB of weights** | **~70-90B class MoE** |
+
+A 70-90B NVFP4 MoE fits with ~10-15 GiB of KV. That is the regime this machine
+was built for, and **it has never been benchmarked** - every measurement in this
+repo compares against an all-CUDA baseline that fits on one card, where the B70
+is pure overhead.
+
+**Streaming cost scales with offload:** 6.6 GiB -> 1.06 s per forward today;
+~30 GiB -> ~4.8 s. Host DRAM, not VRAM, becomes the binding constraint.
+
+---
+
+## Quick start
+
+```bash
+cd ~/srswti/shooting-brake
+
+# Power-cap the 5090 so runs are comparable (one sudo prompt)
+bash benchmarks/gpu_power.sh cap 575
+
+# Shell 1 - hybrid server. PREFILL_STREAM=1 for long context.
+PREFILL_STREAM=1 bash benchmarks/serve_hybrid.sh
+
+# Shell 2 - SLO matrix against the live server
+CONTEXTS=65536,98304,127000 PROFILES=synchronous \
+MAX_REQUESTS=10 MAX_SECONDS=600 OUTPUT_ROOT=$PWD/bench-matrix/run1 \
+  bash benchmarks/run_matrix.sh
+
+# Track B - in-process offload sweep, no server, needs the GPU exclusively
+bash benchmarks/run_offload_sweep.sh
+```
+
+Kernel microbenchmarks (no model, no server):
+
+```bash
+source /opt/intel/oneapi/setvars.sh --force
+cd QuixiCore-XPU && cmake --build build-sycl -j 16
+./build-sycl/quixicore_xpu_ops_smoke                    # correctness
+./build-sycl/quixicore_xpu_bench --kernel nvfp4_moe --approx split \
+  --dtype f16 --M 2048 --N 256 --rows 8 --K 2048 --dim 512
+
+cd .. && ./experiments/b70_dispatch_latency dispatch 3000   # latency decomposition
+```
+
+### Environment variables that matter
+
+| variable | effect |
+|---|---|
+| `SHOOTING_BRAKE_HYBRID=1` | enable the hybrid MoE path |
+| `SHOOTING_BRAKE_PLACEMENT=subset:16:8` | offload policy |
+| `SHOOTING_BRAKE_VRAM_SURGERY=1` | delete B70-owned experts from 5090 VRAM (this is what buys KV) |
+| `SHOOTING_BRAKE_B70_PREFILL_STREAM=1` | stream weights to 5090 for prefill instead of dispatching tokens |
+| `SHOOTING_BRAKE_B70_STREAM_T` | token threshold above which streaming engages (default 1024) |
+| `SHOOTING_BRAKE_B70_GRAPH=1` | CUDA-graph-safe dispatch path |
+
+---
+
+## Evidence of record
+
+| what | where |
+|---|---|
+| Long-context dispatch vs streaming A/B | `benchmarks/matrix/longctx/RESULT.md` |
+| Grouped kernel measurement | `src/QuixiCore-XPU/perf/results/nvfp4_moe_grouped.md` |
+| Track B offload sweep | `benchmarks/results/offload_full/*.json` |
+| Route statistics | `benchmarks/route_stats.csv` |
+| Chunk-size sweep | `benchmarks/results/chunk/` |
+| Streaming vs dispatch, in-process | `benchmarks/results/stream/` |
+| **Contaminated - do not quote** | `benchmarks/matrix/hybrid_131k_c6/ctx_{1024..32768}` |
+
+---
+
+## Next actions
+
+1. **Make the provider device-selectable** - the single blocking prerequisite
+   for using the second card at all. `select_b70()` (src/phase1/b70_provider.cpp:150-176)
+   picks whichever B70 enumerates first, with no parameter and no env var;
+   `SHOOTING_BRAKE_B70_DEVICE` is a boolean "enable offload", NOT a device index.
+   Two provider instances must each bind to a chosen PCI BDF and a disjoint
+   resident-expert set. Everything else here depends on this.
+2. **Instrument the dispatch path** - hours. Find where the ~123 us/layer goes.
+   The synthetic harness proved it is not the SYCL side (a full chained dispatch
+   is 10.46 us); it has never been measured on the CUDA/poller side. Every other
+   latency idea is guesswork until this exists.
+3. **Sequence-level expert locality analysis** - hours, data already on disk,
+   determines whether the caching and prefetch ideas are worth anything.
+4. **Turn on `PREFILL_STREAM=1` for long-context serving** - already measured,
+   2.2x, no code change. Re-measure short prompts before flipping the default.
+5. **Load a 70B-class NVFP4 MoE** - the only test that measures what this machine
+   is for. Every benchmark to date compares against an all-CUDA baseline that
+   fits on one card, where the B70 can only ever look like overhead.
+6. Re-run the contaminated 1K-32K matrix cells on current code.
+
+Deliberately NOT on this list: enabling P2P. The capability query now reports
+YES on this box (kernel 7.0, IOMMU active) which is the one cell the journal
+never tested - but the hub architecture does not need it, and the journal's
+recorded failure mode is a driver wedge requiring `modprobe -r xe`. Not worth
+the risk for a path the design avoids.
+
+---
+---
+
+# DEPRECATED
+
+Everything below is the previous README, superseded by the sections above and
+kept for history. It predates the 2026-08-13 measurements, still quotes the
+contaminated 1K-32K benchmark cells, and describes the older Z890/285K
+development machine with PCIe 3.0 x4 figures that no longer match this hardware.
+
+---
+
+# Shooting Brake
+
+![Shooting Brake](assets/Indecent-Porsche-911-Shooting-Brake-1.webp)
 ---
 
 A shooting brake was never for everyone — it's the rare machine that refuses to sacrifice speed for capacity, built in limited numbers for people who wanted both. Shooting Brake makes the same bet on silicon, and does it first: the industry's first heterogeneous NVIDIA-Intel inference build. An RTX 5090 leads (32GB GDDR7, ~1.7TB/s bandwidth, full PCIe5.0 x16), handling what NVIDIA does best — fast, compute-bound prefill. Behind it, an Intel Arc Pro B70 brings 32GB of VRAM at roughly a quarter the cost per card, expanding the usable memory pool rather than chasing raw speed.
@@ -13,7 +474,7 @@ But here's the thing: a MoE model only fires **8 of its 256 experts per token**.
 
 **Shooting Brake asks: what if the experts that must be fast live on the NVIDIA GPU, and the rest live on cheap Intel VRAM?**
 
-> **A note on "hot" and "cold."** Throughout this document those words mean *which device owns the expert*, not a claim about how often it fires. An earlier version of this README argued that "a small set of hot experts handles most tokens, and the rest sit idle." We measured that on Qwen3.6-35B and **it is not true**: covering 80% of a layer's routes takes 147 of 256 experts, and the overall skew is a mild 1.39× over uniform. The capacity argument above does not depend on skew — per-token sparsity is enough — and the measured 4.36× KV win never did. See [`docs/progress.md`](docs/progress.md) for the histogram (52.6M tokens, 420.5M routes).
+> **A note on "hot" and "cold."** Throughout this document those words mean *which device owns the expert*, not a claim about how often it fires. An earlier version of this README argued that "a small set of hot experts handles most tokens, and the rest sit idle." Measured on Qwen3.6-35B (52.6M tokens, 420.5M routes, `benchmarks/results/route_stats.csv`), that is **false**: covering 80% of a layer's routes takes 147 of 256 experts, and the top-8 absorb only 9.0% against 3.1% for a random set. But that is the *hot-set* statistic, and for a three-tier system it is the wrong one. The question that decides placement is how cold the **cold set** is, and the same histogram answers it very differently: the coldest 101 of 256 experts take **17.7%** of routes against 39.5% for an index-ordered 101, and the coldest 77 take **11.8%** against 30.1%. Ranking by frequency does not create a magic hot set — it makes the warehouse tier 2.2–2.6× cheaper to feed, at zero VRAM cost. See "The three tiers have different physics" below.
 
 The Intel Arc Pro B70 gives you 32 GB for $900 — **$28 per GB versus $125 per GB for a 5090.** Same capacity class, one-quarter the price. The trade-off: it's a different vendor, different driver stack, and there's no direct peer-to-peer link between NVIDIA and Intel GPUs. Shooting Brake is the software fabric that bridges that gap.
 
@@ -70,7 +531,7 @@ No NCCL. No oneCCL. No RDMA. No cross-vendor P2P (it doesn't exist). Just pinned
 
 ### Why a native C++ poller?
 
-A Python poll loop costs ~55 µs per wakeup under the GIL and starves the engine thread. Shooting Brake moved the host-side watcher into a **native C++ thread** (`phase7/b70_capi.cpp`) that spins on `_mm_pause()` and signals the SYCL queue with sub-microsecond latency. This is what makes the dispatch path compatible with CUDA graph capture — zero Python on the decode path.
+A Python poll loop costs ~55 µs per wakeup under the GIL and starves the engine thread. Shooting Brake moved the host-side watcher into a **native C++ thread** (`src/phase7/b70_capi.cpp`) that spins on `_mm_pause()` and signals the SYCL queue with sub-microsecond latency. This is what makes the dispatch path compatible with CUDA graph capture — zero Python on the decode path.
 
 ### Why mixed precision?
 
@@ -81,6 +542,45 @@ The model runs in two precision regimes, aligned to hardware boundaries:
 
 This isn't a workaround — it's a design choice. NVFP4 halves the weight footprint, letting the B70 hold twice as many experts per gigabyte. The precision split is configured in the placement manifest and is swappable.
 
+### The three tiers have different physics
+
+Each tier pays for an expert in a different currency, and they do not scale the
+same way. This is the property that decides placement, and getting it backwards
+is how the 122B ended up at 8 tok/s.
+
+| tier | what moves per step | amortizes with batch? |
+|---|---|---|
+| CUDA-resident | nothing | — |
+| B70 | activations only, `M x hidden x 2` bytes (~32 KB/layer at M=1) | **yes** |
+| host DRAM | whole expert blobs, 5.06 MiB each (122B) | **no** |
+
+**The B70 is a decode accelerator.** Weights are loaded once and never move, so
+its narrow PCIe 3.0 x4 chipset link is almost irrelevant at decode: measured at
+3.5% of ITL on the 122B and fully hidden under concurrent CUDA compute.
+
+**Host DRAM is a weight source.** Nothing computes there. Blobs move to the 5090
+over PCIe 5.0 x16 and the 5090 does the math. Measured on this box
+(`nvidia-smi` confirms Gen5 x16), gathering 148 scattered 5.06 MiB blobs:
+
+| path | bandwidth | with the SMs saturated |
+|---|---|---|
+| contiguous `cudaMemcpyAsync`, 749 MiB | 50.1 GB/s | — |
+| **scattered `cudaMemcpyAsync`, 148 blobs** | **51.4 GB/s** | 47.1 GB/s (−8%) |
+| kernel reading host-mapped DRAM | 49.5 GB/s | 13.0 GB/s (−74%) |
+
+Scatter costs nothing at 5 MiB granularity — it runs at the contiguous ceiling.
+The copy engines are also the *robust* mechanism: an SM-side gather kernel ties
+them on an idle GPU and collapses under compute pressure, because it spends the
+same SMs the fused MoE kernel needs.
+
+The consequence that matters most: a warehouse fetch is charged per *distinct*
+expert, and each additional token in a batch touches mostly new experts. So DRAM
+bytes grow nearly linearly with batch size while B70 and CUDA costs amortize.
+Throughput contributed by the warehouse is therefore roughly **flat** in batch
+size while ITL grows linearly with it. Host DRAM is what makes a model
+*loadable and interactive*; it is not what makes it *serve*. Placement should
+drive warehouse residency toward zero and let the B70 hold everything it can.
+
 ---
 
 ## What's been built
@@ -89,8 +589,8 @@ This isn't a workaround — it's a design choice. NVFP4 halves the weight footpr
 
 | milestone | what it does |
 |---|---|
-| **B70 NVFP4 provider** (`phase1/`, `phase7/`) | Persistent C++ process that loads 8,192 NVFP4 experts into B70 VRAM and executes them via QuixiCore-XPU kernels. Pipelined SYCL dispatch: issue() enqueues all work, take() waits once. |
-| **vLLM adapter** (`phase4/`) | Out-of-tree plugin (`shooting_brake_vllm`) that hooks into vLLM's MoE layer. Routes experts to CUDA or B70 based on a versioned placement manifest. Transparent to vLLM — the scheduler doesn't know experts left the GPU. |
+| **B70 NVFP4 provider** (`src/phase1/`, `src/phase7/`) | Persistent C++ process that loads 8,192 NVFP4 experts into B70 VRAM and executes them via QuixiCore-XPU kernels. Pipelined SYCL dispatch: issue() enqueues all work, take() waits once. |
+| **vLLM adapter** (`src/phase4/`) | Out-of-tree plugin (`shooting_brake_vllm`) that hooks into vLLM's MoE layer. Routes experts to CUDA or B70 based on a versioned placement manifest. Transparent to vLLM — the scheduler doesn't know experts left the GPU. |
 | **Tier 3 graph-compatible dispatch** | The entire B70 round-trip is native CUDA stream operations, captured by `torch.cuda.graph()`. The 5090's decode graph includes D2H copies, flag signals, and H2D result joins — no graph breaks. |
 | **VRAM surgery** | After weight loading, Shooting Brake frees the 5090 VRAM occupied by offloaded expert weights. This runs as a `process_weights_after_loading` hook, before vLLM sizes the KV cache. Result: **6.4 GB freed → KV cache 4× larger** (211K → 842K tokens). |
 | **Layer-subset placement** | Instead of spreading B70 ownership across all 32 capable layers (more dispatches), the `subset:K:C` policy concentrates it into the last K capable layers. Same capacity, fewer dispatches per token. |
@@ -98,36 +598,40 @@ This isn't a workaround — it's a design choice. NVFP4 halves the weight footpr
 
 ### Benchmark results
 
-Measured on Qwen3.6-35B-A3B-NVFP4, single-stream decode, 512 output tokens:
+Measured on Qwen3.6-35B-A3B-NVFP4, single-stream decode. Every figure below is a
+field in a checked-in artifact; nothing here is projected.
 
-| metric | all-CUDA (baseline) | hybrid (subset:16:8) |
-|---|---|---|
-| decode throughput | 248 tok/s | **170–186 tok/s** |
-| ITL p50 | 4.0 ms | 5.3–5.9 ms |
-| KV cache capacity | 211,696 tokens | **842,038 tokens (4×)** |
-| B70 route share | 0% | 97.3% |
-| dispatch errors | — | **0** |
+| metric | all-CUDA | `split:128` | `subset:16:8` |
+|---|---|---|---|
+| decode throughput | 249.6 tok/s | 157.8 (63%) | **186.4 (75%)** |
+| ITL p50 | 3.98 ms | 6.30 ms | 5.33 ms |
+| KV cache capacity | 211,696 tok | 905,472 (4.28x) | **888,704 tok (4.20x)** |
+| B70 route share | 0% | 50.9% | 97.3% |
+| dispatch errors | — | 0 | 0 |
 
-At **65,536-token context** (where things get interesting):
+Source: `benchmarks/results/sweep1k/{all-cuda,hybrid-split-128,hybrid-subset-16-8}.json`.
 
-| metric | value |
-|---|---|
-| TTFT (prefill) | 2.9 s |
-| prefill throughput | 22,800 tok/s |
-| decode throughput | 170 tok/s |
-| ITL p50 | 5.8 ms |
+Decode throughput is flat across prompt length (`benchmarks/results/smoke2d`:
+75/80/76% of baseline at 363/1543/3123 prompt tokens) — B70 dispatch is a fixed
+per-layer cost that does not grow with sequence length. Once the prompt is
+prefilled, decode is decode.
 
-Decode speed stays flat across context lengths — the B70 dispatch overhead is a fixed per-layer cost that doesn't grow with sequence length. That's the key property: **once the prompt is prefilled, decode is decode, whether the prompt was 1K or 65K tokens.**
+The 25% single-stream gap is the exposed part of B70 service; the 4.2x KV
+capacity is the payoff. Prefill is the weak column, not decode: 2,115 tok/s
+against 26,096 all-CUDA (12.3x) on a 1487-token prompt, and chunking has been
+measured out as the cause. The B70's NVFP4 kernel is built for decode shapes.
 
-The 32% single-stream speed gap versus all-CUDA is the expected cost of offloading. The 4× KV capacity gain is the payoff. At long context and high concurrency — where all-CUDA runs out of KV blocks and starts refusing requests — the hybrid keeps serving.
+Capacity is reported as KV tokens, not free VRAM: vLLM allocates up to
+`gpu_memory_utilization` either way, so free VRAM is near-identical between
+configurations and hides the result entirely.
 
 ### What was hard (and how we solved it)
 
-These are the engineering decisions that made the system work. Details are in the linked docs; the headlines:
+These are the engineering decisions that made the system work:
 
-- **Cross-vendor communication has no P2P.** NVIDIA and Intel GPUs share no address space. The only path is through host DRAM. We built a pinned-memory ring with `cuStreamWriteValue32`/`WaitValue32` flags as the signal mechanism — the lowest-friction cross-vendor handshake available. ([`docs/expert-fabric.md`](docs/expert-fabric.md))
+- **Cross-vendor communication has no P2P.** NVIDIA and Intel GPUs share no address space. The only path is through host DRAM. We built a pinned-memory ring with `cuStreamWriteValue32`/`WaitValue32` flags as the signal mechanism — the lowest-friction cross-vendor handshake available.
 
-- **CUDA graphs can't cross vendor boundaries.** We made the B70 dispatch entirely native CUDA stream ops (D2H copies, flag writes) that get captured inside the 5090's own graph. The host watcher is a native C++ thread, so no Python runs during graph replay. ([`docs/architecture.md`](docs/architecture.md))
+- **CUDA graphs can't cross vendor boundaries.** We made the B70 dispatch entirely native CUDA stream ops (D2H copies, flag writes) that get captured inside the 5090's own graph. The host watcher is a native C++ thread, so no Python runs during graph replay.
 
 - **vLLM sizes KV cache from profiling peak.** If VRAM surgery ran during profiling, the freed weights distorted the KV budget. We moved surgery to the `process_weights_after_loading` hook — before profiling, so vLLM sees the real peak and allocates correctly. This alone gave 4.6× more KV cache.
 
@@ -154,13 +658,14 @@ At single-stream (M=1), payloads are tiny (~32 KB/layer), so PCIe **latency** ma
 
 | change | impact | why |
 |---|---|---|
-| **HEDT platform** (Threadripper Pro / Xeon W, 128+ PCIe 5.0 lanes) | **the single biggest lever** | Moves the B70 from PCH (3.9 GB/s) to direct CPU PCIe 5.0 x16 (64 GB/s) — 16× more bandwidth. Also enables multiple B70s, each on direct lanes. |
-| Frequency-aware placement (software) | **medium** (measured) | Ranks experts by measured route count instead of by index. Today's index-based set absorbs 3.3% of routes vs 3.1% for random; an oracle top-8 absorbs 9.0%, top-64 absorbs 47.4%. Real, but bounded by a mild 1.39× skew — not the "hot expert" jackpot originally assumed. |
-| Stream B70 experts at prefill (software) | **high** | Prefill is 12.3× off all-CUDA and the B70 kernel, not dispatch structure, is the cause. Move weights to the 5090 once per layer instead of computing remotely. |
+| **HEDT platform** (Threadripper Pro / Xeon W, 128+ PCIe 5.0 lanes) | **high, but narrower than it looks** | Moves the B70 from PCH (3.9 GB/s) to direct CPU PCIe 5.0 x16 — 16x more bandwidth. That is decisive for prefill and for any design that stages weights into the B70, and it is what makes 4+ B70s practical. It is *not* the decode lever it was once described as: decode moves only activations to the B70 (~32 KB/layer at M=1), which the chipset link already carries at 3.5% of ITL. |
+| **Frequency-ranked placement** (software) | **the single biggest software lever** | Ranks experts by measured route count instead of by index. The cold tier is what this buys: the coldest 101 experts take 17.7% of routes where an index-ordered 101 take 39.5%, so the warehouse moves 2.2x fewer bytes for the same VRAM. Simulated end to end on the 122B: 58.7 -> 99.0 tok/s. Not implemented — `route_stats.py` measures the histogram and no policy reads it. |
+| **A second B70** (hardware, $900) | **high** | Converts non-amortizing DRAM bytes into amortizing B70 residency. Two B70s hold 250 of 256 experts/layer for the 122B, leaving only the coldest ~6/layer in DRAM. Works on a chipset x4 slot precisely because the B70 moves activations, not weights. |
 | Merged H2D copies (software) | **low** | ~10–20 µs against a measured 146 µs of non-kernel round trip, and subsumed by command-list reuse. |
 | Multi-queue B70 dispatch (software) | **rejected** | Layers are strictly sequential — one dispatch in flight at a time — and copy/kernel/copy within a dispatch is a dependency chain. Nothing to overlap. |
+| Stream B70 experts at prefill (software) | **removed** | Built and measured (18.3x -> 7.7x behind all-CUDA on TTFT), then withdrawn: it needs a DRAM mirror of the entire B70 tier, which is 28.8 GiB at 122B scale on a 61 GiB box that already wants DRAM for the warehouse. Its cost is also per-*forward*, so chunked prefill multiplies it. Known fallback if TTFT ever becomes binding; the price is exactly the B70 tier size in DRAM. |
 | NUMA pinning | **N/A on current machine** | Single socket, single NUMA node — no cross-socket penalty. Would matter on dual-socket EPYC. |
-| Faster DRAM | **negligible** | DRAM (~80 GB/s) is 20× overprovisioned vs the B70's PCIe path (3.9 GB/s). Never the bottleneck. |
+| Faster DRAM | **low, no longer negligible** | Was written off when DRAM only fed the B70's 3.9 GB/s link. The warehouse tier reads DRAM at 51.4 GB/s through PCIe 5, against roughly 80 GB/s of dual-channel DDR5 — 1.6x of headroom, not 20x. |
 
 ---
 
@@ -210,12 +715,31 @@ This requires a HEDT platform (Threadripper Pro / Xeon W) to give each B70 a dir
 
 ### Software optimizations (current hardware)
 
-These squeeze maximum value from the existing 3.9 GB/s B70 path:
+These squeeze maximum value from the current hardware:
 
-1. **Stream B70 experts to the 5090 at prefill** — prefill is 12.3× slower than all-CUDA, and chunking has been measured out as the cause (12.5× fewer dispatches bought 5.1%). The B70's NVFP4 kernel is built for decode shapes. Reuses `ExpertStreamer` from the CPU tier: weights move once per layer, decode is untouched. **Highest-value software item.**
-2. **Calibrated knapsack placement** — the route histogram now exists (`SHOOTING_BRAKE_ROUTE_STATS=1`). Today's index-based CUDA set absorbs 3.3% of routes against 3.1% for random; a frequency-ranked top-8 absorbs 9.0% at identical VRAM cost, and per-layer budgets matter because concentration varies 2× across layers.
-3. **Bound, then maybe build, SYCL command-list reuse** — 51% of the decode round trip is non-kernel, but only 33% of B70 service is exposed (the rest already hides under CUDA compute), and how much of that 51% is recordable is unmeasured. Sweep offloaded-layer count first.
-4. **Raise the prefill chunk default** — measured 5–8%, costs ~50 MiB of pinned staging. Free, small, and moot if item 1 lands.
+1. **Frequency-ranked placement.** The route histogram exists
+   (`SHOOTING_BRAKE_ROUTE_STATS=1`, `benchmarks/results/route_stats.csv`) and
+   nothing reads it. A `FrequencyPolicy` that orders each layer's experts by
+   measured count before slicing the tiers is ~40 lines and costs no VRAM.
+   Simulated on the 122B it moves the warehouse from 39.5% to 17.7% of routes,
+   17.03 -> 10.10 ms/token. **Highest-value software item.**
+2. **Host-DRAM device gather, replacing CPU expert compute.** The host tier
+   currently computes NVFP4 SwiGLU on 6 CPU threads at ~4.3 GB/s effective —
+   18x off the DDR5 it is sitting on, and 98% of 122B decode time. Replace it
+   with a weight fetch: the poller stops calling `moe_forward()` and instead
+   issues `cudaMemcpyAsync` of the touched blobs into a fixed VRAM staging
+   region, and the 5090's fused kernel computes them. RAM is a warehouse, not
+   a workshop. This subsumes `ExpertStreamer`, `_cpu_prefill_partial`, both
+   streaming thresholds, and the CPU NVFP4 kernel.
+3. **Make the arena bit-identical to a VRAM expert slot.** Pre-swizzle block
+   scales and pre-order `w13` at load time. Then the gather is a `memcpy` and
+   its correctness gate is a `memcmp` against a post-hoc-surgery reference —
+   which retires the whole class of silent-wrong-function bug that has cost
+   this project two debugging sessions.
+4. **Bound, then maybe build, SYCL command-list reuse.** 51% of the decode
+   round trip is non-kernel, but only 33% of B70 service is exposed (the rest
+   already hides under CUDA compute), and how much of that 51% is recordable
+   is unmeasured. Sweep offloaded-layer count first.
 
 *Rejected after reading the code:* multi-queue B70 dispatch. Layers are strictly sequential, so exactly one dispatch is ever in flight, and within a dispatch the copy/kernel/copy chain is fully dependent — extra queues have nothing to overlap.
 
@@ -296,43 +820,40 @@ Benchmark details, metrics, and the offload design space are in [`benchmarks/REA
 
 | directory | what's inside |
 |---|---|
-| `phase1/` | Native B70 NVFP4 provider core — expert bank, SYCL kernels, control process |
-| `phase4/` | vLLM out-of-tree adapter — routing, placement, hybrid forward, VRAM surgery |
-| `phase7/` | Native C++ poller and C ABI — `B70Poller` class, `sb_b70_*` functions |
+| `src/phase1/` | Native B70 NVFP4 provider core — expert bank, SYCL kernels, control process |
+| `src/phase4/` | vLLM out-of-tree adapter — routing, placement, hybrid forward, VRAM surgery |
+| `src/phase7/` | Native C++ poller and C ABI — `B70Poller` class, `sb_b70_*` functions |
 | `benchmarks/` | SLO matrix, offload sweep, comparison, GPU power management |
-| `QuixiCore-XPU/` | Primary MIT-licensed B70 NVFP4 MoE kernel source |
+| `src/QuixiCore-XPU/` | Primary MIT-licensed B70 NVFP4 MoE kernel source |
 | `colibri-variants/` | Proven CUDA+B70 reference (oracle/comparator) |
-| `docs/` | Detailed architecture, contracts, evidence, and progress docs |
+| `benchmarks/results/` | Measured run artifacts (JSON/CSV) — the performance evidence of record |
 
 ---
 
 ## Documentation
 
-For deep dives into specific areas:
+The `docs/` tree and `plan.md` were removed on 2026-08-09. They had drifted into
+contradicting each other and the code: one file described the vLLM adapter as
+unimplemented while another recorded Phase 8 complete, several headline figures
+had no matching artifact on disk, and the normative invariants ("the normal path
+never transports expert weights") were written before weight movement became a
+deliberate transport. They will be rewritten from the running system once the
+host-DRAM warehouse lands.
 
-| document | scope |
-|---|---|
-| [`docs/architecture.md`](docs/architecture.md) | Production boundaries, data flow, ownership model |
-| [`docs/progress.md`](docs/progress.md) | Phase-by-phase completion evidence and current status |
-| [`docs/correctness.md`](docs/correctness.md) | Route semantics, numerical agreement, failure recovery |
-| [`docs/hardware.md`](docs/hardware.md) | GPU topology, host-staged transport, hardware qualification |
-| [`docs/expert-fabric.md`](docs/expert-fabric.md) | Provider API, pinned ring protocol, weighted-partial contract |
-| [`docs/placement.md`](docs/placement.md) | Static ownership, layer-subset policy, future frequency-aware routing |
-| [`docs/benchmarking.md`](docs/benchmarking.md) | Measurement rules and methodology |
-| [`docs/memory.md`](docs/memory.md) | CUDA, B70, pinned-host, and KV memory budgets |
-| [`benchmarks/README.md`](benchmarks/README.md) | Benchmark tracks, metrics, offload design space, optimization roadmap |
-| [`docs/research.md`](docs/research.md) | Source provenance, prior art, build-vs-borrow decisions |
+Until then this README and [`benchmarks/README.md`](benchmarks/README.md) are
+the only prose of record, and `benchmarks/results/` is the only evidence of
+record. Recover the old tree with `git checkout 7ca82bb1 -- docs plan.md`.
 
 ---
 
 ## Model
 
-**Qwen3.6-35B-A3B-NVFP4** — 40 layers, 256 experts per layer (top-8 routing), hidden size 2048. 30 GDN (Gated DeltaNet) + 10 full-attention layers. Native context: 262,144 tokens.
+**Qwen3.6-35B-A3B-NVFP4** (validated baseline) — 40 layers, 256 experts per layer (top-8), hidden 2048, `moe_intermediate_size` 512. 30 GDN (Gated DeltaNet) + 10 full-attention layers. Layers 0–31 are NVFP4 and B70-capable; 32–39 are FP8 and CUDA-forced. Native context 262,144 tokens. Expert bank `src/phase1/expert_bank.bin` — 14,495,580,220 bytes, 8,192 NVFP4 experts, 1.69 MiB each.
 
-Expert bank: `phase1/expert_bank.bin` — 13.5 GB, 8,192 NVFP4 experts.
+**Qwen3.5-VL 122B NVFP4** (current target) — 47 layers, 256 experts per layer (top-8), hidden 3072, `moe_intermediate_size` 1024. Experts are 59.5 GiB at 5.06 MiB each; base weights are 10.47 GiB, which requires `language_model_only=True` to stop vLLM loading and profiling the vision tower. It does not fit in 5090 + B70 combined, so the host-DRAM tier is mandatory rather than optional. Loading it also requires pre-emptive VRAM surgery (`SHOOTING_BRAKE_PREEMPTIVE_SURGERY=1`): post-hoc surgery allocates all 256 experts per layer before slicing and OOMs a 32 GiB card first.
 
 ---
 
 ## One-line definition
 
-> Shooting Brake keeps scheduling, attention, and KV cache in upstream vLLM on one RTX 5090, while Intel Arc Pro B70 GPUs execute offloaded routed experts through pinned-memory dispatch — serving models that wouldn't fit on the NVIDIA card alone, at one-quarter the cost per gigabyte.
+> Shooting Brake keeps scheduling, attention, and KV cache in upstream vLLM on one RTX 5090; an Intel Arc Pro B70 executes offloaded routed experts locally through pinned-memory dispatch; and host DDR5 holds the cold tail as a pure weight store, gathered to the 5090 on demand. Models that wouldn't fit on the NVIDIA card alone, at one-quarter the cost per gigabyte.

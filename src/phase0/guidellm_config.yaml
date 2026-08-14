@@ -1,0 +1,40 @@
+# Shooting Brake Phase 0 — guidellm benchmark config
+# Qwen3.6-35B-A3B NVFP4 on RTX 5090, graph mode
+# Usage: source .venv/bin/activate && MAX_JOBS=16 NVCC_THREADS=1 guidellm run -c src/phase0/guidellm_config.yaml
+
+spec:
+  backend:
+    kind: vllm_python
+    model: unsloth/Qwen3.6-35B-A3B-NVFP4
+    request_format: plain
+    stream: true
+    vllm_config:
+      max_model_len: 8192
+      gpu_memory_utilization: 0.9
+      max_num_seqs: 64
+      enforce_eager: false
+      dtype: bfloat16
+      trust_remote_code: true
+
+  profile:
+    kind: throughput
+
+  data:
+    - kind: synthetic_text
+      prompt_tokens: 128
+      output_tokens: 128
+
+  constraints:
+    - kind: max_duration
+      value: 300
+
+  outputs:
+    - kind: console
+    - kind: json
+      path: src/phase0/guidellm_baseline.json
+
+metadata:
+  model: qwen36-35b-a3b-nvfp4
+  mode: graph
+  gpu: rtx5090
+  quant: nvfp4

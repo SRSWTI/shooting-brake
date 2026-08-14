@@ -1,1 +1,0 @@
-python chat.py --model Qwen/Qwen3-4B-Instruct-2507 --max-model-len 32768

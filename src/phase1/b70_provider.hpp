@@ -32,11 +32,16 @@ struct ProviderConfig {
   std::size_t top_k = 8;
   std::uint64_t generation = 1;
   std::vector<std::int32_t> resident_experts;
+  // Empty preserves the legacy first-B70 selection. A decimal string selects
+  // the zero-based B70 index; any other string is matched as a PCI BDF.
+  std::string device_selector;
 };
 
 struct Capability {
   std::uint32_t protocol_version = 1;
   std::string device_name;
+  std::uint32_t device_index = 0;
+  std::string device_pci_bdf;
   std::uint64_t device_memory_total_bytes = 0;
   std::uint64_t device_memory_available_bytes = 0;
   std::string backend;
@@ -49,6 +54,9 @@ struct Capability {
   std::uint32_t health_heartbeat_interval_ms = 1000;
   std::uint32_t num_layers = 0;
   std::uint32_t experts_per_layer = 0;
+  // SBINT401 compact slot -> source expert ID map. Empty for SBEXP001, whose
+  // resident selection remains caller-defined.
+  std::vector<std::int32_t> source_expert_ids;
 };
 
 struct Health {

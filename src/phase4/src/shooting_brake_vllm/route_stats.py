@@ -1,50 +1,64 @@
-"""Per-(layer, expert) routing frequency counters.
+"""Routing frequency counters and an opt-in token-level route trace.
+
+The frequency counter is enabled by ``SHOOTING_BRAKE_ROUTE_STATS=1`` and
+writes the existing aggregate CSV.  The locality trace is independent: set
+``SHOOTING_BRAKE_ROUTE_TRACE=<path>`` to record the global, pre-placement
+``topk_ids`` for every routed row.  An unset or empty trace path is off.
+
+The trace is a packed little-endian binary stream.  Its 24-byte header is
+``<8sHHHHII``:
+
+* magic ``b"SBRTv1\\0\\0"``;
+* format version (``uint16``, currently 1);
+* header size (``uint16``, 24);
+* record size (``uint16``, ``14 + 4 * top_k``);
+* ``top_k`` (``uint16``);
+* number of model layers and experts (two ``uint32`` values).
+
+Records continue to EOF and have layout ``<QHI`` followed by ``top_k``
+little-endian ``int32`` expert ids: monotonic per-layer step index (``uint64``),
+layer index (``uint16``), row index within that forward's batch (``uint32``),
+then the global expert ids.  There is deliberately no placement information:
+routing precedes placement.  A step is one invocation of a given routed-expert
+layer; equal step values across layers describe corresponding forwards.
+
+The tracer allocates a ring of pinned D2H staging tensors and a binary output
+block once, then reuses them.  ``observe`` schedules a non-blocking copy of the
+already-existing ``topk_ids`` and later copies completed staging slots into the
+preallocated output block.  It never allocates per decode step.  A larger than
+previously seen prefill batch causes a one-time high-water-mark resize after
+draining the ring.  Full blocks are written as they fill; the partial tail is
+finalized at clean process exit.
 
 Placement in this project has always been positional: ``LayerSubsetPolicy``
-keeps experts ``0..cuda_per_layer-1`` on CUDA and sends the rest to the B70,
-which is an ordering by expert *index* and not by expert *use*. The README
-argues the opposite -- that a small set of hot experts handles most tokens and
-the rest idle -- but nothing in the codebase has ever counted, so the claim has
-never been checked against this model. This module counts.
-
-Design constraints, in the order they bind:
-
-* **Zero cost when off.** The counter is only constructed when
-  ``SHOOTING_BRAKE_ROUTE_STATS=1``; :func:`get_counter` returns ``None``
-  otherwise and the call site skips entirely. No tensor is allocated, no
-  branch is taken on the hot path beyond one ``is None`` check.
-* **CUDA-graph safe.** Accumulation is a device-side ``scatter_add_`` into a
-  statically shaped tensor. It reads no value back, so it introduces no host
-  sync and nothing that invalidates capture. This matters because the counters
-  are most useful on the graph-captured decode path.
-* **Placement-independent.** Routing is decided by the router on the 5090
-  before anything is dispatched anywhere, so the histogram does not depend on
-  where experts live. One calibration run in all-CUDA mode -- the fastest
-  configuration, and the one with no B70 round trips -- produces a profile
-  valid for every placement and every budget. That is why the hook sits above
-  the all-CUDA passthrough rather than inside the hybrid branch.
-
-The analysis follows the StreamMoE-style summary used by the reference
-implementation in ``experiments--/misc/lucebox``
-(``server/src/common/moe_hybrid_routing_stats.cpp``): per layer, how many
-distinct experts fired, the cumulative share held by the top 10/30/60, and how
-many experts are needed to cover 50/80/90% of activations. ``n80`` is the
-number that matters for placement -- it is the per-layer hot set size that a
-budget has to hold to capture most of the traffic.
+keeps experts ``0..cuda_per_layer-1`` on CUDA and sends the rest to the B70.
+The aggregate histogram measures skew; it cannot answer whether consecutive
+tokens in one row reuse experts.  The binary trace supplies the missing time
+and row dimensions for ``benchmarks/route_locality.py``.
 """
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
+import struct
 from pathlib import Path
 
+import numpy as np
 import torch
 
 logger = logging.getLogger(__name__)
 
 _ENV = "SHOOTING_BRAKE_ROUTE_STATS"
 _OUT_ENV = "SHOOTING_BRAKE_ROUTE_STATS_OUT"
+
+_TRACE_ENV = "SHOOTING_BRAKE_ROUTE_TRACE"
+_TRACE_MAGIC = b"SBRTv1\0\0"
+_TRACE_VERSION = 1
+_TRACE_HEADER = struct.Struct("<8sHHHHII")
+_TRACE_STAGE_SLOTS = 8
+_TRACE_BLOCK_RECORDS = 65_536
 
 
 class RouteCounter:
@@ -118,6 +132,193 @@ class RouteCounter:
                     lines.append(f"{il},{ie},{c}")
         out.write_text("\n".join(lines) + "\n")
         return out
+
+
+class RouteTrace:
+    """Buffered token-level route writer.
+
+    One process-wide instance is shared by all layers.  Each layer owns an
+    independent step counter because layers call the shared writer in order;
+    this keeps corresponding model forwards on the same step number without a
+    host-side synchronization or a separate begin-step hook.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        num_layers: int,
+        num_experts: int,
+        topk_ids: torch.Tensor,
+    ) -> None:
+        if topk_ids.ndim != 2 or topk_ids.shape[1] <= 0:
+            raise ValueError(
+                "topk_ids must have shape [rows, top_k], got "
+                f"{tuple(topk_ids.shape)}"
+            )
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.num_layers = num_layers
+        self.num_experts = num_experts
+        self.top_k = int(topk_ids.shape[1])
+        self.device = topk_ids.device
+        self._record_dtype = np.dtype([
+            ("step", "<u8"),
+            ("layer", "<u2"),
+            ("row", "<u4"),
+            ("experts", "<i4", (self.top_k,)),
+        ])
+        record_size = self._record_dtype.itemsize
+        header = _TRACE_HEADER.pack(
+            _TRACE_MAGIC,
+            _TRACE_VERSION,
+            _TRACE_HEADER.size,
+            record_size,
+            self.top_k,
+            num_layers,
+            num_experts,
+        )
+        self._file = self.path.open("wb")
+        self._file.write(header)
+        self._records = np.empty(
+            _TRACE_BLOCK_RECORDS, dtype=self._record_dtype,
+        )
+        self._record_count = 0
+        self._steps = [0] * num_layers
+        self._closed = False
+        self._next_slot = 0
+        self._is_cuda = self.device.type == "cuda"
+        self._allocate_staging(max(128, int(topk_ids.shape[0])))
+        atexit.register(self.close)
+
+    def _allocate_staging(self, rows: int) -> None:
+        """Allocate or replace the fixed staging ring at a new high water."""
+        self._stage_rows = rows
+        self._staging = [
+            torch.empty(
+                rows,
+                self.top_k,
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=self._is_cuda,
+            )
+            for _ in range(_TRACE_STAGE_SLOTS)
+        ]
+        self._staging_np = [tensor.numpy() for tensor in self._staging]
+        self._events = (
+            [torch.cuda.Event() for _ in range(_TRACE_STAGE_SLOTS)]
+            if self._is_cuda
+            else [None] * _TRACE_STAGE_SLOTS
+        )
+        self._pending = [False] * _TRACE_STAGE_SLOTS
+        self._pending_rows = [0] * _TRACE_STAGE_SLOTS
+        self._pending_steps = [0] * _TRACE_STAGE_SLOTS
+        self._pending_layers = [0] * _TRACE_STAGE_SLOTS
+        self._row_indices = np.arange(rows, dtype="<u4")
+        self._next_slot = 0
+
+    def _write_block(self) -> None:
+        if self._record_count:
+            self._records[:self._record_count].tofile(self._file)
+            self._record_count = 0
+
+    def _append_slot(self, slot: int) -> None:
+        """Memcpy one completed staging slot into output blocks."""
+        rows = self._pending_rows[slot]
+        source = self._staging_np[slot]
+        offset = 0
+        while offset < rows:
+            space = len(self._records) - self._record_count
+            take = min(space, rows - offset)
+            dst = self._records[
+                self._record_count:self._record_count + take
+            ]
+            dst["step"] = self._pending_steps[slot]
+            dst["layer"] = self._pending_layers[slot]
+            dst["row"] = self._row_indices[offset:offset + take]
+            dst["experts"] = source[offset:offset + take]
+            self._record_count += take
+            offset += take
+            if self._record_count == len(self._records):
+                self._write_block()
+        self._pending[slot] = False
+
+    def _finish_slot(self, slot: int, wait: bool) -> bool:
+        if not self._pending[slot]:
+            return True
+        event = self._events[slot]
+        if event is not None:
+            if wait:
+                event.synchronize()
+            elif not event.query():
+                return False
+        self._append_slot(slot)
+        return True
+
+    def _drain_ready(self) -> None:
+        for slot in range(_TRACE_STAGE_SLOTS):
+            self._finish_slot(slot, wait=False)
+
+    def _drain_all(self) -> None:
+        for slot in range(_TRACE_STAGE_SLOTS):
+            self._finish_slot(slot, wait=True)
+
+    def observe(self, layer_idx: int, topk_ids: torch.Tensor) -> None:
+        """Schedule one forward's existing route ids for buffered output."""
+        if self._closed:
+            raise RuntimeError("route trace is already closed")
+        if not 0 <= layer_idx < self.num_layers:
+            raise ValueError(f"layer index {layer_idx} is out of range")
+        if topk_ids.ndim != 2 or int(topk_ids.shape[1]) != self.top_k:
+            raise ValueError(
+                f"topk_ids shape changed from [rows, {self.top_k}] to "
+                f"{tuple(topk_ids.shape)}"
+            )
+        if topk_ids.device != self.device:
+            raise ValueError(
+                f"topk_ids device changed from {self.device} to "
+                f"{topk_ids.device}"
+            )
+
+        rows = int(topk_ids.shape[0])
+        if rows > self._stage_rows:
+            self._drain_all()
+            self._allocate_staging(rows)
+        self._drain_ready()
+        slot = self._next_slot
+        self._finish_slot(slot, wait=True)
+
+        step = self._steps[layer_idx]
+        self._steps[layer_idx] = step + 1
+        self._staging[slot][:rows].copy_(
+            topk_ids, non_blocking=self._is_cuda,
+        )
+        self._pending_rows[slot] = rows
+        self._pending_steps[slot] = step
+        self._pending_layers[slot] = layer_idx
+        self._pending[slot] = True
+        if self._is_cuda:
+            self._events[slot].record(torch.cuda.current_stream(self.device))
+        else:
+            self._append_slot(slot)
+        self._next_slot = (slot + 1) % _TRACE_STAGE_SLOTS
+
+    def flush(self) -> None:
+        """Wait for pending D2H copies and make every record durable."""
+        if self._closed:
+            return
+        self._drain_all()
+        self._write_block()
+        self._file.flush()
+
+    def close(self) -> None:
+        """Finalize the stream; safe to call more than once."""
+        if self._closed:
+            return
+        try:
+            self.flush()
+        finally:
+            self._file.close()
+            self._closed = True
 
 
 def load_csv(path: str | Path) -> tuple[torch.Tensor, int]:
@@ -247,11 +448,17 @@ def format_analysis(summary: dict) -> str:
 # -- process-wide singleton ----------------------------------------------
 
 _counter: RouteCounter | None = None
+_trace: RouteTrace | None = None
 _checked = False
 
 
 def enabled() -> bool:
     return os.environ.get(_ENV) == "1"
+
+
+def trace_enabled() -> bool:
+    """Whether a non-empty route-trace output path was requested."""
+    return bool(os.environ.get(_TRACE_ENV))
 
 
 def get_counter(
@@ -274,6 +481,48 @@ def get_counter(
                 num_layers, num_experts,
             )
     return _counter
+
+
+def get_trace(
+    num_layers: int,
+    num_experts: int,
+    topk_ids: torch.Tensor,
+) -> RouteTrace | None:
+    """The shared trace writer, or ``None`` when its path is unset."""
+    global _trace
+    target = os.environ.get(_TRACE_ENV)
+    if not target:
+        return None
+    if _trace is None:
+        _trace = RouteTrace(target, num_layers, num_experts, topk_ids)
+        logger.warning(
+            "Shooting Brake: token route trace enabled at %s "
+            "(%d layers x %d experts, top-%d)",
+            _trace.path,
+            num_layers,
+            num_experts,
+            _trace.top_k,
+        )
+    elif (
+        _trace.num_layers != num_layers
+        or _trace.num_experts != num_experts
+        or _trace.top_k != int(topk_ids.shape[1])
+    ):
+        raise ValueError("route trace model dimensions changed after creation")
+    return _trace
+
+
+def peek_trace() -> RouteTrace | None:
+    """The route writer if one exists, without creating it."""
+    return _trace
+
+
+def flush_trace() -> Path | None:
+    """Synchronize pending copies and flush the trace's partial output block."""
+    if _trace is None:
+        return None
+    _trace.flush()
+    return _trace.path
 
 
 def peek() -> RouteCounter | None:

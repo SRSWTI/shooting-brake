@@ -8,7 +8,6 @@ CXX = icpx
 QUIXICORE = ../QuixiCore-XPU
 CXXFLAGS = -std=gnu++20 -O2 -g -fPIC -Wall -fsycl $(INCLUDES)
 LDFLAGS = -L$(QUIXICORE)/build-sycl -lquixicore_xpu -lquixicore_xpu_ops
-
 TARGETS = b70_provider_test b70_provider_tests b70_provider
 
 all: $(TARGETS)

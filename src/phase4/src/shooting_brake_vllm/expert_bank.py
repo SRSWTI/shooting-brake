@@ -1,32 +1,24 @@
-"""Read expert records out of the Phase-1 NVFP4 bank.
+"""CPU-only memory-mapped readers for Shooting Brake expert banks.
 
-The host tiers used to source their weights from CUDA VRAM, by
-``index_select``-ing the layer's tensors with global expert ids. That is
-only correct while VRAM still holds every expert, which pre-emptive
-allocation deliberately breaks: the offloaded experts are never created
-there, so the same call either indexes out of bounds or silently addresses
-a different expert. The bank always holds all of them, so it is the source
-that survives.
-
-Reading the bank is also *less* work than reading VRAM, because the bank is
-written from the raw checkpoint while the VRAM tensors have been through
-``prepare_nvfp4_moe_layer_for_fi_or_cutlass``:
-
-* ``w13`` is ``[gate, up]`` here, and ``[up, gate]`` in VRAM on FlashInfer
-  backends — no half-swap is needed.
-* block scales are linear here, and swizzled in VRAM — no un-swizzling.
-
-One thing the bank does *not* carry is the activation global scale, and the
-arena's per-plane scalar has it folded in. See ``global_scale_divisor``.
+The legacy :class:`ExpertBank` reader retains the NVFP4 arena layout used by
+the existing single-B70 datapath.  :class:`Int4ExpertBank` reads the separate
+GPTQ-int4 routed-expert checkpoint format; it exposes packed qweights and fp16
+group scales verbatim and never decodes the dense checkpoint's NVFP4 weights.
 """
 
 from __future__ import annotations
+from bisect import bisect_left
 
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from .int4_bank_format import (
+    MAGIC as INT4_MAGIC,
+    VERSION as INT4_VERSION,
+    read_int4_bank_header,
+)
 
 HEADER_FMT = "<8sIIIIIQQQQ"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -34,6 +26,9 @@ MAGIC = b"SBEXP001"
 
 #: The two fp32 dequant multipliers that close each expert record.
 GSCALE_BYTES = 2 * 4
+
+#: Semantic name paired with the canonical ``int4_bank_format`` ABI.
+INT4_FORMAT = "gptq-int4-group128"
 
 
 @dataclass(frozen=True)
@@ -126,6 +121,150 @@ class ExpertBank:
             down_sf=s2,
             w13_inv_global=w13_inv, w2_inv_global=w2_inv,
         )
+
+
+@dataclass(frozen=True)
+class Int4ExpertPlanes:
+    """One routed expert in checkpoint-native GPTQ layout.
+
+    qweights are int32 ``[K/8, N]`` and scales are fp16 ``[K/128, N]``.
+    Dequantization is ``(nibble - 8) * scale``; qzeros are intentionally not
+    stored because the bank builder verifies every source word is 0x77777777.
+    """
+
+    gate_qweight: np.ndarray
+    gate_scales: np.ndarray
+    up_qweight: np.ndarray
+    up_scales: np.ndarray
+    down_qweight: np.ndarray
+    down_scales: np.ndarray
+
+
+class Int4ExpertBank:
+    """Read-only mapping of an ``SBINT401`` routed-expert bank."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        header = read_int4_bank_header(self.path)
+        self.header = header
+        self.version = INT4_VERSION
+        self.data_offset = header.data_offset
+        self.layers = header.num_layers
+        self.source_layers = header.source_num_layers
+        self.experts_per_layer = header.experts_per_layer
+        self.source_experts_per_layer = header.source_experts_per_layer
+        self.source_expert_ids = header.source_expert_ids
+        self.resident_set_shared_across_layers = (
+            header.resident_set_shared_across_layers
+        )
+        self.hidden = header.hidden
+        self.intermediate = header.moe_intermediate
+        self.group_size = header.group_size
+        self.bits = header.bits
+        self.zero_point = header.zero_point
+        self._planes = tuple(zip(
+            header.plane_offsets, header.plane_sizes, strict=True
+        ))
+        self.expert_bytes = header.expert_stride_bytes
+        self.layer_bytes = header.layer_stride_bytes
+
+        if self.hidden % self.group_size or self.intermediate % self.group_size:
+            raise ValueError(
+                "int4 bank dimensions must be divisible by group_size"
+            )
+        expected_sizes = (
+            self.hidden // 8 * self.intermediate * 4,
+            self.hidden // self.group_size * self.intermediate * 2,
+            self.hidden // 8 * self.intermediate * 4,
+            self.hidden // self.group_size * self.intermediate * 2,
+            self.intermediate // 8 * self.hidden * 4,
+            self.intermediate // self.group_size * self.hidden * 2,
+        )
+        for index, ((offset, size), expected_size) in enumerate(
+            zip(self._planes, expected_sizes, strict=True)
+        ):
+            if size != expected_size:
+                raise ValueError(
+                    f"int4 plane {index} has {size} bytes, expected {expected_size}"
+                )
+            if offset + size > self.expert_bytes:
+                raise ValueError(f"int4 plane {index} exceeds its expert record")
+        expected_file_bytes = self.data_offset + self.layers * self.layer_bytes
+        actual_file_bytes = self.path.stat().st_size
+        if actual_file_bytes != expected_file_bytes:
+            raise ValueError(
+                f"{self.path} is {actual_file_bytes} bytes but its header "
+                f"describes {expected_file_bytes}"
+            )
+        self._map = np.memmap(self.path, dtype=np.uint8, mode="r")
+
+    def close(self) -> None:
+        self._map = None  # type: ignore[assignment]
+
+    def _compact_expert(self, expert: int) -> int:
+        compact = bisect_left(self.source_expert_ids, expert)
+        if (
+            compact == self.experts_per_layer
+            or self.source_expert_ids[compact] != expert
+        ):
+            raise IndexError(f"expert {expert} is not resident in {self.path}")
+        return compact
+
+    def _record(self, layer: int, expert: int) -> np.ndarray:
+        if not 0 <= layer < self.layers:
+            raise IndexError(f"layer {layer} outside bank's 0..{self.layers - 1}")
+        compact = self._compact_expert(expert)
+        start = (
+            self.data_offset
+            + layer * self.layer_bytes
+            + compact * self.expert_bytes
+        )
+        return self._map[start:start + self.expert_bytes]
+
+    @staticmethod
+    def _view(
+        record: np.ndarray,
+        plane: tuple[int, int],
+        dtype: str,
+        shape: tuple[int, int],
+    ) -> np.ndarray:
+        offset, size = plane
+        return record[offset:offset + size].view(dtype).reshape(shape)
+
+    def expert(self, layer: int, expert: int) -> Int4ExpertPlanes:
+        record = self._record(layer, expert)
+        hidden, inter, group = self.hidden, self.intermediate, self.group_size
+        return Int4ExpertPlanes(
+            gate_qweight=self._view(
+                record, self._planes[0], "<i4", (hidden // 8, inter)
+            ),
+            gate_scales=self._view(
+                record, self._planes[1], "<f2", (hidden // group, inter)
+            ),
+            up_qweight=self._view(
+                record, self._planes[2], "<i4", (hidden // 8, inter)
+            ),
+            up_scales=self._view(
+                record, self._planes[3], "<f2", (hidden // group, inter)
+            ),
+            down_qweight=self._view(
+                record, self._planes[4], "<i4", (inter // 8, hidden)
+            ),
+            down_scales=self._view(
+                record, self._planes[5], "<f2", (inter // group, hidden)
+            ),
+        )
+
+
+def open_expert_bank(path: str | Path) -> ExpertBank | Int4ExpertBank:
+    """Open a bank by on-disk magic while preserving legacy reader behavior."""
+    with Path(path).open("rb") as file:
+        magic = file.read(8)
+    if magic == MAGIC:
+        return ExpertBank(path)
+    if magic == INT4_MAGIC:
+        return Int4ExpertBank(path)
+    raise ValueError(f"{path} is not a supported Shooting Brake expert bank")
 
 
 def global_scale_divisor(activation_gscale: float) -> float:

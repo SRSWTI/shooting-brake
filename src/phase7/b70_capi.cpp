@@ -3,6 +3,7 @@
 #include "b70_provider.hpp"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <mutex>
@@ -79,13 +80,36 @@ class B70Poller {
     if (!running_.exchange(false)) return;
     if (thread_.joinable()) thread_.join();
   }
+  void reset() {
+    dispatches_.store(0, std::memory_order_relaxed);
+    rows_.store(0, std::memory_order_relaxed);
+    for (auto& bucket : m_histogram_) {
+      bucket.store(0, std::memory_order_relaxed);
+    }
+    errors_.store(0, std::memory_order_relaxed);
+    service_ns_.store(0, std::memory_order_relaxed);
+    total_ns_.store(0, std::memory_order_relaxed);
+    kernel_ns_.store(0, std::memory_order_relaxed);
+  }
+
 
   uint64_t dispatch_count() const { return dispatches_.load(); }
   uint64_t error_count() const { return errors_.load(); }
+  uint64_t row_count() const { return rows_.load(); }
+  uint64_t m_bucket_count(size_t bucket) const {
+    if (bucket >= m_histogram_.size()) return 0;
+    return m_histogram_[bucket].load();
+  }
   uint64_t service_ns() const { return service_ns_.load(); }
   // Nonzero only under SHOOTING_BRAKE_B70_PROFILE=1; the provider does not
   // timestamp commands otherwise.
   uint64_t kernel_ns() const { return kernel_ns_.load(); }
+  // Nonzero only under SHOOTING_BRAKE_B70_PROFILE=1. This spans the profiled
+  // device queue from the first input copy through the completed output copy.
+  // On Level Zero the endpoint copies can run on engines whose profiling
+  // clocks are not comparable, so this raw span can underflow and must not be
+  // used for decomposition without first establishing a common timebase.
+  uint64_t total_ns() const { return total_ns_.load(); }
 
  private:
   void loop() {
@@ -133,17 +157,26 @@ class B70Poller {
                 std::chrono::steady_clock::now() - t0)
                 .count()));
 
-        // The provider only fills kernel_us on a profiled queue; it is 0
-        // otherwise. Accumulating it here is what makes the round trip
-        // self-describing: service_ns is the whole dispatch, so
-        // service_ns - kernel_ns is submission and synchronisation
-        // overhead, which is the part engineering can remove. Guessing that
-        // split from the outside is how you end up optimising the wrong
-        // half.
+        // The provider only fills these timings on a profiled queue; they
+        // are 0 otherwise. Keeping both makes the dispatch self-describing:
+        // service_ns - total_ns is host-side issue/take work, total_ns -
+        // kernel_ns is device-queue work outside the kernel, and kernel_ns
+        // is the on-device kernel itself. Guessing those splits from the
+        // outside is how you end up optimising the wrong part.
+        if (result.total_us > 0.0) {
+          total_ns_.fetch_add(
+              static_cast<uint64_t>(result.total_us * 1000.0));
+        }
         if (result.kernel_us > 0.0) {
           kernel_ns_.fetch_add(
               static_cast<uint64_t>(result.kernel_us * 1000.0));
         }
+
+        // Dispatch count alone cannot distinguish M=1 decode from a prefill
+        // dispatch that processes hundreds of rows. Keep both the exact row
+        // sum and coarse shape so cumulative snapshots remain interpretable.
+        rows_.fetch_add(M);
+        m_histogram_[m_bucket(M)].fetch_add(1);
 
         // Always release the waiter, even on failure: the CUDA side is
         // parked in cuStreamWaitValue32, which has no timeout.
@@ -154,6 +187,15 @@ class B70Poller {
 
       SB_SPIN_HINT();
     }
+  }
+
+  static size_t m_bucket(uint32_t M) {
+    if (M <= 2) return M - 1;
+    if (M <= 4) return 2;
+    if (M <= 8) return 3;
+    if (M <= 16) return 4;
+    if (M <= 32) return 5;
+    return 6;
   }
 
   // Hidden size of the loaded bank, not a constant. This was 2048 — the
@@ -176,8 +218,11 @@ class B70Poller {
   std::atomic<size_t> layer_count_{0};
   std::atomic<bool> running_{false};
   std::atomic<uint64_t> dispatches_{0};
+  std::atomic<uint64_t> rows_{0};
+  std::array<std::atomic<uint64_t>, 7> m_histogram_{};
   std::atomic<uint64_t> errors_{0};
   std::atomic<uint64_t> service_ns_{0};
+  std::atomic<uint64_t> total_ns_{0};
   std::atomic<uint64_t> kernel_ns_{0};
   std::thread thread_;
 
@@ -248,6 +293,37 @@ int sb_b70_device_memory(sb_b70_provider_t* provider,
   return p->device_memory(free_bytes, total_bytes) ? 0 : -1;
 }
 
+int sb_b70_health(sb_b70_provider_t* provider, sb_b70_health_t* health,
+                  char* last_error, size_t last_error_size) {
+  if (!provider || !health ||
+      (last_error == nullptr && last_error_size != 0)) {
+    return -1;
+  }
+
+  const auto snapshot = reinterpret_cast<B70Provider*>(provider)->health();
+  health->generation = snapshot.generation;
+  health->dispatches = snapshot.dispatches;
+  health->allocations = snapshot.allocations;
+  health->last_error_bytes = snapshot.last_error.size() + 1;
+  health->loaded = snapshot.loaded ? 1u : 0u;
+  health->pending = snapshot.pending ? 1u : 0u;
+  health->stopped = snapshot.stopped ? 1u : 0u;
+  health->reserved = 0;
+
+  if (last_error == nullptr) {
+    return 0;
+  }
+  if (last_error_size == 0) {
+    return -2;
+  }
+
+  const size_t payload =
+      std::min(snapshot.last_error.size(), last_error_size - 1);
+  std::memcpy(last_error, snapshot.last_error.data(), payload);
+  last_error[payload] = '\0';
+  return last_error_size < health->last_error_bytes ? -2 : 0;
+}
+
 sb_b70_poller_t* sb_b70_poll_create(sb_b70_provider_t* provider,
                                     uint64_t generation) {
   if (!provider) return nullptr;
@@ -296,6 +372,11 @@ void sb_b70_poll_stop(sb_b70_poller_t* poller) {
   reinterpret_cast<B70Poller*>(poller)->stop();
 }
 
+void sb_b70_poll_reset(sb_b70_poller_t* poller) {
+  if (!poller) return;
+  reinterpret_cast<B70Poller*>(poller)->reset();
+}
+
 uint64_t sb_b70_poll_dispatch_count(sb_b70_poller_t* poller) {
   if (!poller) return 0;
   return reinterpret_cast<B70Poller*>(poller)->dispatch_count();
@@ -306,9 +387,24 @@ uint64_t sb_b70_poll_error_count(sb_b70_poller_t* poller) {
   return reinterpret_cast<B70Poller*>(poller)->error_count();
 }
 
+uint64_t sb_b70_poll_row_count(sb_b70_poller_t* poller) {
+  if (!poller) return 0;
+  return reinterpret_cast<B70Poller*>(poller)->row_count();
+}
+
+uint64_t sb_b70_poll_m_bucket_count(sb_b70_poller_t* poller, size_t bucket) {
+  if (!poller) return 0;
+  return reinterpret_cast<B70Poller*>(poller)->m_bucket_count(bucket);
+}
+
 uint64_t sb_b70_poll_service_ns(sb_b70_poller_t* poller) {
   if (!poller) return 0;
   return reinterpret_cast<B70Poller*>(poller)->service_ns();
+}
+
+uint64_t sb_b70_poll_total_ns(sb_b70_poller_t* poller) {
+  if (!poller) return 0;
+  return reinterpret_cast<B70Poller*>(poller)->total_ns();
 }
 
 uint64_t sb_b70_poll_kernel_ns(sb_b70_poller_t* poller) {

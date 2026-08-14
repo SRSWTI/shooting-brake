@@ -6,6 +6,14 @@ import os
 
 from .config import phase4_enabled
 
+_force_piecewise_fired = False
+
+
+def force_piecewise_fired() -> bool:
+    """Whether this process actually forced the hybrid graph mode."""
+    return _force_piecewise_fired
+
+
 
 def _patch_force_piecewise() -> None:
     """Force ``CUDAGraphMode.PIECEWISE`` when breakable graphs are active.
@@ -31,6 +39,7 @@ def _patch_force_piecewise() -> None:
     _orig_post_init = VllmConfig.__post_init__
 
     def _patched_post_init(self: VllmConfig) -> None:
+        global _force_piecewise_fired
         _orig_post_init(self)
         if (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -38,6 +47,7 @@ def _patch_force_piecewise() -> None:
             and not self.model_config.enforce_eager
         ):
             self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            _force_piecewise_fired = True
             _logger.info(
                 "Shooting Brake: forced CUDAGraphMode.PIECEWISE for "
                 "breakable hybrid MoE graph capture."
@@ -47,7 +57,7 @@ def _patch_force_piecewise() -> None:
 
 
 def register() -> None:
-    """Register only under the explicit frozen all-CUDA selection."""
+    """Register when a model in the split-checkpoint registry is selected."""
     if not phase4_enabled():
         return
 

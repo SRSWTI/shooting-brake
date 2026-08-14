@@ -18,9 +18,33 @@ from __future__ import annotations
 
 import ctypes
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+
+class _NativeB70Health(ctypes.Structure):
+    _fields_ = [
+        ("generation", ctypes.c_uint64),
+        ("dispatches", ctypes.c_uint64),
+        ("allocations", ctypes.c_uint64),
+        ("last_error_bytes", ctypes.c_uint64),
+        ("loaded", ctypes.c_uint32),
+        ("pending", ctypes.c_uint32),
+        ("stopped", ctypes.c_uint32),
+    ]
+
+
+@dataclass(frozen=True)
+class B70ProviderHealth:
+    generation: int
+    dispatches: int
+    allocations: int
+    loaded: bool
+    pending: bool
+    stopped: bool
+    last_error: str
 
 
 class B70ProviderError(RuntimeError):
@@ -76,6 +100,14 @@ class B70ProviderClient:
             ctypes.POINTER(ctypes.c_size_t),
         ]
 
+        lib.sb_b70_health.restype = ctypes.c_int
+        lib.sb_b70_health.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_NativeB70Health),
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+        ]
+
         lib.sb_b70_shutdown.restype = None
         lib.sb_b70_shutdown.argtypes = [ctypes.c_void_p]
 
@@ -101,16 +133,26 @@ class B70ProviderClient:
 
         lib.sb_b70_poll_stop.restype = None
         lib.sb_b70_poll_stop.argtypes = [ctypes.c_void_p]
+        lib.sb_b70_poll_reset.restype = None
+        lib.sb_b70_poll_reset.argtypes = [ctypes.c_void_p]
+
 
         for counter in (
             "sb_b70_poll_dispatch_count",
+            "sb_b70_poll_row_count",
             "sb_b70_poll_error_count",
             "sb_b70_poll_service_ns",
+            "sb_b70_poll_total_ns",
             "sb_b70_poll_kernel_ns",
         ):
             fn = getattr(lib, counter)
             fn.restype = ctypes.c_uint64
             fn.argtypes = [ctypes.c_void_p]
+
+        lib.sb_b70_poll_m_bucket_count.restype = ctypes.c_uint64
+        lib.sb_b70_poll_m_bucket_count.argtypes = [
+            ctypes.c_void_p, ctypes.c_size_t,
+        ]
 
         lib.sb_b70_poll_destroy.restype = None
         lib.sb_b70_poll_destroy.argtypes = [ctypes.c_void_p]
@@ -220,8 +262,8 @@ class B70ProviderClient:
         to collect the result once the kernel is done.
 
         Args:
-            layer: NVFP4 layer index (0-31).
-            hidden_fp16: [M, 2048] float16 (numpy), row-major, contiguous.
+            layer: Absolute routed-expert layer index in the loaded bank.
+            hidden_fp16: [M, bank.hidden_size] float16, row-major contiguous.
             ids: [M, topk] int32 — compact B70 slot indices, -1 to skip.
             weights: [M, topk] float32 — original routing weights.
             generation: Placement generation id.
@@ -279,12 +321,11 @@ class B70ProviderClient:
             sequence: Sequence number returned by :meth:`issue`.
             M: Number of token rows in the dispatch.
             generation: Placement generation id.
-            output: Optional pre-allocated [M, 2048] float32 buffer to write
-                into (e.g. a pinned-memory numpy view).  If ``None`` a fresh
-                array is allocated.
+            output: Optional pre-allocated [M, bank.hidden_size] float32 buffer.
+                If ``None``, a fresh array is allocated.
 
         Returns:
-            [M, 2048] float32 — the routing-weighted B70 partial per token.
+            [M, bank.hidden_size] routing-weighted B70 partial per token.
         """
         if not self._loaded or not self._handle:
             raise B70ProviderError("provider not loaded")
@@ -322,6 +363,42 @@ class B70ProviderClient:
         seq = self.issue(layer, hidden_fp16, ids, weights, generation)
         M = np.ascontiguousarray(hidden_fp16, dtype=np.float16).shape[0]
         return self.take(seq, M, generation)
+
+    @property
+    def health(self) -> B70ProviderHealth:
+        """Snapshot provider-side dispatch state and its last error."""
+        if not self._handle:
+            raise B70ProviderError("provider not created")
+        native = _NativeB70Health()
+        status = self._lib.sb_b70_health(
+            self._handle, ctypes.byref(native), None, ctypes.c_size_t(0)
+        )
+        if status != 0:
+            raise B70ProviderError(
+                f"sb_b70_health size query failed with status {status}"
+            )
+        error_buffer = ctypes.create_string_buffer(
+            max(int(native.last_error_bytes), 1)
+        )
+        status = self._lib.sb_b70_health(
+            self._handle,
+            ctypes.byref(native),
+            ctypes.cast(error_buffer, ctypes.c_void_p),
+            ctypes.c_size_t(len(error_buffer)),
+        )
+        if status != 0:
+            raise B70ProviderError(
+                f"sb_b70_health failed with status {status}"
+            )
+        return B70ProviderHealth(
+            generation=int(native.generation),
+            dispatches=int(native.dispatches),
+            allocations=int(native.allocations),
+            loaded=bool(native.loaded),
+            pending=bool(native.pending),
+            stopped=bool(native.stopped),
+            last_error=error_buffer.value.decode("utf-8", errors="replace"),
+        )
 
     # -- teardown --------------------------------------------------------
 

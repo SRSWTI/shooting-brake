@@ -371,6 +371,8 @@ void test_loaded_capability_and_health(B70Provider& provider,
           "capability: num_layers is not 32");
   require(capability.experts_per_layer == kExpertsPerLayer,
           "capability: experts_per_layer is not 256");
+  require(capability.source_expert_ids.empty(),
+          "capability: SBEXP001 source_expert_ids is not empty");
 
   const auto health = provider.health();
   require(health.loaded, "health after load: loaded is false");

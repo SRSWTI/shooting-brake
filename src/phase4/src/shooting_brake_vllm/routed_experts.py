@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 from typing import Any
 
 import numpy as np
 import torch
-from vllm.config import get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.logger import init_logger
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+)
 try:
     from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 except ImportError:
@@ -20,9 +25,14 @@ from . import route_stats
 from .config import bank_path as _b70_bank_path
 from .config import require_qualified_config
 from .partition import (
+    DispatchBufferGeometry,
     RoutePartition,
+    build_cuda_expert_maps,
     build_device_map,
+    compact_cuda_routes,
     partition_routes,
+    validate_dispatch_buffer_shapes,
+    validate_cuda_dummy_slot_placement,
     validate_partition,
 )
 from .placement import Device, Placement, build_for_qualified
@@ -46,6 +56,158 @@ def b70_prefill_stream_enabled() -> bool:
     exactly.
     """
     return os.environ.get("SHOOTING_BRAKE_B70_PREFILL_STREAM") == "1"
+
+
+def _validate_dispatch_capture_mode(
+    *, graph_mode: bool, stream_capturing: bool,
+) -> None:
+    """Reject host dispatch before it performs work inside stream capture."""
+    if stream_capturing and not graph_mode:
+        raise RuntimeError(
+            "synchronous B70 dispatch cannot run during CUDA graph capture; "
+            "construct the synchronous reference with enforce_eager=True, "
+            "or opt into the poller path with SHOOTING_BRAKE_B70_GRAPH=1"
+        )
+
+
+_EXPECTED_ARMS = {
+    "doorbell",
+    "breakable",
+    "full-break-reference",
+    "reference",
+}
+
+
+def _validate_expected_arm_configuration(
+    *,
+    expected_arm: str,
+    graph_mode: bool,
+    breakable_enabled: bool,
+    enforce_eager: bool,
+    force_piecewise_fired: bool,
+    cudagraph_mode: CUDAGraphMode,
+) -> None:
+    """Fail before timing when benchmark-arm configuration is ambiguous."""
+    if expected_arm not in _EXPECTED_ARMS:
+        raise RuntimeError(
+            f"unknown SHOOTING_BRAKE_EXPECT_ARM={expected_arm!r}; "
+            f"expected one of {sorted(_EXPECTED_ARMS)}"
+        )
+    expected = {
+        "doorbell": (True, False, False, False),
+        "breakable": (False, True, False, True),
+        "full-break-reference": (True, True, False, True),
+        "reference": (False, False, True, False),
+    }[expected_arm]
+    actual = (
+        graph_mode,
+        breakable_enabled,
+        enforce_eager,
+        force_piecewise_fired,
+    )
+    if actual != expected:
+        labels = (
+            "graph_mode",
+            "breakable_enabled",
+            "enforce_eager",
+            "force_piecewise_fired",
+        )
+        expected_detail = ", ".join(
+            f"{label}={want!r}"
+            for label, want in zip(labels, expected)
+        )
+        resolved_detail = ", ".join(
+            f"{label}={got!r}"
+            for label, got in zip(labels, actual)
+        )
+        raise RuntimeError(
+            f"{expected_arm} benchmark arm configuration mismatch: "
+            f"expected [{expected_detail}]; resolved [{resolved_detail}]; "
+            f"cudagraph_mode={cudagraph_mode.name}"
+        )
+    if expected_arm == "doorbell":
+        if (
+            cudagraph_mode is CUDAGraphMode.NONE
+            or not cudagraph_mode.has_full_cudagraphs()
+        ):
+            raise RuntimeError(
+                "doorbell benchmark arm requires CUDA graphs with a FULL "
+                f"decode mode, got {cudagraph_mode.name}"
+            )
+    elif expected_arm in {"breakable", "full-break-reference"}:
+        if cudagraph_mode is not CUDAGraphMode.PIECEWISE:
+            raise RuntimeError(
+                f"{expected_arm} benchmark arm requires forced PIECEWISE, "
+                f"got {cudagraph_mode.name}"
+            )
+    elif cudagraph_mode is not CUDAGraphMode.NONE:
+        raise RuntimeError(
+            "reference benchmark arm requires cudagraph mode NONE, "
+            f"got {cudagraph_mode.name}"
+        )
+
+
+def _classify_expected_arm_runtime(
+    *,
+    expected_arm: str,
+    graph_mode: bool,
+    runtime_mode: CUDAGraphMode,
+    stream_capturing: bool,
+) -> str | None:
+    """Name and validate the branch exercised by one graph descriptor."""
+    if expected_arm != "reference" and runtime_mode is CUDAGraphMode.NONE:
+        # Profiling/warmup precedes graph capture and is not a timed graph arm.
+        return None
+    if expected_arm == "doorbell":
+        if runtime_mode not in {
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.PIECEWISE,
+        }:
+            raise RuntimeError(
+                f"doorbell arm reached unexpected runtime mode "
+                f"{runtime_mode.name}"
+            )
+        if not graph_mode or not stream_capturing:
+            raise RuntimeError(
+                "doorbell arm did not take doorbell-in-capture branch: "
+                f"graph_mode={graph_mode} stream_capturing={stream_capturing}"
+            )
+        return "doorbell-in-capture"
+    if expected_arm == "breakable":
+        if (
+            runtime_mode is not CUDAGraphMode.PIECEWISE
+            or graph_mode
+            or stream_capturing
+        ):
+            raise RuntimeError(
+                "breakable arm did not take the eager-break branch: "
+                f"runtime_mode={runtime_mode.name} graph_mode={graph_mode} "
+                f"stream_capturing={stream_capturing}"
+            )
+        return "eager-break"
+    if expected_arm == "full-break-reference":
+        if (
+            runtime_mode is not CUDAGraphMode.PIECEWISE
+            or not graph_mode
+            or stream_capturing
+        ):
+            raise RuntimeError(
+                "full-break reference did not take the doorbell eager gap: "
+                f"runtime_mode={runtime_mode.name} graph_mode={graph_mode} "
+                f"stream_capturing={stream_capturing}"
+            )
+        return "doorbell-eager-break"
+    if (
+        runtime_mode is not CUDAGraphMode.NONE
+        or graph_mode
+        or stream_capturing
+    ):
+        raise RuntimeError(
+            "reference arm did not take synchronous Python branch: "
+            f"runtime_mode={runtime_mode.name} graph_mode={graph_mode} "
+            f"stream_capturing={stream_capturing}"
+        )
+    return "synchronous-python"
 
 
 def preemptive_surgery_enabled() -> bool:
@@ -108,20 +270,51 @@ def b70_stream_threshold() -> int:
     )
 
 def _build_b70_slot_map(placement: Placement) -> np.ndarray:
-    """[num_experts] int32: B70 compact slot per global expert, -1 for CUDA.
+    """Return the checked global→compact map for B70 device zero.
 
-    Every B70-active layer offloads the same expert ids, so one map
-    serves them all. Layer 0 is not necessarily one of them — a subset
-    policy may leave it entirely on CUDA — so read from the first layer
-    that actually owns B70 experts.
+    Step 1 deliberately uses one B70.  Placement already represents multiple
+    remote devices, but dispatch does not until the asynchronous multi-device
+    step.  Refuse such a placement here instead of collapsing device-local
+    slots from two cards into one plausible-looking map.
     """
+    indices = placement.remote_device_indices()
+    if indices not in ((), (0,)):
+        raise RuntimeError(
+            "B70 dispatch currently supports exactly device 0; placement "
+            f"assigns remote device indices {indices}"
+        )
+
     slot_map = np.full(placement.num_experts, -1, dtype=np.int32)
     active = placement.b70_active_layers()
     if not active:
         return slot_map
-    for expert_id, owner in enumerate(placement.owners[active[0]]):
+
+    reference_layer = active[0]
+    reference_ids = placement.b70_expert_ids(reference_layer)
+    for layer in active[1:]:
+        ids = placement.b70_expert_ids(layer)
+        if ids != reference_ids:
+            raise RuntimeError(
+                "one shared B70 bank requires the same resident expert IDs "
+                f"on every active layer; layer {reference_layer} has "
+                f"{reference_ids[:4]}...{reference_ids[-4:]}, layer {layer} "
+                f"has {ids[:4]}...{ids[-4:]}"
+            )
+
+    for expert_id, owner in enumerate(placement.owners[reference_layer]):
         if owner.device is Device.B70:
+            if owner.device_index != 0:
+                raise RuntimeError(
+                    f"expert {expert_id} targets unsupported B70 device "
+                    f"{owner.device_index}"
+                )
             slot_map[expert_id] = owner.slot
+
+    compact = slot_map[slot_map >= 0]
+    if not np.array_equal(
+        np.sort(compact), np.arange(len(compact), dtype=np.int32),
+    ):
+        raise RuntimeError("B70 compact slots are not dense from zero")
     return slot_map
 
 
@@ -214,6 +407,18 @@ def _reject_unsupported_preemptive_tiers(placement: Placement) -> None:
     it the tier would load nothing and the routes it owns would contribute
     zero, which is plausible tokens rather than an error.
     """
+    offloaded = placement.b70_count() + placement.cpu_count()
+    if offloaded and os.environ.get("SHOOTING_BRAKE_HYBRID") != "1":
+        raise RuntimeError(
+            "SHOOTING_BRAKE_PREEMPTIVE_SURGERY=1 with offloaded experts "
+            "requires SHOOTING_BRAKE_HYBRID=1; otherwise compacted routes "
+            "would never receive their remote partial"
+        )
+    if offloaded and os.environ.get("SHOOTING_BRAKE_B70_DEVICE") != "1":
+        raise RuntimeError(
+            "SHOOTING_BRAKE_PREEMPTIVE_SURGERY=1 with offloaded experts "
+            "requires SHOOTING_BRAKE_B70_DEVICE=1"
+        )
     if placement.cpu_count() == 0 and not b70_prefill_stream_enabled():
         return
     from .config import read_bank_header
@@ -247,6 +452,20 @@ def _preemptive_cuda_ids(layer: Any) -> tuple[int, ...] | None:
 
 
 _ALLOC_HOOK_ATTR = "_shooting_brake_alloc_hook"
+_PREEMPTIVE_METHOD_CANDIDATES = (
+    (
+        "vllm.model_executor.layers.quantization.compressed_tensors."
+        "compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4",
+        "CompressedTensorsW4A4Nvfp4MoEMethod",
+    ),
+    (
+        "vllm.model_executor.layers.quantization.modelopt",
+        "ModelOptNvFp4FusedMoE",
+    ),
+)
+_preemptive_patched_methods: tuple[str, ...] = ()
+_preemptive_alloc_invocations: dict[int, tuple[str, str]] = {}
+_preemptive_validation_logged = False
 
 
 def install_preemptive_alloc_hook() -> None:
@@ -258,88 +477,229 @@ def install_preemptive_alloc_hook() -> None:
     is already set at that point, which is what makes the placement lookup
     possible this early.
 
-    Two param families need opposite treatment, and conflating them
-    corrupts the load silently:
+    Both qualified NVFP4 loaders are covered. vLLM 0.26 used the
+    compressed-tensors method; vLLM 0.27 routes this checkpoint through
+    ``ModelOptNvFp4FusedMoE``. Missing either class silently restores full
+    180-expert allocation and OOMs before post-load surgery can run.
 
-    * weights and per-block scales are indexed by *local* expert id, and
-      vLLM's loader returns early for ids the expert map marks ``-1``;
-    * the NVFP4 input global scales are indexed by *global* id whenever the
-      backend sets ``use_global_sf`` (every FlashInfer backend, including
-      ours), because the loader deliberately bypasses the ``-1`` skip for
-      them. Sized locally they would index out of bounds, so they stay
-      global — and stay that way. The same ``use_global_sf`` predicate
-      makes the consumer reduce them with a whole-tensor ``.max()`` before
-      expanding the scalar to the compact expert count, so their length
-      determines the activation scale's value, not its width. Compacting
-      them would silently tighten that scale relative to the stock path.
+    The original method still owns auxiliary tensor semantics. In particular,
+    ModelOpt receives the unchanged ``global_num_experts`` keyword and may
+    retain global-width activation scales while allocating expert weights at
+    the compact CUDA count.
     """
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa: E501
-        CompressedTensorsW4A4Nvfp4MoEMethod as _Method,
-    )
-
-    if getattr(_Method, _ALLOC_HOOK_ATTR, False):
-        return
-    original = _Method.create_weights
-
-    def create_weights(
-        self: Any,
-        layer: Any,
-        num_experts: int,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        cuda_ids = (
-            _preemptive_cuda_ids(layer)
-            if isinstance(layer, HybridRoutedExperts)
-            else None
+    global _preemptive_patched_methods, _preemptive_validation_logged
+    methods: list[type[Any]] = []
+    method_names: list[str] = []
+    for module_name, class_name in _PREEMPTIVE_METHOD_CANDIDATES:
+        try:
+            module = importlib.import_module(module_name)
+            method = getattr(module, class_name)
+        except (ImportError, AttributeError):
+            continue
+        methods.append(method)
+        method_names.append(f"{module_name}.{class_name}")
+    if not methods:
+        raise RuntimeError(
+            "no supported NVFP4 MoE create_weights class exists; candidates="
+            f"{_PREEMPTIVE_METHOD_CANDIDATES!r}"
         )
-        if cuda_ids is None:
-            original(self, layer, num_experts, *args, **kwargs)
-            return
+    _preemptive_patched_methods = tuple(method_names)
+    _preemptive_alloc_invocations.clear()
+    _preemptive_validation_logged = False
 
-        global_num_experts = num_experts
-        original(self, layer, len(cuda_ids), *args, **kwargs)
+    def cuda_ids_for(layer: Any) -> tuple[int, ...] | None:
+        if not isinstance(layer, HybridRoutedExperts):
+            return None
+        return _preemptive_cuda_ids(layer)
 
-        # Every param, including the NVFP4 input global scales, is
-        # allocated at the local count and indexed by local id. An earlier
-        # version special-cased the input scales to global length on the
-        # theory that `use_global_sf` makes the loader index them globally.
-        # It does not for this checkpoint: that predicate also requires
-        # `"input_scale" in weight_name`, and the tensors are named
-        # `input_global_scale`, which does not contain it. Measured — a
-        # global-length allocation left experts 8..255 unwritten, and the
-        # `1/x` in `process_weights_after_loading` turned that uninitialised
-        # memory into `inf`, which won the `.max()` and produced NaN logits.
-        #
-        # The consequence is a genuinely different activation scale, and it
-        # is upstream's own semantics for a partial expert set: in expert
-        # parallelism each rank reduces over the experts it holds. Measured
-        # on the 35B at subset:16:8, layer 16 — w13 is unaffected (all 256
-        # experts share one input scale, 54.75), while a2_scale moves from
-        # 1/154 to 1/173, ~11% tighter, because only the CUDA-owned experts
-        # are read. That is the source of the ~0.12 nats/token difference
-        # against post-hoc surgery, and it is a calibration difference
-        # rather than an error: the scale now covers exactly the experts
-        # this kernel computes.
-
-        # Drives both the loader's skip and vLLM's own bookkeeping.
+    def finish_compact_allocation(
+        quant_method: Any,
+        layer: Any,
+        global_num_experts: int,
+        cuda_ids: tuple[int, ...],
+    ) -> None:
+        _preemptive_alloc_invocations[id(layer)] = (
+            layer.layer_name,
+            type(quant_method).__name__,
+        )
         layer.local_num_experts = len(cuda_ids)
         layer._shooting_brake_cuda_ids = cuda_ids
-        expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+        expert_map = torch.full(
+            (global_num_experts,), -1, dtype=torch.int32
+        )
         for local_id, global_id in enumerate(cuda_ids):
             expert_map[global_id] = local_id
         layer.expert_map_manager._expert_map = expert_map
         layer._expert_map = expert_map
-
         logger.info(
             "Shooting Brake pre-emptive surgery: %s — allocated %d/%d "
-            "experts, %d never enter VRAM",
-            layer.layer_name, len(cuda_ids), global_num_experts,
+            "experts, %d never enter VRAM via %s",
+            layer.layer_name,
+            len(cuda_ids),
+            global_num_experts,
             global_num_experts - len(cuda_ids),
+            type(quant_method).__name__,
         )
 
-    _Method.create_weights = create_weights
-    setattr(_Method, _ALLOC_HOOK_ATTR, True)
+    def wrap_compressed_tensors(original: Any) -> Any:
+        def create_weights(
+            self: Any,
+            layer: Any,
+            num_experts: int,
+            hidden_size: int,
+            intermediate_size_per_partition: int,
+            params_dtype: torch.dtype,
+            **extra_weight_attrs: Any,
+        ) -> None:
+            cuda_ids = cuda_ids_for(layer)
+            local_num_experts = (
+                num_experts if cuda_ids is None else len(cuda_ids)
+            )
+            original(
+                self,
+                layer=layer,
+                num_experts=local_num_experts,
+                hidden_size=hidden_size,
+                intermediate_size_per_partition=(
+                    intermediate_size_per_partition
+                ),
+                params_dtype=params_dtype,
+                **extra_weight_attrs,
+            )
+            if cuda_ids is not None:
+                finish_compact_allocation(
+                    self, layer, num_experts, cuda_ids
+                )
+
+        return create_weights
+
+    def wrap_modelopt(original: Any) -> Any:
+        def create_weights(
+            self: Any,
+            layer: Any,
+            num_experts: int,
+            hidden_size: int,
+            intermediate_size_per_partition: int,
+            params_dtype: torch.dtype,
+            **extra_weight_attrs: Any,
+        ) -> None:
+            cuda_ids = cuda_ids_for(layer)
+            local_num_experts = (
+                num_experts if cuda_ids is None else len(cuda_ids)
+            )
+            # Keep global_num_experts in extra_weight_attrs unchanged: ModelOpt
+            # uses it to preserve 180-wide global input scales.
+            original(
+                self,
+                layer=layer,
+                num_experts=local_num_experts,
+                hidden_size=hidden_size,
+                intermediate_size_per_partition=(
+                    intermediate_size_per_partition
+                ),
+                params_dtype=params_dtype,
+                **extra_weight_attrs,
+            )
+            if cuda_ids is not None:
+                finish_compact_allocation(
+                    self, layer, num_experts, cuda_ids
+                )
+
+        return create_weights
+
+    wrapper_builders = {
+        "CompressedTensorsW4A4Nvfp4MoEMethod": wrap_compressed_tensors,
+        "ModelOptNvFp4FusedMoE": wrap_modelopt,
+    }
+    logger.info(
+        "Shooting Brake pre-emptive allocation classes present: %s",
+        ", ".join(_preemptive_patched_methods),
+    )
+    for method in methods:
+        if getattr(method, _ALLOC_HOOK_ATTR, False):
+            continue
+        method.create_weights = wrapper_builders[method.__name__](
+            method.create_weights
+        )
+        setattr(method, _ALLOC_HOOK_ATTR, True)
+
+
+def _validate_preemptive_allocations(layer: Any) -> None:
+    """Prove every remotely-owned layer took a compact allocation path."""
+    global _preemptive_validation_logged
+    if not preemptive_surgery_enabled():
+        return
+    placement = layer.shooting_brake_placement
+    expected_layers = set(placement.b70_active_layers())
+    expected_layers.update(placement.cpu_active_layers())
+    if not expected_layers:
+        return
+
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    actual_layers = {
+        extract_layer_index(layer_name)
+        for layer_name, _ in _preemptive_alloc_invocations.values()
+    }
+    if (
+        len(_preemptive_alloc_invocations) != len(expected_layers)
+        or actual_layers != expected_layers
+    ):
+        raise RuntimeError(
+            "pre-emptive allocation hook invocation mismatch: "
+            f"expected_layers={sorted(expected_layers)}, "
+            f"actual_layers={sorted(actual_layers)}, "
+            f"invocations={len(_preemptive_alloc_invocations)}, "
+            f"patched_present={_preemptive_patched_methods!r}, "
+            f"candidates={_PREEMPTIVE_METHOD_CANDIDATES!r}"
+        )
+
+    layer_idx = extract_layer_index(layer.layer_name)
+    cuda_count = len(placement.cuda_expert_ids(layer_idx))
+    method_name = type(layer.quant_method).__name__
+    weight_names = (
+        ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+        if method_name == "ModelOptNvFp4FusedMoE"
+        else (
+            "w13_weight_packed",
+            "w2_weight_packed",
+            "w13_weight_scale",
+            "w2_weight_scale",
+        )
+    )
+    for name in weight_names:
+        tensor = getattr(layer, name)
+        if tensor.shape[0] != cuda_count:
+            raise RuntimeError(
+                f"{layer.layer_name} {method_name}.{name} has "
+                f"{tensor.shape[0]} experts, expected compact CUDA count "
+                f"{cuda_count}"
+            )
+
+    if (
+        method_name == "ModelOptNvFp4FusedMoE"
+        and layer.quant_method.use_global_sf
+    ):
+        for name in ("w13_input_scale", "w2_input_scale"):
+            tensor = getattr(layer, name)
+            if tensor.shape[0] != placement.num_experts:
+                raise RuntimeError(
+                    f"{layer.layer_name} {name} has {tensor.shape[0]} "
+                    f"experts, expected global scale width "
+                    f"{placement.num_experts}"
+                )
+
+    if not _preemptive_validation_logged:
+        logger.warning(
+            "Shooting Brake pre-emptive allocation verified: %d/%d compact "
+            "layers via %s",
+            len(_preemptive_alloc_invocations),
+            len(expected_layers),
+            ", ".join(sorted({
+                method for _, method in _preemptive_alloc_invocations.values()
+            })),
+        )
+        _preemptive_validation_logged = True
 
 
 #: Highest CUDA allocation seen while weights were being loaded, in bytes.
@@ -349,6 +709,7 @@ def install_preemptive_alloc_hook() -> None:
 #: of a run describes the KV cache and is identical under both surgery
 #: strategies. This is the figure that decides whether a model loads.
 _load_peak_bytes = 0
+_load_audit_logged = False
 
 
 def _record_load_peak() -> None:
@@ -484,6 +845,17 @@ def _install_surgery_hook(quant_method: Any) -> None:
 
     def process_weights_after_loading(layer: Any) -> None:
         _record_load_peak()
+        global _load_audit_logged
+        if torch.cuda.is_available() and not _load_audit_logged:
+            logger.warning(
+                "Shooting Brake pre-invariant CUDA model allocation: "
+                "allocated=%.3f GiB load_peak=%.3f GiB",
+                torch.cuda.memory_allocated() / 2**30,
+                load_peak_gib(),
+            )
+            _load_audit_logged = True
+        if isinstance(layer, HybridRoutedExperts):
+            _validate_preemptive_allocations(layer)
         # The NVFP4 input global scales are deliberately NOT compacted
         # before this call. `prepare_nvfp4_moe_layer_for_fi_or_cutlass`
         # reduces them with a whole-tensor `.max()` and then expands the
@@ -523,9 +895,15 @@ class HybridRoutedExperts(RoutedExperts):
             qualified_model,
             policy_name=_placement_policy_name(),
         )
+        validate_cuda_dummy_slot_placement(self.shooting_brake_placement)
         if preemptive_surgery_enabled():
             _reject_unsupported_preemptive_tiers(self.shooting_brake_placement)
         super().__init__(*args, **kwargs)
+        if self.hidden_size != qualified_model.hidden_size:
+            raise RuntimeError(
+                f"routed layer hidden size {self.hidden_size} != qualified "
+                f"model hidden size {qualified_model.hidden_size}"
+            )
         self.shooting_brake_qualified_model = qualified_model
         self._device_map_cpu = build_device_map(self.shooting_brake_placement)
         self._b70_slot_map = _build_b70_slot_map(self.shooting_brake_placement)
@@ -535,15 +913,20 @@ class HybridRoutedExperts(RoutedExperts):
         self._b70_max_batch = int(
             os.environ.get("SHOOTING_BRAKE_B70_MAX_BATCH", "128")
         )
-        # Sized from the model, not a literal: the 122B's hidden is 3072
-        # against the 35B's 2048, and a staging buffer one model too small
-        # truncates the activation copy rather than failing.
+        self._dispatch_geometry = DispatchBufferGeometry(
+            max_batch=self._b70_max_batch,
+            hidden_size=qualified_model.hidden_size,
+            top_k=qualified_model.top_k,
+        )
+        # Both sides use this one model-derived shape. For the 88B step-1
+        # model it is [max_batch, 3072]; a stale 2048 would now fail the
+        # registration check instead of making every native dispatch fail.
         self._b70_pinned_hidden: torch.Tensor = torch.empty(
-            self._b70_max_batch, self.hidden_size, dtype=torch.float16,
+            *self._dispatch_geometry.hidden_shape, dtype=torch.float16,
             pin_memory=True, device="cpu",
         )
         self._b70_pinned_output: torch.Tensor = torch.empty(
-            self._b70_max_batch, self.hidden_size, dtype=torch.float32,
+            *self._dispatch_geometry.hidden_shape, dtype=torch.float32,
             pin_memory=True, device="cpu",
         )
         # Phase 8.5: VRAM surgery state. When enabled, B70-owned expert
@@ -561,6 +944,7 @@ class HybridRoutedExperts(RoutedExperts):
             "max_remote_per_step": 0,
         }
         self._shadow_done = False
+        self._aggregation_capture_done = False
         # Cache env-var decisions at init time so forward_modular has
         # zero Python branching on the hot path in all-CUDA mode — this
         # makes it a pure pass-through compatible with CUDA graph capture.
@@ -592,6 +976,43 @@ class HybridRoutedExperts(RoutedExperts):
             and self._b70_device_cached
             and self._hybrid_env
         )
+        self._expected_arm = os.environ.get("SHOOTING_BRAKE_EXPECT_ARM")
+        self._arm_runtime_observations: set[tuple[str, str, bool]] = set()
+        self.shooting_brake_arm_config: dict[str, Any] | None = None
+        if self._expected_arm is not None:
+            from . import force_piecewise_fired
+
+            vllm_config = get_current_vllm_config()
+            breakable_enabled = (
+                os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH") == "1"
+            )
+            enforce_eager = bool(vllm_config.model_config.enforce_eager)
+            fired = force_piecewise_fired()
+            cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+            _validate_expected_arm_configuration(
+                expected_arm=self._expected_arm,
+                graph_mode=self._b70_graph_mode,
+                breakable_enabled=breakable_enabled,
+                enforce_eager=enforce_eager,
+                force_piecewise_fired=fired,
+                cudagraph_mode=cudagraph_mode,
+            )
+            self.shooting_brake_arm_config = {
+                "expected_arm": self._expected_arm,
+                "graph_env": os.environ.get("SHOOTING_BRAKE_B70_GRAPH"),
+                "graph_mode": self._b70_graph_mode,
+                "breakable_env": os.environ.get(
+                    "VLLM_USE_BREAKABLE_CUDAGRAPH"
+                ),
+                "breakable_enabled": breakable_enabled,
+                "enforce_eager": enforce_eager,
+                "force_piecewise_fired": fired,
+                "cudagraph_mode": cudagraph_mode.name,
+            }
+            logger.info_once(
+                "Shooting Brake benchmark arm resolved: %s",
+                self.shooting_brake_arm_config,
+            )
         self._b70_poller: Any = None
         self._first_forward_done = False
         self._b70_stats = os.environ.get("SHOOTING_BRAKE_B70_STATS") == "1"
@@ -606,23 +1027,22 @@ class HybridRoutedExperts(RoutedExperts):
             if self._b70_stats and self._b70_graph_mode
             else None
         )
-        # Per-(layer, expert) frequency histogram, opt-in via
-        # SHOOTING_BRAKE_ROUTE_STATS=1. Bound on the first forward (the
-        # device is known there); None means the flag is off and the hot
-        # path pays one attribute check.
+        # Opt-in global route observers. They bind on the first forward,
+        # when the device and top-k are known. Each None check below is the
+        # entire steady-state cost of its disabled observer.
         self._route_histogram: Any = None
+        self._route_trace: Any = None
+        # Both synchronous prefill and graph decode gather through this map.
+        # It must exist before vLLM's KV-profile dummy forward.
+        self._initialize_b70_slot_map_cuda()
         if self._b70_graph_mode:
-            # CUDA-side slot map (for graph-compatible gather).
-            self._b70_slot_map_cuda = torch.tensor(
-                self._b70_slot_map, device="cuda", dtype=torch.int32,
-            )
             # Pinned buffers for routing data (D2H targets).
             self._pinned_b70_ids = torch.empty(
-                self._b70_max_batch, 8, dtype=torch.int32,
+                *self._dispatch_geometry.route_shape, dtype=torch.int32,
                 pin_memory=True, device="cpu",
             )
             self._pinned_b70_weights = torch.empty(
-                self._b70_max_batch, 8, dtype=torch.float32,
+                *self._dispatch_geometry.route_shape, dtype=torch.float32,
                 pin_memory=True, device="cpu",
             )
             # Device-side result buffers (pre-allocated, no torch.empty in forward).
@@ -676,11 +1096,11 @@ class HybridRoutedExperts(RoutedExperts):
                 pin_memory=True, device="cpu",
             )
             self._cpu_pinned_ids = torch.empty(
-                self._b70_max_batch, 8, dtype=torch.int32,
+                *self._dispatch_geometry.route_shape, dtype=torch.int32,
                 pin_memory=True, device="cpu",
             )
             self._cpu_pinned_weights = torch.empty(
-                self._b70_max_batch, 8, dtype=torch.float32,
+                *self._dispatch_geometry.route_shape, dtype=torch.float32,
                 pin_memory=True, device="cpu",
             )
             self._cpu_pinned_output = torch.empty(
@@ -735,6 +1155,16 @@ class HybridRoutedExperts(RoutedExperts):
                 }) + "\n")
         _install_surgery_hook(self.quant_method)
 
+    def _initialize_b70_slot_map_cuda(
+        self, device: str | torch.device = "cuda",
+    ) -> None:
+        """Materialize the global-to-B70 slot map before any forward."""
+        self._b70_slot_map_cuda: torch.Tensor | None = None
+        if self._hybrid_active:
+            self._b70_slot_map_cuda = torch.tensor(
+                self._b70_slot_map, device=device, dtype=torch.int32,
+            )
+
     @property
     def layer_index(self) -> int:
         """Absolute layer index, parsed from ``layer_name``."""
@@ -773,9 +1203,9 @@ class HybridRoutedExperts(RoutedExperts):
         producing zero contribution).  The real B70 results are added
         separately in the hybrid path.
 
-        Requires ``SHOOTING_BRAKE_VRAM_SURGERY=1``.  Implicitly requires
-        ``B70_DEVICE=1`` and ``HYBRID=1`` because B70 experts are removed
-        from CUDA and must be computed on the B70 device.
+        Requires ``SHOOTING_BRAKE_VRAM_SURGERY=1``, ``B70_DEVICE=1``, and
+        ``HYBRID=1`` because B70 experts are removed from CUDA and must be
+        computed on the B70 device. Missing flags reject rather than skip.
         """
         if self._vram_surgery_done:
             return
@@ -819,11 +1249,15 @@ class HybridRoutedExperts(RoutedExperts):
         if os.environ.get("SHOOTING_BRAKE_VRAM_SURGERY") != "1":
             return
         if os.environ.get("SHOOTING_BRAKE_B70_DEVICE") != "1":
-            logger.warning(
-                "SHOOTING_BRAKE_VRAM_SURGERY=1 requires "
-                "SHOOTING_BRAKE_B70_DEVICE=1; skipping surgery."
+            raise RuntimeError(
+                "SHOOTING_BRAKE_VRAM_SURGERY=1 with offloaded experts "
+                "requires SHOOTING_BRAKE_B70_DEVICE=1"
             )
-            return
+        if os.environ.get("SHOOTING_BRAKE_HYBRID") != "1":
+            raise RuntimeError(
+                "SHOOTING_BRAKE_VRAM_SURGERY=1 with offloaded experts "
+                "requires SHOOTING_BRAKE_HYBRID=1"
+            )
 
         cuda_idx = torch.tensor(
             cuda_global_ids, device=device, dtype=torch.long,
@@ -931,17 +1365,19 @@ class HybridRoutedExperts(RoutedExperts):
                 expert_obj.gemm1_clamp_limit[:num_cuda].clone()
             )
 
-        # --- Build global→local remap for forward_modular ---
-        # CUDA experts map to their compact local ID (0..num_cuda-1).
-        # B70 experts map to 0 (dummy — their routing weight is zeroed,
-        # so 0 * E_0(x) = 0 contribution, and the real result comes
-        # from the B70 device).
-        self._cuda_remap = torch.zeros(
-            self.shooting_brake_placement.num_experts,
-            dtype=torch.long, device=device,
+        # --- Build and verify both directions of the CUDA compaction ---
+        global_to_local, local_to_global = build_cuda_expert_maps(
+            self.shooting_brake_placement, layer_idx,
         )
-        for local_id, global_id in enumerate(cuda_global_ids):
-            self._cuda_remap[global_id] = local_id
+        expected_globals = torch.tensor(cuda_global_ids, dtype=torch.long)
+        if not torch.equal(local_to_global, expected_globals):
+            raise RuntimeError(
+                f"layer {layer_idx} CUDA tensor order {cuda_global_ids} does "
+                f"not match placement compaction {local_to_global.tolist()}"
+            )
+        # Keep -1 for non-CUDA globals. `compact_cuda_routes` tests ownership
+        # before replacing those sentinels with zero-weight dummy slot zero.
+        self._cuda_remap = global_to_local.to(device)
 
         # --- Reclaim freed VRAM ---
         torch.cuda.empty_cache()
@@ -1543,6 +1979,13 @@ class HybridRoutedExperts(RoutedExperts):
             )
             return
 
+        validate_dispatch_buffer_shapes(
+            self._dispatch_geometry,
+            pinned_hidden=self._b70_pinned_hidden,
+            pinned_ids=self._pinned_b70_ids,
+            pinned_weights=self._pinned_b70_weights,
+            pinned_output=self._b70_pinned_output,
+        )
         poller = get_b70_poller(self.shooting_brake_placement)
         poller.register_layer(
             layer_idx=layer_idx,
@@ -1580,13 +2023,29 @@ class HybridRoutedExperts(RoutedExperts):
             self._register_b70_poller(self.layer_index)
         if self._cpu_active:
             self._register_cpu_poller(self.layer_index)
-        if route_stats.enabled():
-            from .config import QUALIFIED_EXPERTS, QUALIFIED_LAYERS
-
-            self._route_histogram = route_stats.get_counter(
-                QUALIFIED_LAYERS, QUALIFIED_EXPERTS, topk_ids.device,
-            )
+        if route_stats.enabled() or route_stats.trace_enabled():
+            # Geometry comes from the resolved model, never the legacy 35B
+            # aliases in config.py. This model is 48 layers x 180 experts:
+            # sizing at 40 x 256 indexes past the end of the histogram on
+            # layers 40-47, and hands the locality analyzer an expert count of
+            # 256 against an actual 180 -- which silently corrupts its
+            # uniform-routing chance baseline, the one number that makes a
+            # measured reuse figure mean anything.
+            geometry = self.shooting_brake_qualified_model
+            if route_stats.enabled():
+                self._route_histogram = route_stats.get_counter(
+                    geometry.num_layers, geometry.num_experts, topk_ids.device,
+                )
+            if route_stats.trace_enabled():
+                self._route_trace = route_stats.get_trace(
+                    geometry.num_layers, geometry.num_experts, topk_ids,
+                )
         self._first_forward_done = True
+
+    @eager_break_during_capture
+    def _observe_route_trace(self, topk_ids: torch.Tensor) -> None:
+        """Run the D2H trace copy eagerly between breakable graph segments."""
+        self._route_trace.observe(self.layer_index, topk_ids)
 
     def forward_modular(
         self,
@@ -1632,6 +2091,12 @@ class HybridRoutedExperts(RoutedExperts):
         # of the model.
         if self._route_histogram is not None:
             self._route_histogram.observe(self.layer_index, topk_ids)
+        # Token-level locality trace (SHOOTING_BRAKE_ROUTE_TRACE=<path>).
+        # When disabled, this single None check is its only hot-path cost.
+        # The eager break makes the side effect run on graph replay rather
+        # than only once while the graph is captured.
+        if self._route_trace is not None:
+            self._observe_route_trace(topk_ids)
 
         # A layer with nothing offloaded has no remote work to do at any
         # batch size.
@@ -1661,6 +2126,35 @@ class HybridRoutedExperts(RoutedExperts):
             shared_experts, shared_experts_input,
         )
 
+    def _record_expected_arm_runtime(self) -> None:
+        """Record the branch actually reached for a timed arm descriptor."""
+        if self._expected_arm is None:
+            return
+        runtime_mode = CUDAGraphMode.NONE
+        if is_forward_context_available():
+            runtime_mode = get_forward_context().cudagraph_runtime_mode
+        stream_capturing = torch.cuda.is_current_stream_capturing()
+        branch = _classify_expected_arm_runtime(
+            expected_arm=self._expected_arm,
+            graph_mode=self._b70_graph_mode,
+            runtime_mode=runtime_mode,
+            stream_capturing=stream_capturing,
+        )
+        if branch is None:
+            return
+        observation = (runtime_mode.name, branch, stream_capturing)
+        if observation in self._arm_runtime_observations:
+            return
+        self._arm_runtime_observations.add(observation)
+        logger.info(
+            "Shooting Brake benchmark arm layer=%s runtime_mode=%s "
+            "stream_capturing=%s branch=%s",
+            self.layer_name,
+            runtime_mode.name,
+            stream_capturing,
+            branch,
+        )
+
     @eager_break_during_capture
     def _hybrid_forward_modular(
         self,
@@ -1682,10 +2176,20 @@ class HybridRoutedExperts(RoutedExperts):
         profiling pass, which never reaches this method.
         """
         layer_idx, dml = self._ensure_layer_device_map(topk_ids)
+        self._record_expected_arm_runtime()
+        if not self._b70_graph_mode:
+            _validate_dispatch_capture_mode(
+                graph_mode=False,
+                stream_capturing=torch.cuda.is_current_stream_capturing(),
+            )
         if self._b70_graph_mode:
             # Tier 3: pure CUDA stream ops — no partition, validation,
             # stats, or any host-side sync.  Every op below is captured
             # by torch.cuda.graph() without modification.
+            if self._b70_slot_map_cuda is None:
+                raise RuntimeError(
+                    "B70 CUDA slot map was not initialized before graph capture"
+                )
             b70_ids = self._b70_slot_map_cuda[topk_ids]
             b70_mask = b70_ids >= 0
             if self._cpu_active:
@@ -1697,14 +2201,18 @@ class HybridRoutedExperts(RoutedExperts):
                 offloaded = b70_mask | cpu_mask
             else:
                 offloaded = b70_mask
-            # Offloaded routes contribute through their remote partial, so
-            # zero their CUDA weight; CUDA-owned routes are untouched.
-            cuda_weights = topk_weights * (~offloaded).to(topk_weights.dtype)
-            cuda_topk_ids = (
-                self._cuda_remap[topk_ids]
-                if self._cuda_remap is not None
-                else topk_ids
-            )
+            # The compaction map keeps -1 for every offloaded global id.
+            # `compact_cuda_routes` masks those weights before replacing the
+            # sentinel with dummy local slot zero.
+            if self._cuda_remap is not None:
+                cuda_topk_ids, cuda_weights, _ = compact_cuda_routes(
+                    topk_ids, topk_weights, self._cuda_remap,
+                )
+            else:
+                cuda_topk_ids = topk_ids
+                cuda_weights = (
+                    topk_weights * (~offloaded).to(topk_weights.dtype)
+                )
             if self._route_counter is not None:
                 # Device-side accumulation: no host sync, so this stays
                 # inside the captured graph.  Read between steps.
@@ -1728,48 +2236,65 @@ class HybridRoutedExperts(RoutedExperts):
                 return y_cuda + y_b70 + self._cpu_take_graph(x.shape[0])
             return y_cuda + y_b70
         part = partition_routes(topk_ids, topk_weights, dml, layer_idx)
-        validate_partition(
-            part, self.shooting_brake_placement.b70_capable_layers
-        )
-        cuda_topk_ids = (
-            self._cuda_remap[topk_ids]
-            if self._cuda_remap is not None
-            else topk_ids
-        )
+        if os.environ.get("SHOOTING_BRAKE_VALIDATE_PARTITION") == "1":
+            validate_partition(
+                part, self.shooting_brake_placement.b70_capable_layers
+            )
+        if self._cuda_remap is not None:
+            cuda_topk_ids, compact_cuda_weights, _ = compact_cuda_routes(
+                topk_ids, topk_weights, self._cuda_remap,
+            )
+        else:
+            cuda_topk_ids = topk_ids
+            compact_cuda_weights = None
 
         stats = self.shooting_brake_partition_stats
         stats["steps"] += 1
-        has_remote = part.has_remote()
-        if has_remote:
-            stats["remote_steps"] += 1
-            n_remote = part.num_b70_routes()
-            stats["remote_routes"] += n_remote
-            stats["max_remote_per_step"] = max(
-                stats["max_remote_per_step"], n_remote
-            )
-            if stats["remote_steps"] == 1:
-                logger.info(
-                    "Shooting Brake Phase-6a: layer %s first remote step "
-                    "(cuda=%d b70=%d routes, M=%d).",
-                    layer_idx,
-                    part.num_cuda_routes(),
-                    n_remote,
-                    topk_ids.shape[0],
+        marker = os.environ.get("SHOOTING_BRAKE_PARTITION_MARKER")
+        shadow_enabled = os.environ.get("SHOOTING_BRAKE_SHADOW") == "1"
+        hybrid_marker = os.environ.get("SHOOTING_BRAKE_HYBRID_MARKER")
+        diagnostics_enabled = (
+            self._b70_stats
+            or marker is not None
+            or shadow_enabled
+            or hybrid_marker is not None
+        )
+        has_remote = False
+        n_remote = 0
+        if diagnostics_enabled:
+            # These conversions synchronize CUDA. They are diagnostics only,
+            # and every enabling switch above is explicitly opt-in.
+            has_remote = part.has_remote()
+            if has_remote:
+                n_remote = part.num_b70_routes()
+                stats["remote_steps"] += 1
+                stats["remote_routes"] += n_remote
+                stats["max_remote_per_step"] = max(
+                    stats["max_remote_per_step"], n_remote
                 )
-                marker = os.environ.get("SHOOTING_BRAKE_PARTITION_MARKER")
-                if marker:
-                    import json
-                    with open(marker, "a") as f:
-                        f.write(json.dumps({
-                            "layer": layer_idx,
-                            "b70_routes": n_remote,
-                            "M": topk_ids.shape[0],
-                        }) + "\n")
-        # Phase 6b: shadow validation (once, skip during surgery).
+                if stats["remote_steps"] == 1:
+                    logger.info(
+                        "Shooting Brake Phase-6a: layer %s first remote step "
+                        "(cuda=%d b70=%d routes, M=%d).",
+                        layer_idx,
+                        part.num_cuda_routes(),
+                        n_remote,
+                        topk_ids.shape[0],
+                    )
+                    if marker:
+                        import json
+                        with open(marker, "a") as f:
+                            f.write(json.dumps({
+                                "layer": layer_idx,
+                                "b70_routes": n_remote,
+                                "M": topk_ids.shape[0],
+                            }) + "\n")
+
+        # Phase 6b: expensive value validation is an explicit debug path.
         if (
             not self._shadow_done
             and has_remote
-            and os.environ.get("SHOOTING_BRAKE_SHADOW") == "1"
+            and shadow_enabled
             and self._cuda_remap is None
         ):
             self._shadow_done = True
@@ -1781,15 +2306,20 @@ class HybridRoutedExperts(RoutedExperts):
             and stats.get("hybrid_steps", 0) == 0
         ):
             stats["hybrid_steps"] = 1
-            hmarker = os.environ.get("SHOOTING_BRAKE_HYBRID_MARKER")
-            if hmarker:
+            if hybrid_marker:
                 import json
-                with open(hmarker, "w") as f:
+                with open(hybrid_marker, "w") as f:
                     json.dump({"layer": layer_idx, "b70_routes": n_remote}, f)
 
-        # Hybrid execution: split CUDA/B70 routes and combine.
-        if self._hybrid_env and has_remote:
-            cuda_weights = topk_weights * (~part.b70_mask).float()
+        # A remotely-owned layer always dispatches its B70 partial. The
+        # provider's -1 skip ABI makes an all-CUDA route set a valid zero
+        # remote partial, avoiding a tensor-to-host `any()` in normal decode.
+        if self._hybrid_env:
+            cuda_weights = (
+                compact_cuda_weights
+                if compact_cuda_weights is not None
+                else topk_weights * (~part.b70_mask).to(topk_weights.dtype)
+            )
 
             if self._b70_graph_mode:
                 # Tier 3: graph-compatible B70 dispatch (pure CUDA stream ops).
@@ -1828,11 +2358,117 @@ class HybridRoutedExperts(RoutedExperts):
                 y_b70 = super().forward_modular(
                     x, b70_weights, cuda_topk_ids,
                 )
+            self._maybe_capture_aggregation_oracle(
+                layer_idx, x, topk_ids, topk_weights, y_cuda, y_b70,
+            )
             return self._write_static_output(y_cuda + y_b70)
 
         return self._write_static_output(super().forward_modular(
             x, topk_weights, cuda_topk_ids, shared_experts, shared_experts_input
         ))
+
+    def _maybe_capture_aggregation_oracle(
+        self,
+        layer_idx: int,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        normal_cuda: torch.Tensor,
+        normal_b70: torch.Tensor,
+    ) -> None:
+        """Capture one real layer for the opt-in split-aggregation oracle.
+
+        The layer's actual activation, router ids, router weights, and hybrid
+        partials are saved.  Three additional routed-only cases reuse the
+        real activation and weights with deterministic global ids: all CUDA,
+        all B70, and a 4/4 straddle.  They therefore exercise the compact
+        NVFP4 tensor and the int4 provider with identical arithmetic inputs.
+        The offline CPU half independently dequantizes the canonical int4
+        bank and checks the B70 partial plus the cross-format aggregation.
+        """
+        path = os.environ.get("SHOOTING_BRAKE_AGGREGATION_CAPTURE")
+        target_layer = int(
+            os.environ.get("SHOOTING_BRAKE_AGGREGATION_LAYER", "0")
+        )
+        if (
+            path is None
+            or self._aggregation_capture_done
+            or layer_idx != target_layer
+        ):
+            return
+        if (
+            self._b70_graph_mode
+            or self._b70_async_cached
+            or not self._b70_device_cached
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            raise RuntimeError(
+                "aggregation capture requires synchronous eager B70 dispatch"
+            )
+        if self._cuda_remap is None:
+            raise RuntimeError(
+                "aggregation capture requires the compact CUDA expert map"
+            )
+
+        cuda_ids = self.shooting_brake_placement.cuda_expert_ids(layer_idx)
+        b70_ids = self.shooting_brake_placement.b70_expert_ids(layer_idx)
+        if len(cuda_ids) < self.top_k or len(b70_ids) < self.top_k:
+            raise RuntimeError(
+                "aggregation capture needs at least top_k experts on each tier"
+            )
+        case_ids = {
+            "all_cuda": cuda_ids[:self.top_k],
+            "all_b70": b70_ids[:self.top_k],
+            "straddling": (
+                cuda_ids[:self.top_k // 2]
+                + b70_ids[:self.top_k - self.top_k // 2]
+            ),
+        }
+        payload: dict[str, Any] = {
+            "format": "shooting-brake-int4-aggregation-v1",
+            "layer": layer_idx,
+            "actual_x": x.detach().cpu(),
+            "actual_global_ids": topk_ids.detach().cpu(),
+            "actual_weights": topk_weights.detach().cpu(),
+            "actual_cuda_partial": normal_cuda.detach().cpu(),
+            "actual_b70_partial": normal_b70.detach().cpu(),
+            "actual_hybrid_output": (normal_cuda + normal_b70).detach().cpu(),
+            "cases": {},
+        }
+        for name, global_ids in case_ids.items():
+            ids = torch.tensor(
+                global_ids, dtype=topk_ids.dtype, device=topk_ids.device,
+            ).expand(topk_ids.shape[0], -1)
+            part = partition_routes(
+                ids, topk_weights, self._device_map_layer, layer_idx,
+            )
+            local_ids, cuda_weights, _ = compact_cuda_routes(
+                ids, topk_weights, self._cuda_remap,
+            )
+            with torch.no_grad():
+                cuda_partial = super().forward_modular(
+                    x, cuda_weights, local_ids,
+                )
+                b70_partial = self._b70_partial(
+                    x, ids, topk_weights, part, layer_idx,
+                )
+            payload["cases"][name] = {
+                "global_ids": ids.detach().cpu(),
+                "weights": topk_weights.detach().cpu(),
+                "cuda_partial": cuda_partial.detach().cpu(),
+                "b70_partial": b70_partial.detach().cpu(),
+                "hybrid_routed": (
+                    cuda_partial + b70_partial
+                ).detach().cpu(),
+            }
+        torch.save(payload, path)
+        self._aggregation_capture_done = True
+        logger.warning(
+            "Shooting Brake aggregation oracle captured layer %d to %s",
+            layer_idx,
+            path,
+        )
+
 
     def _write_static_output(self, result: torch.Tensor) -> torch.Tensor:
         """Copy result into static buffer for stable address across replays.
@@ -1916,14 +2552,14 @@ class HybridRoutedExperts(RoutedExperts):
         provider = _get_b70_provider(self.shooting_brake_placement)
         M = x.shape[0]
 
-        # D2H activation: BF16 CUDA → FP16 pinned host buffer.
-        # Small tensor (M × 2048 × 2 B = 4 KB–512 KB); the sync is fast.
+        # D2H activation: BF16 CUDA → FP16 pinned [M, model hidden] buffer.
+        # The width is `_dispatch_geometry.hidden_size` (3072 for step 1).
         x_fp16 = x.detach().to(torch.float16)
         pinned_hidden = self._b70_pinned_hidden[:M]
         pinned_hidden.copy_(x_fp16, non_blocking=True)
         torch.cuda.current_stream().synchronize()
 
-        # D2H routing data (tiny: M × 8 × 4 B).
+        # D2H routing data (tiny: M × model top-k × 4 B).
         ids_np = topk_ids.detach().cpu().numpy()
         wts_np = topk_weights.detach().cpu().numpy()
 
@@ -2122,12 +2758,13 @@ class HybridRoutedExperts(RoutedExperts):
         else:
             offloaded = b70_mask
 
-        cuda_weights = topk_weights * (~offloaded).to(topk_weights.dtype)
-        cuda_topk_ids = (
-            self._cuda_remap[topk_ids]
-            if self._cuda_remap is not None
-            else topk_ids
-        )
+        if self._cuda_remap is not None:
+            cuda_topk_ids, cuda_weights, _ = compact_cuda_routes(
+                topk_ids, topk_weights, self._cuda_remap,
+            )
+        else:
+            cuda_topk_ids = topk_ids
+            cuda_weights = topk_weights * (~offloaded).to(topk_weights.dtype)
 
         y = super().forward_modular(
             x, cuda_weights, cuda_topk_ids,

@@ -32,6 +32,151 @@ class PartitionError(RuntimeError):
     """A Phase-6a route-partition invariant was violated at runtime."""
 
 
+@dataclass(frozen=True)
+class DispatchBufferGeometry:
+    """Model-derived shapes shared by CUDA staging and the native poller."""
+
+    max_batch: int
+    hidden_size: int
+    top_k: int
+
+    def __post_init__(self) -> None:
+        if self.max_batch < 1:
+            raise ValueError("max_batch must be positive")
+        if self.hidden_size < 1:
+            raise ValueError("hidden_size must be positive")
+        if self.top_k < 1:
+            raise ValueError("top_k must be positive")
+
+    @property
+    def hidden_shape(self) -> tuple[int, int]:
+        return (self.max_batch, self.hidden_size)
+
+    @property
+    def route_shape(self) -> tuple[int, int]:
+        return (self.max_batch, self.top_k)
+
+
+def validate_dispatch_buffer_shapes(
+    geometry: DispatchBufferGeometry,
+    *,
+    pinned_hidden: torch.Tensor,
+    pinned_ids: torch.Tensor,
+    pinned_weights: torch.Tensor,
+    pinned_output: torch.Tensor,
+) -> None:
+    """Fail before poller registration when either side uses stale geometry."""
+    expected = {
+        "pinned_hidden": geometry.hidden_shape,
+        "pinned_ids": geometry.route_shape,
+        "pinned_weights": geometry.route_shape,
+        "pinned_output": geometry.hidden_shape,
+    }
+    observed = {
+        "pinned_hidden": tuple(pinned_hidden.shape),
+        "pinned_ids": tuple(pinned_ids.shape),
+        "pinned_weights": tuple(pinned_weights.shape),
+        "pinned_output": tuple(pinned_output.shape),
+    }
+    wrong = {
+        name: (observed[name], shape)
+        for name, shape in expected.items()
+        if observed[name] != shape
+    }
+    if wrong:
+        detail = ", ".join(
+            f"{name}={got}, expected {want}"
+            for name, (got, want) in wrong.items()
+        )
+        raise PartitionError(f"dispatch staging geometry mismatch: {detail}")
+
+
+def validate_cuda_dummy_slot_placement(placement: Placement) -> None:
+    """Require one real CUDA expert wherever remote routes use dummy slot 0.
+
+    The current fused CUDA call always runs, even when every route in a batch
+    is remote. Non-CUDA routes therefore use zero-weight local slot 0. A layer
+    with no CUDA experts has no row zero and needs a separate no-CUDA fast path,
+    which does not exist yet.
+    """
+    for layer in range(placement.num_layers):
+        cuda_count = len(placement.cuda_expert_ids(layer))
+        offloaded_count = (
+            placement.layer_b70_count(layer) + placement.layer_cpu_count(layer)
+        )
+        if offloaded_count and cuda_count == 0:
+            raise PartitionError(
+                f"layer {layer} offloads {offloaded_count} experts but keeps "
+                "zero CUDA experts; compact dispatch requires a real CUDA "
+                "expert at dummy local slot 0 until a no-CUDA fast path exists"
+            )
+
+
+def build_cuda_expert_maps(
+    placement: Placement,
+    layer: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return checked global→local and local→global CUDA expert maps.
+
+    CUDA surgery compacts experts in ascending global-id order.  The returned
+    global map uses ``-1`` for every non-CUDA owner so an offloaded global id
+    can never be mistaken for a valid compact slot.
+    """
+    if not 0 <= layer < placement.num_layers:
+        raise PartitionError(
+            f"layer {layer} outside placement's 0..{placement.num_layers - 1}"
+        )
+    local_to_global = torch.tensor(
+        placement.cuda_expert_ids(layer), dtype=torch.long,
+    )
+    global_to_local = torch.full(
+        (placement.num_experts,), -1, dtype=torch.long,
+    )
+    for local_id, global_id in enumerate(local_to_global.tolist()):
+        owner = placement.owners[layer][global_id]
+        if owner.slot != local_id:
+            raise PartitionError(
+                f"layer {layer} CUDA expert {global_id} has placement slot "
+                f"{owner.slot}, but surgery compacts it to {local_id}"
+            )
+        global_to_local[global_id] = local_id
+
+    if local_to_global.numel():
+        round_trip = global_to_local[local_to_global]
+        expected = torch.arange(local_to_global.numel(), dtype=torch.long)
+        if not torch.equal(round_trip, expected):
+            raise PartitionError(
+                f"layer {layer} CUDA compaction map does not round-trip"
+            )
+    return global_to_local, local_to_global
+
+
+def compact_cuda_routes(
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    global_to_local: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Translate global router ids for a compact CUDA tensor.
+
+    Non-CUDA routes become dummy local slot zero *and* receive zero weight.
+    The sentinel remains ``-1`` in ``global_to_local`` so ownership is tested
+    before the dummy is introduced; a B70 global id is never handed to the
+    compact CUDA tensor.
+    """
+    if topk_ids.shape != topk_weights.shape:
+        raise PartitionError(
+            f"route id shape {tuple(topk_ids.shape)} != weight shape "
+            f"{tuple(topk_weights.shape)}"
+        )
+    if global_to_local.ndim != 1:
+        raise PartitionError("CUDA global-to-local map must be one-dimensional")
+    safe_global_ids = topk_ids.clamp(min=0)
+    local_ids = global_to_local[safe_global_ids]
+    cuda_mask = (local_ids >= 0) & (topk_ids >= 0)
+    cuda_weights = topk_weights * cuda_mask.to(topk_weights.dtype)
+    return local_ids.clamp(min=0), cuda_weights, cuda_mask
+
+
 _DEVICE_CODE = {Device.CUDA: 0, Device.B70: 1, Device.CPU: 2}
 
 

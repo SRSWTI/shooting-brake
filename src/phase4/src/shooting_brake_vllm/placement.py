@@ -1,29 +1,16 @@
-"""Phase-5 compact expert ownership: a versioned, swappable placement manifest.
+"""Versioned expert ownership for CUDA, remote accelerators, and CPU.
 
-The manifest records, for every ``(layer, global_expert)`` in the qualified
-Qwen3.6 model, exactly one normal-path owner: the RTX 5090 (CUDA) or the Arc
-Pro B70. It is the single source of truth that Phase 6 will consume to
-partition a token's top-k routes across the two devices.
+The manifest records exactly one normal-path owner for every
+``(layer, global_expert)``.  A remote owner carries an explicit device index,
+so placement is not coupled to the current dispatch implementation's
+single-B70 limitation.  Existing policies continue to target B70 device zero;
+multi-device placement is opt-in through :class:`ExpertGroupPolicy` or
+:class:`FractionalRemotePolicy`.
 
-Design goals
-------------
-* **Immutable per inference step.** Moving a ~1.7 MiB expert mid-step would
-  blow the decode latency budget, so ownership is frozen for the hot path.
-* **Swappable at coarse boundaries.** The manifest is plain data with a
-  ``generation`` id. A future predictive / speculative offloader can compute a
-  new placement, bump the generation, and swap the manifest between requests or
-  generations without touching the per-step contract. The hot path never
-  inspects ``generation`` for routing decisions -- it only uses it to reject
-  stale references (mirroring the Phase-2 protocol's placement-generation id).
-* **Not a fake EP rank.** vLLM's ``ExpertMapManager`` distributes experts over
-  tensor/expert-parallel ranks. The B70 is a separate process with its own
-  QuixiCore kernels, not a vLLM rank, so we own the map ourselves.
-
-Layer structure of the qualified model
----------------------------------------
-All 40 layers are MoE (256 routed experts each). Layers 0-31 are NVFP4 and are
-extracted into the Phase-1 B70 bank (8192 experts); they are ``b70_capable``.
-Layers 32-39 are FP8 and are not in the bank; their experts are CUDA-forced.
+The ownership table is immutable during an inference step and swappable at
+coarse request/generation boundaries.  It is deliberately separate from
+vLLM's expert-parallel ranks: Arc devices are external accelerators, not fake
+vLLM ranks.
 """
 
 from __future__ import annotations
@@ -49,33 +36,99 @@ class Device(str, Enum):
     CPU = "cpu"
 
 
+@dataclass(frozen=True, order=True)
+class DeviceTarget:
+    """A concrete device, including its index within a device kind."""
+
+    device: Device
+    index: int = 0
+
+    def __post_init__(self) -> None:
+        if self.index < 0:
+            raise ValueError(f"device index must be non-negative, got {self.index}")
+        if self.device in (Device.CUDA, Device.CPU) and self.index != 0:
+            raise ValueError(
+                f"{self.device.value} device index {self.index} is not supported"
+            )
+
+    @property
+    def label(self) -> str:
+        return f"{self.device.value}:{self.index}"
+
+
+@dataclass(frozen=True)
+class DeviceCapacity:
+    """Resident expert-weight budget for one concrete device."""
+
+    target: DeviceTarget
+    capacity_bytes: int
+    bytes_per_expert: int
+
+    def __post_init__(self) -> None:
+        if self.capacity_bytes < 0:
+            raise ValueError("capacity_bytes must be non-negative")
+        if self.bytes_per_expert < 1:
+            raise ValueError("bytes_per_expert must be positive")
+
+    def to_dict(self) -> dict:
+        return {
+            "device": self.target.device.value,
+            "device_index": self.target.index,
+            "capacity_bytes": self.capacity_bytes,
+            "bytes_per_expert": self.bytes_per_expert,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict) -> DeviceCapacity:
+        return cls(
+            target=DeviceTarget(
+                Device(value["device"]), int(value.get("device_index", 0))
+            ),
+            capacity_bytes=int(value["capacity_bytes"]),
+            bytes_per_expert=int(value["bytes_per_expert"]),
+        )
+
+
 @dataclass(frozen=True)
 class ExpertOwner:
-    """The single normal-path owner of one (layer, global_expert)."""
+    """The single normal-path owner of one ``(layer, global_expert)``."""
 
     device: Device
     slot: int  # compact device-local slot, dense from 0
+    device_index: int = 0
+
+    def __post_init__(self) -> None:
+        DeviceTarget(self.device, self.device_index)
+
+    @property
+    def target(self) -> DeviceTarget:
+        return DeviceTarget(self.device, self.device_index)
 
     def to_dict(self) -> dict:
-        return {"device": self.device.value, "slot": self.slot}
+        result = {"device": self.device.value, "slot": self.slot}
+        # Preserve byte-for-byte v1 manifests for every existing policy.
+        if self.device_index:
+            result["device_index"] = self.device_index
+        return result
 
     @classmethod
     def from_dict(cls, d: dict) -> ExpertOwner:
-        return cls(device=Device(d["device"]), slot=int(d["slot"]))
+        return cls(
+            device=Device(d["device"]),
+            slot=int(d["slot"]),
+            device_index=int(d.get("device_index", 0)),
+        )
 
 
 @dataclass(frozen=True)
 class Placement:
     """Immutable ownership table for every routed expert in the model.
 
-    Attributes:
-        generation: monotonic version; bumped whenever the manifest is swapped.
-        num_layers: total number of MoE layers (40 for the qualified model).
-        num_experts: routed experts per layer (256).
-        owners: ``owners[layer][global_expert]`` -> :class:`ExpertOwner`.
-        b70_capable_layers: absolute layer indices whose experts exist in the
-            NVFP4 B70 bank and may therefore be B70-owned (0..31).
-        policy_name: human-readable name of the policy that produced this.
+    ``owners[layer][global_expert]`` is complete by construction.  Remote
+    devices are distinguished by :attr:`ExpertOwner.device_index`.
+    ``device_capacities`` is optional so legacy placements retain their
+    behaviour; when supplied, validation rejects resident expert weights that
+    exceed any concrete device's budget.
     """
 
     generation: int
@@ -84,6 +137,7 @@ class Placement:
     owners: tuple[tuple[ExpertOwner, ...], ...]
     b70_capable_layers: frozenset[int]
     policy_name: str = ""
+    device_capacities: tuple[DeviceCapacity, ...] = ()
 
     # -- introspection ---------------------------------------------------
 
@@ -91,6 +145,20 @@ class Placement:
         return sum(
             1 for layer in self.owners for owner in layer if owner.device is device
         )
+
+    def count_target(self, target: DeviceTarget) -> int:
+        return sum(
+            1 for layer in self.owners for owner in layer
+            if owner.target == target
+        )
+
+    def remote_device_indices(self) -> tuple[int, ...]:
+        return tuple(sorted({
+            owner.device_index
+            for layer in self.owners
+            for owner in layer
+            if owner.device is Device.B70
+        }))
 
     def cuda_count(self) -> int:
         return self.count(Device.CUDA)
@@ -187,10 +255,16 @@ class Placement:
     # -- (de)serialization for data-driven swapping ----------------------
 
     SCHEMA = "shooting-brake.placement.v1"
+    MULTI_DEVICE_SCHEMA = "shooting-brake.placement.v2"
 
     def to_manifest(self) -> dict:
-        return {
-            "schema": self.SCHEMA,
+        multi_device = bool(self.device_capacities) or any(
+            owner.device_index
+            for layer in self.owners
+            for owner in layer
+        )
+        result = {
+            "schema": self.MULTI_DEVICE_SCHEMA if multi_device else self.SCHEMA,
             "generation": self.generation,
             "num_layers": self.num_layers,
             "num_experts": self.num_experts,
@@ -200,25 +274,38 @@ class Placement:
                 [owner.to_dict() for owner in layer] for layer in self.owners
             ],
         }
+        if self.device_capacities:
+            result["device_capacities"] = [
+                capacity.to_dict() for capacity in self.device_capacities
+            ]
+        return result
 
     def to_json(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_manifest()), encoding="utf-8")
 
     @classmethod
     def from_manifest(cls, manifest: dict) -> Placement:
-        assert manifest["schema"] == cls.SCHEMA, f"unsupported schema {manifest['schema']!r}"
+        supported = (cls.SCHEMA, cls.MULTI_DEVICE_SCHEMA)
+        if manifest.get("schema") not in supported:
+            raise ValueError(f"unsupported schema {manifest.get('schema')!r}")
         owners = tuple(
             tuple(ExpertOwner.from_dict(o) for o in layer)
             for layer in manifest["owners"]
         )
-        return cls(
+        placement = cls(
             generation=int(manifest["generation"]),
             num_layers=int(manifest["num_layers"]),
             num_experts=int(manifest["num_experts"]),
             owners=owners,
             b70_capable_layers=frozenset(manifest["b70_capable_layers"]),
             policy_name=str(manifest.get("policy", "")),
+            device_capacities=tuple(
+                DeviceCapacity.from_dict(value)
+                for value in manifest.get("device_capacities", ())
+            ),
         )
+        validate_placement(placement)
+        return placement
 
     @classmethod
     def from_json(cls, path: str | Path) -> Placement:
@@ -266,6 +353,149 @@ class AllCudaPolicy:
         return tuple(
             tuple(ExpertOwner(Device.CUDA, e) for e in range(num_experts))
             for _ in range(num_layers)
+        )
+
+
+@dataclass(frozen=True)
+class ExpertGroup:
+    """Half-open global expert-id range assigned to one concrete device."""
+
+    start: int
+    stop: int
+    target: DeviceTarget
+
+    def __post_init__(self) -> None:
+        if self.start < 0 or self.stop <= self.start:
+            raise ValueError(
+                f"expert group must be a non-empty half-open range, "
+                f"got [{self.start},{self.stop})"
+            )
+
+
+def validate_expert_groups(
+    groups: Sequence[ExpertGroup], num_experts: int,
+) -> None:
+    """Reject gaps, overlap, and ranges outside ``[0, num_experts)``."""
+    if num_experts < 1:
+        raise PlacementError("num_experts must be positive")
+    covered = [False] * num_experts
+    for group in groups:
+        if group.stop > num_experts:
+            raise PlacementError(
+                f"expert group [{group.start},{group.stop}) exceeds "
+                f"expert count {num_experts}"
+            )
+        for expert in range(group.start, group.stop):
+            if covered[expert]:
+                raise PlacementError(
+                    f"expert {expert} is assigned by more than one group"
+                )
+            covered[expert] = True
+    missing = [expert for expert, assigned in enumerate(covered) if not assigned]
+    if missing:
+        raise PlacementError(
+            f"expert groups do not cover {len(missing)} experts; "
+            f"first missing expert is {missing[0]}"
+        )
+
+
+@dataclass(frozen=True)
+class ExpertGroupPolicy:
+    """Apply explicit, complete expert ranges to every capable layer.
+
+    For example, three groups can express ``[0,60) -> b70:0``,
+    ``[60,120) -> b70:1``, and ``[120,180) -> cuda:0`` without relying on
+    the expert count being a power of two or evenly divisible.
+    """
+
+    groups: tuple[ExpertGroup, ...]
+    name: str = "expert-groups"
+
+    def assign(
+        self,
+        num_layers: int,
+        num_experts: int,
+        b70_capable: frozenset[int],
+    ) -> tuple[tuple[ExpertOwner, ...], ...]:
+        validate_expert_groups(self.groups, num_experts)
+        target_by_expert: list[DeviceTarget | None] = [None] * num_experts
+        for group in self.groups:
+            target_by_expert[group.start:group.stop] = [
+                group.target
+            ] * (group.stop - group.start)
+
+        slots: dict[DeviceTarget, int] = {}
+        owners: list[ExpertOwner] = []
+        for target in target_by_expert:
+            assert target is not None
+            slot = slots.get(target, 0)
+            owners.append(ExpertOwner(target.device, slot, target.index))
+            slots[target] = slot + 1
+        grouped_row = tuple(owners)
+        all_cuda = tuple(
+            ExpertOwner(Device.CUDA, expert) for expert in range(num_experts)
+        )
+        return tuple(
+            grouped_row if layer in b70_capable else all_cuda
+            for layer in range(num_layers)
+        )
+
+
+@dataclass(frozen=True)
+class FractionalRemotePolicy:
+    """Keep a fraction on CUDA and balance the rest across N B70 devices."""
+
+    remote_device_indices: tuple[int, ...]
+    cuda_fraction: float
+    name: str = field(init=False, default="fractional-remote")
+
+    def __post_init__(self) -> None:
+        if not self.remote_device_indices:
+            raise ValueError("at least one remote device is required")
+        if len(set(self.remote_device_indices)) != len(self.remote_device_indices):
+            raise ValueError("remote device indices must be unique")
+        for index in self.remote_device_indices:
+            DeviceTarget(Device.B70, index)
+        if not 0.0 <= self.cuda_fraction <= 1.0:
+            raise ValueError("cuda_fraction must be between zero and one")
+        object.__setattr__(
+            self,
+            "name",
+            f"fractional-remote:devices={','.join(map(str, self.remote_device_indices))}"
+            f",cuda_fraction={self.cuda_fraction}",
+        )
+
+    def groups(self, num_experts: int) -> tuple[ExpertGroup, ...]:
+        cuda_n = round(num_experts * self.cuda_fraction)
+        remote_n = num_experts - cuda_n
+        quotient, remainder = divmod(remote_n, len(self.remote_device_indices))
+        groups: list[ExpertGroup] = []
+        start = 0
+        for position, index in enumerate(self.remote_device_indices):
+            count = quotient + (1 if position < remainder else 0)
+            if count:
+                groups.append(
+                    ExpertGroup(
+                        start,
+                        start + count,
+                        DeviceTarget(Device.B70, index),
+                    )
+                )
+                start += count
+        if cuda_n:
+            groups.append(
+                ExpertGroup(start, num_experts, DeviceTarget(Device.CUDA))
+            )
+        return tuple(groups)
+
+    def assign(
+        self,
+        num_layers: int,
+        num_experts: int,
+        b70_capable: frozenset[int],
+    ) -> tuple[tuple[ExpertOwner, ...], ...]:
+        return ExpertGroupPolicy(self.groups(num_experts), self.name).assign(
+            num_layers, num_experts, b70_capable
         )
 
 
@@ -495,6 +725,7 @@ def build_placement(
     num_experts: int,
     b70_capable: frozenset[int],
     generation: int = 1,
+    device_capacities: tuple[DeviceCapacity, ...] = (),
 ) -> Placement:
     owners = policy.assign(num_layers, num_experts, b70_capable)
     placement = Placement(
@@ -504,6 +735,7 @@ def build_placement(
         owners=owners,
         b70_capable_layers=b70_capable,
         policy_name=getattr(policy, "name", policy.__class__.__name__),
+        device_capacities=device_capacities,
     )
     validate_placement(placement)
     return placement
@@ -514,14 +746,22 @@ class PlacementError(RuntimeError):
 
 
 def validate_placement(placement: Placement) -> None:
-    """Assert the Phase-5 gate invariants:
+    """Assert complete ownership, valid device slots, and capacity budgets.
 
-    1. exactly one owner per expert, full coverage, no gaps;
-    2. compact, gap-free, duplicate-free device-local slots per (layer, device);
-    3. experts in non-B70-capable layers are CUDA-forced;
-    4. B70-owned experts only live in B70-capable layers.
+    Slots are dense independently for each concrete ``(device, index)``.
+    This distinction is required when two B70s each own slot zero.
     """
     p = placement
+    if p.num_layers < 1 or p.num_experts < 1:
+        raise PlacementError("placement dimensions must be positive")
+    invalid_capable = sorted(
+        layer for layer in p.b70_capable_layers
+        if not 0 <= layer < p.num_layers
+    )
+    if invalid_capable:
+        raise PlacementError(
+            f"B70-capable layers outside model bounds: {invalid_capable}"
+        )
     # (1) shape + coverage
     if len(p.owners) != p.num_layers:
         raise PlacementError(
@@ -537,33 +777,33 @@ def validate_placement(placement: Placement) -> None:
             if not isinstance(owner, ExpertOwner):
                 raise PlacementError(f"layer {layer_idx} has a non-owner entry")
 
-    # (2) compact slots per (layer, device): dense [0, count) with no dups/gaps
-    all_devices = (Device.CUDA, Device.B70, Device.CPU)
+    # (2) compact slots per concrete device: dense [0, count), no dups/gaps
     for layer_idx, layer in enumerate(p.owners):
-        seen: dict[Device, set[int]] = {d: set() for d in all_devices}
-        counts: dict[Device, int] = {d: 0 for d in all_devices}
+        seen: dict[DeviceTarget, set[int]] = {}
         for owner in layer:
-            counts[owner.device] += 1
-            if owner.slot in seen[owner.device]:
+            target = owner.target
+            slots = seen.setdefault(target, set())
+            if owner.slot < 0:
                 raise PlacementError(
-                    f"layer {layer_idx}: duplicate {owner.device.value} "
+                    f"layer {layer_idx}: negative {target.label} slot {owner.slot}"
+                )
+            if owner.slot in slots:
+                raise PlacementError(
+                    f"layer {layer_idx}: duplicate {target.label} "
                     f"slot {owner.slot}"
                 )
-            seen[owner.device].add(owner.slot)
-        for device in all_devices:
-            slots = seen[device]
-            n = counts[device]
-            if slots != set(range(n)):
+            slots.add(owner.slot)
+        for target, slots in seen.items():
+            if slots != set(range(len(slots))):
                 raise PlacementError(
-                    f"layer {layer_idx}: {device.value} slots are not a dense "
-                    f"[0,{n}) range (got {sorted(slots)})"
+                    f"layer {layer_idx}: {target.label} slots are not a dense "
+                    f"[0,{len(slots)}) range (got {sorted(slots)})"
                 )
 
     # (3) + (4) CUDA-forced / offload-only-in-capable constraint.
-    # The CPU tier is held to the same layer restriction as the B70: it
-    # sources weights from the same NVFP4 layers, and allowing it to spread
-    # further would let a placement quietly put expert compute on the CPU in
-    # layers no offload policy was ever validated against.
+    # CPU is held to the same layer restriction as B70 because both source
+    # routed weights from an offline expert bank. Allowing either outside the
+    # bank-covered set would create an owner with no weights.
     for layer_idx, layer in enumerate(p.owners):
         capable = layer_idx in p.b70_capable_layers
         for exp_idx, owner in enumerate(layer):
@@ -578,29 +818,52 @@ def validate_placement(placement: Placement) -> None:
                     "non-B70-capable (FP8 / CUDA-forced) layer"
                 )
 
+    # (5) Optional resident-weight budgets.  Counts span layers because each
+    # layer has distinct expert weights resident on the target device.
+    limits: dict[DeviceTarget, DeviceCapacity] = {}
+    for capacity in p.device_capacities:
+        if capacity.target in limits:
+            raise PlacementError(
+                f"duplicate capacity for {capacity.target.label}"
+            )
+        limits[capacity.target] = capacity
+    for target, capacity in limits.items():
+        resident_experts = p.count_target(target)
+        required = resident_experts * capacity.bytes_per_expert
+        if required > capacity.capacity_bytes:
+            raise PlacementError(
+                f"{target.label} expert weights require {required} bytes "
+                f"({resident_experts} experts x {capacity.bytes_per_expert}) "
+                f"but capacity is {capacity.capacity_bytes} bytes"
+            )
+
 
 def b70_bank_covers(
     placement: Placement,
     *,
     bank_layers: int,
     bank_experts_per_layer: int,
+    bank_source_expert_ids: tuple[int, ...] = (),
 ) -> bool:
-    """Whether the Phase-1 NVFP4 bank physically holds every B70-owned expert.
+    """Whether the bank contains every source expert assigned off CUDA.
 
-    The bank is laid out as ``bank_layers * bank_experts_per_layer`` contiguous
-    NVFP4 records (layers 0..bank_layers-1). Any B70-owned expert must fall
-    inside that range. This is an explicit cross-check that the placement never
-    promises the B70 an expert it does not have.
+    SBINT401 banks carry an explicit sparse source-id list; legacy NVFP4
+    banks are contiguous prefixes and therefore retain the count fallback.
+    Device-local compact slots are never treated as source expert ids.
     """
     bank_layer_set = set(range(bank_layers))
+    resident_ids = (
+        set(bank_source_expert_ids)
+        if bank_source_expert_ids
+        else set(range(bank_experts_per_layer))
+    )
     for layer_idx, layer in enumerate(placement.owners):
-        for owner in layer:
-            if owner.device is Device.B70:
+        for expert_idx, owner in enumerate(layer):
+            if owner.device in (Device.B70, Device.CPU):
                 if layer_idx not in bank_layer_set:
                     return False
-                if owner.slot >= bank_experts_per_layer:
+                if expert_idx not in resident_ids:
                     return False
-    # b70_capable_layers must also be within the bank
     return placement.b70_capable_layers <= bank_layer_set
 
 
@@ -635,6 +898,8 @@ def policy_from_name(name: str) -> PlacementPolicy:
       * ``allout:<K>:<N>:<C>``  -> :class:`AllOutPolicy`(K layers,
                                    cuda_per_layer=N, cpu_per_layer=C);
                                    requires ``SHOOTING_BRAKE_ALL_OUT=1``
+      * ``fractional:<N>:<F>``  -> balance non-CUDA experts over B70 devices
+                                   ``0..N-1``, keeping fraction ``F`` on CUDA
 
     This is the swappable seam a future predictive / speculative offloader
     plugs into: implement :class:`PlacementPolicy` and register a name here.
@@ -645,6 +910,20 @@ def policy_from_name(name: str) -> PlacementPolicy:
         return SplitPolicy(cuda_per_layer=int(name.split(":", 1)[1]))
     if name.startswith("interleaved:"):
         return InterleavedPolicy(period=int(name.split(":", 1)[1]))
+    if name.startswith("fractional:"):
+        parts = name.split(":")
+        if len(parts) != 3:
+            raise PlacementError(
+                "fractional policy needs "
+                f"'fractional:<remote_devices>:<cuda_fraction>', got {name!r}"
+            )
+        device_count = int(parts[1])
+        if device_count < 1:
+            raise PlacementError("fractional policy needs at least one device")
+        return FractionalRemotePolicy(
+            remote_device_indices=tuple(range(device_count)),
+            cuda_fraction=float(parts[2]),
+        )
     if name.startswith("subset:"):
         parts = name.split(":")
         if len(parts) != 3:
@@ -705,8 +984,11 @@ def build_for_qualified(
         placement,
         bank_layers=qualified_model.bank_layers,
         bank_experts_per_layer=qualified_model.bank_experts_per_layer,
+        bank_source_expert_ids=getattr(
+            qualified_model, "bank_source_expert_ids", (),
+        ),
     ):
         raise PlacementError(
-            "placement assigns B70 experts the Phase-1 bank does not hold"
+            "placement assigns B70/CPU experts the selected bank does not hold"
         )
     return placement

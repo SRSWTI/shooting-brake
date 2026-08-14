@@ -29,6 +29,9 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+_M_BUCKET_LABELS = ("1", "2", "3-4", "5-8", "9-16", "17-32", ">32")
+
+
 class B70Poller:
     """Handle for the native polling thread.
 
@@ -107,6 +110,10 @@ class B70Poller:
             raise RuntimeError("sb_b70_poll_start failed")
         self._started = True
 
+    def reset(self) -> None:
+        """Zero native timing, shape, dispatch, and error counters."""
+        self._lib.sb_b70_poll_reset(self._handle)
+
     def stop(self) -> None:
         if not self._started:
             return
@@ -132,6 +139,21 @@ class B70Poller:
         return int(self._lib.sb_b70_poll_dispatch_count(self._handle))
 
     @property
+    def row_count(self) -> int:
+        """Total rows served: the sum of M over every dispatch."""
+        return int(self._lib.sb_b70_poll_row_count(self._handle))
+
+    @property
+    def m_histogram(self) -> dict[str, int]:
+        """Dispatch counts bucketed by M, to expose mixed decode/prefill data."""
+        return {
+            label: int(
+                self._lib.sb_b70_poll_m_bucket_count(self._handle, bucket)
+            )
+            for bucket, label in enumerate(_M_BUCKET_LABELS)
+        }
+
+    @property
     def error_count(self) -> int:
         """Failed dispatches.  Nonzero means results are untrustworthy."""
         return int(self._lib.sb_b70_poll_error_count(self._handle))
@@ -150,22 +172,49 @@ class B70Poller:
         return int(self._lib.sb_b70_poll_service_ns(self._handle)) / n / 1000.0
 
     @property
+    def total_mean_us(self) -> float:
+        """Mean profiled device-queue time per dispatch.
+
+        Zero unless ``SHOOTING_BRAKE_B70_PROFILE=1``. This spans the first
+        input copy through completion of the output copy. Level Zero copy
+        engines need not share a profiling timebase, so this raw span can
+        underflow. It is diagnostic only unless endpoint-clock comparability
+        has been established; only then does its difference from
+        :attr:`service_mean_us` isolate host-side issue/take work.
+        """
+        n = self.dispatch_count
+        if n == 0:
+            return 0.0
+        return int(self._lib.sb_b70_poll_total_ns(self._handle)) / n / 1000.0
+
+    @property
     def kernel_mean_us(self) -> float:
         """Mean on-device kernel time per dispatch.
 
         Zero unless ``SHOOTING_BRAKE_B70_PROFILE=1``; the provider only
         timestamps commands on a profiled queue.
 
-        Read against :attr:`service_mean_us` this splits the round trip into
-        the part set by B70 VRAM bandwidth, which is physics, and the
-        submission plus synchronisation remainder, which is not. Profiling
-        adds two marker submissions per dispatch, so take the service figure
-        from a separate unprofiled run.
+        When :attr:`total_mean_us` has a valid timebase, their difference is
+        device-queue work outside the kernel. Profiling adds two marker
+        submissions per dispatch, so quantify its perturbation with a separate
+        unprofiled run.
         """
         n = self.dispatch_count
         if n == 0:
             return 0.0
         return int(self._lib.sb_b70_poll_kernel_ns(self._handle)) / n / 1000.0
+
+    @property
+    def kernel_mean_us_per_row(self) -> float:
+        """Mean profiled kernel time per input row across all dispatches."""
+        rows = self.row_count
+        if rows == 0:
+            return 0.0
+        return (
+            int(self._lib.sb_b70_poll_kernel_ns(self._handle))
+            / rows
+            / 1000.0
+        )
 
     def __del__(self) -> None:
         try:

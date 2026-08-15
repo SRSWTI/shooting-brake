@@ -1083,19 +1083,16 @@ class HybridRoutedExperts(RoutedExperts):
         self._b70_prefill_stream = (
             b70_prefill_stream_enabled() and self._b70_graph_mode
         )
-        # Opt-in Marlin prefill: stream the layer's int4 slab from the
+        # Opt-in Marlin prefill: stream the layer's int4 experts from the
         # mmap'd bank to the 5090 and run fused_marlin_moe there, instead of
         # dispatching prefill-shaped batches to the B70's decode kernel.
-        # Resolved at construction for the same desync reason as above.
-        # Lazy construction: the streamer allocates two 584.7 MiB device
-        # slabs, which must not exist unless the path is actually enabled.
-        self._marlin_prefill: Any = None
+        # Resolved at construction for the same desync reason as above. The
+        # streamer itself is a module-level singleton behind a custom-op
+        # boundary (see marlin_prefill.py); nothing is allocated unless the
+        # path is enabled AND a prefill actually crosses the batch threshold.
         self._marlin_prefill_enabled = (
             os.environ.get("SHOOTING_BRAKE_PREFILL_MARLIN") == "1"
             and self._b70_graph_mode
-        )
-        self._marlin_prefill_verify = (
-            os.environ.get("SHOOTING_BRAKE_PREFILL_MARLIN_VERIFY") == "1"
         )
         self._cpu_id_map = _build_cpu_id_map(self.shooting_brake_placement)
         if self._cpu_active:
@@ -2858,26 +2855,14 @@ class HybridRoutedExperts(RoutedExperts):
             y_marlin = marlin_prefill_partial(
                 x, b70_ids, topk_weights, layer_idx, _b70_bank_path(),
             )
-            if self._marlin_prefill_verify:
-                # One-shot live A/B against the B70 dispatch path: same
-                # weights, two engines. Runs once, on the first prefill
-                # forward, then disarms -- it doubles the layer's cost.
-                self._marlin_prefill_verify = False
-                y_b70 = self._b70_prefill_partial_dispatch(
-                    x, b70_ids, topk_weights,
-                )
-                num = torch.linalg.norm((y_marlin.float() - y_b70.float()))
-                den = torch.linalg.norm(y_b70.float()) + 1e-30
-                rel = float(num / den)
-                logger.info(
-                    "Shooting Brake Marlin prefill VERIFY vs B70 dispatch: "
-                    "rel_l2=%.3e (layer %d, M=%d)", rel, layer_idx, x.shape[0],
-                )
-                if rel > 5e-2:
-                    raise RuntimeError(
-                        f"Marlin prefill diverges from the B70 dispatch path: "
-                        f"rel_l2={rel:.3e} > 5e-2 at layer {layer_idx}"
-                    )
+            # No in-situ verify branch here: this method runs inside vLLM's
+            # compiled forward, where traced control flow and side effects
+            # (a disarming flag, logging, raise) bake at trace time -- the
+            # first attempt silently never fired. Correctness is instead
+            # gated black-box: tensor-level vs CPU oracle at build time
+            # (benchmarks/results/marlin_poc/, cosine 0.999985) and a live
+            # prompt-logprob A/B marlin-on vs marlin-off (+0.0047 nats/tok,
+            # benchmarks/results/prefill_profile/marlin_logprob_ab.json).
             return y_marlin
 
         if (

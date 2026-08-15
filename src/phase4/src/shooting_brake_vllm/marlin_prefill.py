@@ -31,8 +31,8 @@ ACTIVATION dtype and requires scales in that dtype. fp16 scales with bf16
 activations do not error — they return zeros.
 
 Opt-in via ``SHOOTING_BRAKE_PREFILL_MARLIN=1``; default behaviour unchanged.
-``SHOOTING_BRAKE_PREFILL_MARLIN_VERIFY=1`` additionally runs the B70 dispatch
-path once, on the first prefill, and logs the partial-vs-partial error.
+Correctness is gated black-box (CPU-oracle PoC + live prompt-logprob A/B);
+an in-situ verify cannot live inside vLLM's compiled forward.
 """
 
 from __future__ import annotations

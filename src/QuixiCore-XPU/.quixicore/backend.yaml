@@ -1,0 +1,15 @@
+backend: xpu
+name: QuixiCore XPU
+repo: QuixiAI/QuixiCore-XPU
+umbrella: QuixiAI/QuixiCore
+contract: v0.1
+status: active
+targets:
+  - intel_arc
+  - intel_data_center_gpu
+  - future_xpu
+integrations:
+  - oneAPI
+  - SYCL
+  - Level Zero
+notes: Active native Intel GPU backend; operation maturity is tracked in kernels.yaml.

@@ -59,6 +59,11 @@ def peak_relative(reference: torch.Tensor, actual: torch.Tensor) -> float:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bank", type=Path, required=True)
+    parser.add_argument(
+        "--cycles", type=int, default=100,
+        help="Alternating A/B replays after the readable A->B->A case. Three "
+             "replays cannot exercise a flag-ordering race; this loop can.",
+    )
     parser.add_argument("--layer", type=int, default=0)
     parser.add_argument("--max-peak-relative", type=float, default=5e-5)
     args = parser.parse_args()
@@ -193,21 +198,107 @@ def main() -> None:
                 "combine_exact": True,
             })
 
+        # Fixture separation must be large relative to tolerance, otherwise
+        # "matched its own reference" is not a discriminating statement.
+        ref_separation = float((references["A"] - references["B"]).abs().max())
         separation = float((raw_by_step[0] - raw_by_step[1]).abs().max())
         if separation == 0.0:
             raise RuntimeError("fixtures A and B produced identical remote partials")
+
+        # Staleness is DISCRIMINATION, not bitwise identity. The kernel
+        # accumulates routes with fp32 atomics, so replay order varies and two
+        # correct runs of the same fixture are not bit-identical. Requiring
+        # max_abs == 0 would fail on a healthy system, which is exactly what it
+        # did. What a stale read actually looks like is a step whose output
+        # resembles the PREVIOUS fixture's reference more than its own.
+        discrimination: list[dict[str, object]] = []
+        for step, name in enumerate(("A", "B", "A")):
+            other = "B" if name == "A" else "A"
+            d_own = float((raw_by_step[step] - references[name]).abs().max())
+            d_other = float((raw_by_step[step] - references[other]).abs().max())
+            discrimination.append({
+                "step": step, "fixture": name,
+                "max_abs_vs_own_reference": d_own,
+                "max_abs_vs_other_reference": d_other,
+                "ratio_other_over_own": (d_other / d_own) if d_own else float("inf"),
+            })
+            if d_own >= d_other:
+                raise RuntimeError(
+                    f"step {step} fixture {name}: output is no closer to its own "
+                    f"reference ({d_own:.6g}) than to {other}'s ({d_other:.6g}) "
+                    "— stale or mis-selected buffer"
+                )
+
+        # Two correct runs of A each sit within the peak-relative bound of the
+        # same reference, so they must sit within roughly twice that of each
+        # other. Report the observed value rather than demanding zero.
         repeat_error = _error(raw_by_step[0], raw_by_step[2])
-        if repeat_error["max_abs"] != 0.0:
+        repeat_peak_rel = peak_relative(raw_by_step[0], raw_by_step[2])
+        if repeat_peak_rel > 2.0 * args.max_peak_relative:
             raise RuntimeError(
-                "A -> B -> A did not reproduce A exactly; stale/reset/order failure"
+                f"A repeat differs by peak-relative {repeat_peak_rel:.9g}, above "
+                f"2x the {args.max_peak_relative:.9g} bound; not attributable to "
+                "atomic accumulation order"
             )
+        # A->B->A above is the minimal readable case. Flag ordering and
+        # completion reset are RACES, and a race that only fires occasionally
+        # will pass three replays. Alternate many times and check every single
+        # replay against its own reference, so a one-in-fifty stale read is a
+        # failure rather than a rounding anecdote.
+        stress = {"cycles": 0, "worst_own_max_abs": 0.0,
+                  "min_discrimination_ratio": float("inf"),
+                  "combine_exact_failures": 0}
+        for cycle in range(args.cycles):
+            name = "A" if cycle % 2 == 0 else "B"
+            other = "B" if name == "A" else "A"
+            x, global_ids, weights, cuda_partial = fixtures[name]
+            x_static.copy_(x)
+            ids_static.copy_((global_ids - 54).to(torch.int32))
+            weights_static.copy_(weights)
+            cuda_static.copy_(cuda_partial)
+            graph.replay()
+            torch.cuda.synchronize()
+
+            raw = layer._dev_b70_fp32.detach().cpu().clone()
+            d_own = float((raw - references[name]).abs().max())
+            d_other = float((raw - references[other]).abs().max())
+            ratio = (d_other / d_own) if d_own else float("inf")
+            stress["cycles"] = cycle + 1
+            stress["worst_own_max_abs"] = max(stress["worst_own_max_abs"], d_own)
+            stress["min_discrimination_ratio"] = min(
+                stress["min_discrimination_ratio"], ratio
+            )
+            if not torch.equal(
+                combined_static.detach().cpu(),
+                torch.add(cuda_static, layer._dev_b70_bf16[:1]).detach().cpu(),
+            ):
+                stress["combine_exact_failures"] += 1
+            if d_own >= d_other:
+                raise RuntimeError(
+                    f"cycle {cycle} fixture {name}: stale or mis-selected buffer "
+                    f"(own {d_own:.6g} >= other {d_other:.6g})"
+                )
+            if peak_relative(references[name], raw) > args.max_peak_relative:
+                raise RuntimeError(
+                    f"cycle {cycle} fixture {name}: exceeded peak-relative bound"
+                )
+        if stress["combine_exact_failures"]:
+            raise RuntimeError(
+                f"{stress['combine_exact_failures']} of {stress['cycles']} "
+                "replays had a non-exact graph CUDA+B70 addition"
+            )
+
         print(json.dumps({
             "status": "PASS",
+            "stress": stress,
             "layer": args.layer,
             "sequence": ["A", "B", "A"],
             "max_peak_relative_bound": args.max_peak_relative,
             "a_b_max_abs_separation": separation,
             "a_repeat": repeat_error,
+            "a_repeat_peak_relative": repeat_peak_rel,
+            "reference_separation_max_abs": ref_separation,
+            "discrimination": discrimination,
             "steps": observations,
             "validated": [
                 "graph result freshness",

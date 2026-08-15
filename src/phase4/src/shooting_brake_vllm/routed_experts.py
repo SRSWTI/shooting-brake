@@ -1083,6 +1083,20 @@ class HybridRoutedExperts(RoutedExperts):
         self._b70_prefill_stream = (
             b70_prefill_stream_enabled() and self._b70_graph_mode
         )
+        # Opt-in Marlin prefill: stream the layer's int4 slab from the
+        # mmap'd bank to the 5090 and run fused_marlin_moe there, instead of
+        # dispatching prefill-shaped batches to the B70's decode kernel.
+        # Resolved at construction for the same desync reason as above.
+        # Lazy construction: the streamer allocates two 584.7 MiB device
+        # slabs, which must not exist unless the path is actually enabled.
+        self._marlin_prefill: Any = None
+        self._marlin_prefill_enabled = (
+            os.environ.get("SHOOTING_BRAKE_PREFILL_MARLIN") == "1"
+            and self._b70_graph_mode
+        )
+        self._marlin_prefill_verify = (
+            os.environ.get("SHOOTING_BRAKE_PREFILL_MARLIN_VERIFY") == "1"
+        )
         self._cpu_id_map = _build_cpu_id_map(self.shooting_brake_placement)
         if self._cpu_active:
             hidden = self.hidden_size
@@ -2830,6 +2844,42 @@ class HybridRoutedExperts(RoutedExperts):
         Decode never reaches this method at all, so the B70 keeps serving
         the regime it is good at, where dispatch beats streaming ~9x at M=1.
         """
+        # Tier 0 (opt-in): stream the layer's int4 slab to the 5090 and run
+        # fused_marlin_moe there. Same weights decode serves from the B70, so
+        # the served model is unchanged; only the prefill engine differs. The
+        # B70's per-route kernel does O(M x top_k) weight reads and a profiled
+        # 8K prefill measured the 5090 idle 97% waiting on it; this path does
+        # the same layer in 6.6 ms at M=8192 (benchmarks/results/marlin_poc/).
+        if self._marlin_prefill_enabled and not torch.cuda.is_current_stream_capturing():
+            # Custom-op boundary: the streamer is opaque to vLLM's compiled
+            # forward (see marlin_prefill.py for why this is load-bearing).
+            from .marlin_prefill import marlin_prefill_partial
+
+            y_marlin = marlin_prefill_partial(
+                x, b70_ids, topk_weights, layer_idx, _b70_bank_path(),
+            )
+            if self._marlin_prefill_verify:
+                # One-shot live A/B against the B70 dispatch path: same
+                # weights, two engines. Runs once, on the first prefill
+                # forward, then disarms -- it doubles the layer's cost.
+                self._marlin_prefill_verify = False
+                y_b70 = self._b70_prefill_partial_dispatch(
+                    x, b70_ids, topk_weights,
+                )
+                num = torch.linalg.norm((y_marlin.float() - y_b70.float()))
+                den = torch.linalg.norm(y_b70.float()) + 1e-30
+                rel = float(num / den)
+                logger.info(
+                    "Shooting Brake Marlin prefill VERIFY vs B70 dispatch: "
+                    "rel_l2=%.3e (layer %d, M=%d)", rel, layer_idx, x.shape[0],
+                )
+                if rel > 5e-2:
+                    raise RuntimeError(
+                        f"Marlin prefill diverges from the B70 dispatch path: "
+                        f"rel_l2={rel:.3e} > 5e-2 at layer {layer_idx}"
+                    )
+            return y_marlin
+
         if (
             self._b70_prefill_stream
             and b70_global_ids is not None
@@ -2851,6 +2901,16 @@ class HybridRoutedExperts(RoutedExperts):
                 layer_idx, x, b70_global_ids, topk_weights,
             )
 
+        return self._b70_prefill_partial_dispatch(x, b70_ids, topk_weights)
+
+    def _b70_prefill_partial_dispatch(
+        self,
+        x: torch.Tensor,
+        b70_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """The original chunked B70 dispatch, factored out so the Marlin
+        verify arm can call it on identical inputs."""
         M = x.shape[0]
         cap = self._b70_max_batch
         out = torch.empty(M, self.hidden_size, dtype=x.dtype, device=x.device)

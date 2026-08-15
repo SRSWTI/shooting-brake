@@ -1,0 +1,110 @@
+{
+  "status": "PASS",
+  "stress": {
+    "cycles": 200,
+    "worst_own_max_abs": 2.153683453798294e-09,
+    "min_discrimination_ratio": 1152510.2702702703,
+    "combine_exact_failures": 0
+  },
+  "layer": 0,
+  "sequence": [
+    "A",
+    "B",
+    "A"
+  ],
+  "max_peak_relative_bound": 5e-05,
+  "a_b_max_abs_separation": 0.0024821425322443247,
+  "a_repeat": {
+    "max_abs": 1.1641532182693481e-10,
+    "mean_abs": 7.175704475059774e-12,
+    "rel_l2": 5.4931049930928566e-08,
+    "cosine": 1.0
+  },
+  "a_repeat_peak_relative": 1.1602959265142819e-07,
+  "reference_separation_max_abs": 0.00248214160092175,
+  "discrimination": [
+    {
+      "step": 0,
+      "fixture": "A",
+      "max_abs_vs_own_reference": 8.167262421920896e-10,
+      "max_abs_vs_other_reference": 0.00248214160092175,
+      "ratio_other_over_own": 3039135.35857461
+    },
+    {
+      "step": 1,
+      "fixture": "B",
+      "max_abs_vs_own_reference": 2.153683453798294e-09,
+      "max_abs_vs_other_reference": 0.0024821425322443247,
+      "ratio_other_over_own": 1152510.3783783785
+    },
+    {
+      "step": 2,
+      "fixture": "A",
+      "max_abs_vs_own_reference": 8.167262421920896e-10,
+      "max_abs_vs_other_reference": 0.00248214160092175,
+      "ratio_other_over_own": 3039135.35857461
+    }
+  ],
+  "steps": [
+    {
+      "step": 0,
+      "fixture": "A",
+      "raw_remote_vs_cpu": {
+        "max_abs": 8.167262421920896e-10,
+        "mean_abs": 1.8168143378627377e-10,
+        "rel_l2": 8.339072223861876e-07,
+        "cosine": 1.0
+      },
+      "combined_vs_fp32_cpu_oracle": {
+        "max_abs": 0.0009498000144958496,
+        "mean_abs": 0.00019142101518809795,
+        "rel_l2": 0.00070645083906129,
+        "cosine": 1.0
+      },
+      "raw_remote_peak_relative": 8.140202053956087e-07,
+      "combine_exact": true
+    },
+    {
+      "step": 1,
+      "fixture": "B",
+      "raw_remote_vs_cpu": {
+        "max_abs": 2.153683453798294e-09,
+        "mean_abs": 4.1913628123779745e-10,
+        "rel_l2": 8.632464982838428e-07,
+        "cosine": 0.9999999403953552
+      },
+      "combined_vs_fp32_cpu_oracle": {
+        "max_abs": 0.0019372105598449707,
+        "mean_abs": 0.00040885948692448437,
+        "rel_l2": 0.0009351580520160496,
+        "cosine": 0.9999998807907104
+      },
+      "raw_remote_peak_relative": 9.336548874410902e-07,
+      "combine_exact": true
+    },
+    {
+      "step": 2,
+      "fixture": "A",
+      "raw_remote_vs_cpu": {
+        "max_abs": 8.167262421920896e-10,
+        "mean_abs": 1.8152152003736433e-10,
+        "rel_l2": 8.332609127137403e-07,
+        "cosine": 0.9999998807907104
+      },
+      "combined_vs_fp32_cpu_oracle": {
+        "max_abs": 0.0009498000144958496,
+        "mean_abs": 0.00019142101518809795,
+        "rel_l2": 0.00070645083906129,
+        "cosine": 1.0
+      },
+      "raw_remote_peak_relative": 8.140202053956087e-07,
+      "combine_exact": true
+    }
+  ],
+  "validated": [
+    "graph result freshness",
+    "signal/completion/reset ordering",
+    "static output buffer selection",
+    "graph CUDA+B70 addition"
+  ]
+}

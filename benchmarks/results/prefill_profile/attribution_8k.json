@@ -1,0 +1,31 @@
+{
+  "kind": "prefill_attribution_8k",
+  "config": "serve_88b_128k_profile.sh (SHOOTING_BRAKE_B70_PROFILE=1, torch profiler, B70 = Gen3 x4 card 11:00.0 -- the production card to date)",
+  "prompt_tokens": 8192,
+  "decode_steps": 4,
+  "wall_truth_unprofiled_grid_b_s": 21.86,
+  "warmup_ttft_b70_markers_only_s": 24.27,
+  "measured_ttft_full_profiling_s": 27.65,
+  "trace": "/home/shooting-brake007/srswti/shooting-brake/benchmarks/results/prefill_profile/traces/dp0_pp0_tp0_dcp0_ep0_rank0.1786765550959565152.pt.trace.json.gz",
+  "device_span_s": 27.74,
+  "gpu_busy_s": 0.82,
+  "gpu_idle_s": 26.92,
+  "gpu_idle_share": 0.9704,
+  "busy_by_category_s": {
+    "moe_marlin": 0.279,
+    "unattributed_gemm": 0.149,
+    "memory_transfer": 0.142,
+    "full_attention": 0.081,
+    "other": 0.07,
+    "gdn_attention": 0.07,
+    "norms": 0.022,
+    "sampling": 0.004,
+    "router": 0.003
+  },
+  "dispatch_estimate": {
+    "dispatches": 192,
+    "note": "48 layers x 4 chunks of M=2048",
+    "idle_per_dispatch_ms": 140.2
+  },
+  "verdict": "B70 leg = 97% of prefill span; kill condition (>=80%) PASSED. Streaming design GO. Profiling overhead caveat: B70 markers add ~11% wall (21.86 -> 24.27 s); shares, not absolute times, are the result."
+}

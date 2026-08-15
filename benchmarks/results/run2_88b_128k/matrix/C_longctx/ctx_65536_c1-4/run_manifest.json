@@ -1,0 +1,100 @@
+{
+  "cell": "C_longctx/ctx_65536_c1-4",
+  "grid": "C_longctx",
+  "profile": "concurrent",
+  "prompt_tokens": 65536,
+  "output_tokens": 512,
+  "streams": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "sweep_size": null,
+  "max_requests": 8,
+  "max_seconds": null,
+  "thinking": false,
+  "request_format": "/v1/chat/completions",
+  "notes": "long-context concurrency. 16 blocks x 4,176 = 66,816 tokens per seat, so C=3 fits at 200,448 and C=4 needs 267,264 > 262,144: the C=4 rung is the admission boundary and must be read as capacity, not throughput",
+  "command": [
+    "/home/shooting-brake007/srswti/shooting-brake/.venv/bin/python",
+    "-m",
+    "guidellm",
+    "run",
+    "--backend",
+    "kind=openai_http,target=http://127.0.0.1:8016,model=shooting-brake-88b,request_format=/v1/chat/completions,extras.body.chat_template_kwargs.enable_thinking=false",
+    "--tokenizer",
+    "kind=huggingface_auto,model=srswti/axe-superveloce-88b-nvfp4a16,load_kwargs.trust_remote_code=true",
+    "--profile",
+    "kind=concurrent,warmup=0,cooldown=0,rampup_duration=0.0",
+    "--data",
+    "kind=synthetic_text,prompt_tokens=65536,output_tokens=512",
+    "--seed",
+    "kind=static,value=703299690",
+    "--override",
+    "profile.streams",
+    "1,2,3,4",
+    "--constraint",
+    "kind=max_requests,count=8",
+    "--constraint",
+    "kind=max_errors,count=5",
+    "--output",
+    "kind=json,path=benchmarks/results/run2_88b_128k/matrix/C_longctx/ctx_65536_c1-4/report.json",
+    "--output",
+    "kind=csv,path=benchmarks/results/run2_88b_128k/matrix/C_longctx/ctx_65536_c1-4/report.csv",
+    "--output",
+    "kind=html,path=benchmarks/results/run2_88b_128k/matrix/C_longctx/ctx_65536_c1-4/report.html",
+    "--disable-console-interactive"
+  ],
+  "seed": 703299690,
+  "return_code": 0,
+  "elapsed_seconds": 5447.87,
+  "capacity": {
+    "peak_kv_tokens_if_full": 267264,
+    "kv_tokens_available": 262144,
+    "capacity_bound": true,
+    "interpretation": "offered concurrency exceeds KV capacity; treat as admission capacity, not throughput"
+  },
+  "measured": true,
+  "measurement_detail": {
+    "benchmarks": [
+      {
+        "index": 0,
+        "successful": 8,
+        "errored": 0,
+        "duration": 1030.606678724289,
+        "warmup_duration": 171.81574130058289,
+        "cooldown_duration": 172.08019375801086,
+        "measured": true
+      },
+      {
+        "index": 1,
+        "successful": 8,
+        "errored": 0,
+        "duration": 1018.7507684230804,
+        "warmup_duration": 339.2952754497528,
+        "cooldown_duration": 0.09520244598388672,
+        "measured": true
+      },
+      {
+        "index": 2,
+        "successful": 8,
+        "errored": 0,
+        "duration": 845.7748756408691,
+        "warmup_duration": 507.103755235672,
+        "cooldown_duration": 0.0959010124206543,
+        "measured": true
+      },
+      {
+        "index": 3,
+        "successful": 8,
+        "errored": 0,
+        "duration": 845.1676287651062,
+        "warmup_duration": 507.35145020484924,
+        "cooldown_duration": 0.10911226272583008,
+        "measured": true
+      }
+    ]
+  },
+  "transients_trimmed": false
+}

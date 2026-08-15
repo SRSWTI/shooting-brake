@@ -1,0 +1,44 @@
+{
+  "bank": "src/phase1/expert_bank_int4.bin",
+  "layer": 0,
+  "experts": 126,
+  "hidden": 3072,
+  "intermediate": 1024,
+  "correctness": {
+    "rel_l2": 0.00570162758231163,
+    "cosine": 0.9999851584434509,
+    "bound_rel_l2": 0.02,
+    "bound_cosine": 0.999,
+    "m": 48,
+    "expert_subset": [
+      3,
+      4,
+      11,
+      15,
+      16,
+      18,
+      22,
+      58,
+      65,
+      67,
+      79,
+      85,
+      90,
+      92,
+      99,
+      101
+    ]
+  },
+  "bench": {
+    "m": 8192,
+    "iters": 7,
+    "kernel_ms_median": 6.5775041580200195,
+    "stream_h2d_repack_ms_median": 40.6513880006969,
+    "per_layer_serial_ms": 47.22889215871692,
+    "per_layer_pipelined_bound_ms": 40.6513880006969,
+    "prefill_48_layers_serial_s": 2.266986823618412,
+    "prefill_48_layers_pipelined_s": 1.951266624033451,
+    "today_b70_dispatch_8k_s": 21.86
+  },
+  "gpu": "NVIDIA GeForce RTX 5090"
+}

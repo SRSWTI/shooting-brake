@@ -1,0 +1,61 @@
+{
+  "kind": "prefill_floor_register",
+  "bank": "/home/shooting-brake007/srswti/shooting-brake/src/phase1/expert_bank_int4.bin.marlin",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.13.0+cu130",
+  "bank_gib": 27.40869140625,
+  "register_s": 3.725510825000015,
+  "register_gib_per_s": 7.357029060907343,
+  "unregister_s": 0.21718129599992153,
+  "meminfo_before": {
+    "MemTotal_gib": 59.438385009765625,
+    "MemFree_gib": 6.7589874267578125,
+    "MemAvailable_gib": 54.311100006103516,
+    "Cached_gib": 47.59478759765625,
+    "Unevictable_gib": 7.62939453125e-05,
+    "Mlocked_gib": 7.62939453125e-05
+  },
+  "meminfo_after": {
+    "MemTotal_gib": 59.438385009765625,
+    "MemFree_gib": 0.9276809692382812,
+    "MemAvailable_gib": 26.641651153564453,
+    "Cached_gib": 25.83580780029297,
+    "Unevictable_gib": 7.62939453125e-05,
+    "Mlocked_gib": 7.62939453125e-05
+  },
+  "available_delta_gib": 27.669448852539062,
+  "thp_vmstat_delta": {
+    "thp_fault_alloc": 0,
+    "thp_collapse_alloc": 0,
+    "thp_collapse_alloc_failed": 0,
+    "thp_split_page": 0,
+    "thp_split_page_failed": 0
+  },
+  "h2d_spot_checks": {
+    "0": {
+      "s": 0.010638336181640624,
+      "gib_per_s": 53.67516071566881
+    },
+    "8": {
+      "s": 0.010589280128479005,
+      "gib_per_s": 53.92381704599337
+    },
+    "16": {
+      "s": 0.010587295532226563,
+      "gib_per_s": 53.9339251047418
+    },
+    "24": {
+      "s": 0.010586879730224609,
+      "gib_per_s": 53.936043371370246
+    },
+    "32": {
+      "s": 0.01058745574951172,
+      "gib_per_s": 53.933108936319236
+    },
+    "40": {
+      "s": 0.010586943626403809,
+      "gib_per_s": 53.93571784710052
+    }
+  },
+  "kill_condition": "OOM, MemAvailable < ~8 GiB after pin, or spot rate << 52.8"
+}

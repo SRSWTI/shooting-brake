@@ -46,6 +46,14 @@ export SHOOTING_BRAKE_B70_LIB="$PWD/src/phase7/libsb_b70_provider.so"
 export ZE_AFFINITY_MASK="${ZE_AFFINITY_MASK:-1}"
 export SHOOTING_BRAKE_PREFILL_MARLIN="${SHOOTING_BRAKE_PREFILL_MARLIN:-1}"
 unset SHOOTING_BRAKE_B70_PROFILE VLLM_USE_BREAKABLE_CUDAGRAPH
+# Stream-once (Tier A) launch recipe, gated on the run5 A/B first:
+#   SB_MNBT=32768                      one scheduler step per 32K prompt
+#   VLLM_FUSED_MOE_CHUNK_SIZE=8192     caps the LOCAL experts' locked
+#                                      workspace (sized at MNBT otherwise)
+#   SHOOTING_BRAKE_PREFILL_TILE=8192   caps the streamer's GEMM scratch
+#   SHOOTING_BRAKE_BANK_REGISTER=1     pinned page-cache DMA, 53.9 GiB/s
+#   SB_EXTRA_ARGS='-O.max_cudagraph_capture_size=4096'  keeps capture
+#                                      memory flat when MNBT rises
 echo "=== launching 128K $(date '+%H:%M:%S')"
 exec .venv/bin/vllm serve srswti/axe-superveloce-88b-nvfp4a16 \
   --served-model-name shooting-brake-88b \
@@ -53,4 +61,4 @@ exec .venv/bin/vllm serve srswti/axe-superveloce-88b-nvfp4a16 \
   --trust-remote-code --language-model-only \
   --max-model-len 131072 --max-num-batched-tokens "${SB_MNBT:-8192}" \
   --gpu-memory-utilization 0.90 --max-num-seqs "${SB_MNS:-16}" \
-  --reasoning-parser qwen3
+  --reasoning-parser qwen3 ${SB_EXTRA_ARGS}

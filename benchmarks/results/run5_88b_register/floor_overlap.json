@@ -1,0 +1,18 @@
+{
+  "kind": "prefill_floor_overlap",
+  "bank": "/home/shooting-brake007/srswti/shooting-brake/src/phase1/expert_bank_int4.bin.marlin",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.13.0+cu130",
+  "layers": 48,
+  "m": 32768,
+  "gib_streamed": 27.40869140625,
+  "register_s": 4.495973865999986,
+  "stream_alone_s": 0.5090302569999494,
+  "stream_alone_gib_per_s": 53.844915954087824,
+  "compute_alone_s": 1.3077377969999588,
+  "together_s": 1.33961323799997,
+  "ideal_max_s": 1.3077377969999588,
+  "overlap_efficiency": 0.9762054896922333,
+  "degradation_vs_max": 0.024374489345750705,
+  "kill_condition": "degradation_vs_max > 0.20"
+}

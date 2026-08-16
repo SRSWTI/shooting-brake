@@ -1,0 +1,46 @@
+{
+  "kind": "hostregister_mmap_probe",
+  "bank": "src/phase1/expert_bank_int4.bin",
+  "slab_bytes": 613122048,
+  "slab_mib": 584.71875,
+  "iters": 9,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.13.0+cu130",
+  "readonly_control": {
+    "status": 1,
+    "expected": "nonzero (cudaErrorInvalidValue=1) without ReadOnly flag"
+  },
+  "fault_pass_s": 0.012074821999704,
+  "register_s": 0.1627552400004788,
+  "register_gib_per_s": 3.5084240869614716,
+  "unregister_s": 0.004246288999638637,
+  "h2d_registered_mmap": {
+    "median_s": 0.010599424362182617,
+    "min_s": 0.010587136268615722,
+    "max_s": 0.010807583808898926,
+    "gib_per_s_median": 53.8722089790254,
+    "raw_s": [
+      0.010807583808898926,
+      0.010587136268615722,
+      0.01063385581970215,
+      0.010613408088684082,
+      0.010591967582702637,
+      0.010603584289550782,
+      0.010592096328735352,
+      0.010599424362182617,
+      0.010589664459228515
+    ]
+  },
+  "submit_wall_s_median": 8.500001058564521e-06,
+  "async_dma_path": true,
+  "first_mib_matches_file": true,
+  "reference_ceilings_gib_per_s": {
+    "pinned_hostalloc_dma": 52.78,
+    "pageable_mmap": 18.54,
+    "source": "benchmarks/results/slab_h2d/slab_h2d.json"
+  },
+  "derived": {
+    "forward_48_layers_s_at_this_rate": 0.5087723693847657,
+    "full_bank_register_projection_s": 7.812251520022982
+  }
+}

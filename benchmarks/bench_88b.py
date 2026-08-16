@@ -58,20 +58,22 @@ MODEL_SERVED = "shooting-brake-88b"
 MODEL_TOKENIZER = "srswti/axe-superveloce-88b-nvfp4a16"
 TARGET = "http://127.0.0.1:8016"
 
-# Measured from the 128K server's own startup log, not computed. Both values
-# move when max_num_seqs changes: raising it 8 -> 64 grew the CUDA graph capture
-# set and cost 0.36 GiB of KV (3.74 -> 3.38 GiB, 292,103 -> 262,144 tokens).
+# Fallbacks measured from a PRIOR 128K server's startup log. Both values move
+# with config (max_num_seqs, resident streamer buffers), which bit us once: a
+# summary header quoted 262,144/62 seats against a server running 190,990/45.
+# Always pass --kv-tokens/--max-num-seqs scraped from THIS run's server log;
+# main() overrides these globals before any cell math runs.
 KV_TOKENS = 262_144
 
 # The hybrid allocator pads the attention block to match the GDN/Mamba page
 # ("attention block size to 4176" in the server log). A sequence therefore
 # consumes whole 4,176-token blocks, so a 640-token request costs 4,176 -- not
-# 640. Capacity is 262,144 / 4,176 = 62 short sequences, not the 456 a naive
-# token division suggests. Every admission check below rounds to blocks.
+# 640. Capacity is KV_TOKENS / 4,176 blocks. Every admission check below
+# rounds to blocks.
 KV_BLOCK_TOKENS = 4_176
 MAX_MODEL_LEN = 131_072
 MAX_NUM_SEQS = 64
-MAX_CONCURRENT_SEATS = KV_TOKENS // KV_BLOCK_TOKENS  # 62
+MAX_CONCURRENT_SEATS = KV_TOKENS // KV_BLOCK_TOKENS
 
 # Chat template overhead measured on this model: a 128-token synthetic prompt
 # arrives as 140 input tokens. Long-context cells need that margin or the
@@ -238,6 +240,11 @@ def guidellm_command(cell: Cell, out_dir: Path, seed: int) -> list[str]:
         f"kind={cell.profile},{transients},"
         f"rampup_duration={cell.rampup}"
     )
+    if cell.profile == "throughput":
+        # This guidellm requires profile.throughput.max_concurrency (the
+        # suite's one failed cell). Offer 2x the admission cap so the
+        # ceiling measured is the server's, not the client's.
+        profile += f",max_concurrency={2 * MAX_NUM_SEQS}"
 
     cmd = [
         sys.executable, "-m", "guidellm", "run",
@@ -563,12 +570,28 @@ def main() -> int:
     ap.add_argument("--output-tokens", type=int, default=512)
     ap.add_argument("--seed", type=int, default=2928)
     ap.add_argument("--grids", default="",
-                    help="Comma-separated grid prefixes to run; empty = all.")
+                    help="Comma-separated grid names to run (exact), e.g. "
+                         "B_context,A_decode; empty = all.")
+    ap.add_argument("--cells", default="",
+                    help="Comma-separated grid/name cells to run (exact), "
+                         "e.g. B_context/ctx_8192; empty = all.")
     ap.add_argument("--skip-existing", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--summarize", action="store_true",
                     help="Rebuild MEASURED.md/summary.json from existing reports.")
+    ap.add_argument("--kv-tokens", type=int, default=None,
+                    help="GPU KV cache size in tokens from THIS server's log; "
+                         "overrides the stale module fallback.")
+    ap.add_argument("--max-num-seqs", type=int, default=None,
+                    help="max_num_seqs of THIS server; overrides the fallback.")
     args = ap.parse_args()
+
+    global KV_TOKENS, MAX_NUM_SEQS, MAX_CONCURRENT_SEATS
+    if args.kv_tokens is not None:
+        KV_TOKENS = args.kv_tokens
+    if args.max_num_seqs is not None:
+        MAX_NUM_SEQS = args.max_num_seqs
+    MAX_CONCURRENT_SEATS = KV_TOKENS // KV_BLOCK_TOKENS
 
     if args.summarize:
         print(summarize(args.root))
@@ -578,6 +601,12 @@ def main() -> int:
     if args.grids:
         wanted = {g.strip() for g in args.grids.split(",") if g.strip()}
         cells = [c for c in cells if c.grid in wanted]
+    if args.cells:
+        wanted_cells = {c.strip() for c in args.cells.split(",") if c.strip()}
+        cells = [c for c in cells if f"{c.grid}/{c.name}" in wanted_cells]
+        missing = wanted_cells - {f"{c.grid}/{c.name}" for c in cells}
+        if missing:
+            ap.error(f"unknown cells: {sorted(missing)}")
 
     args.root.mkdir(parents=True, exist_ok=True)
     print(f"{len(cells)} cells -> {args.root}")

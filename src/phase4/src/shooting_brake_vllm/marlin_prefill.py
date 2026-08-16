@@ -20,14 +20,19 @@ Opt-in via ``SHOOTING_BRAKE_PREFILL_MARLIN=1``; default behaviour unchanged.
 ``SHOOTING_BRAKE_MARLIN_BANK`` overrides the bank path (default: the int4
 bank path + ``.marlin``). ``SHOOTING_BRAKE_MARLIN_ARENAS`` sets the ring
 size (default 2; 1 saves 584.7 MiB of VRAM at the cost of H2D/kernel
-overlap). Correctness is gated black-box (CPU-oracle PoC + live
-prompt-logprob A/B); an in-situ verify cannot live inside vLLM's compiled
-forward.
+overlap). ``SHOOTING_BRAKE_BANK_REGISTER=1`` pins the bank's mmap'd page
+cache with ``cudaHostRegister`` so the per-layer H2D runs as true async DMA
+at the measured 53.9 GiB/s ceiling instead of the 18.5 GiB/s pageable path
+(probe: benchmarks/results/slab_h2d/hostregister_probe.json). Correctness
+is gated black-box (CPU-oracle PoC + live prompt-logprob A/B); an in-situ
+verify cannot live inside vLLM's compiled forward.
 """
 
 from __future__ import annotations
 
+import mmap
 import os
+import time
 
 import numpy as np
 import torch
@@ -77,7 +82,7 @@ class MarlinPrefillStreamer:
                 f"mismatch. Rebuild with build_marlin_bank.py "
                 f"--scales-dtype {'bf16' if act_dtype == torch.bfloat16 else 'fp16'}"
             )
-        self._mm = np.memmap(path, dtype=np.uint8, mode="r")
+        self._base_t = self._open_bank_source(path, h)
         self.device = torch.device(device)
         self.act_dtype = act_dtype
         self._e = h.experts_per_layer
@@ -123,11 +128,70 @@ class MarlinPrefillStreamer:
 
     # -- staging --------------------------------------------------------------
 
+    def _open_bank_source(self, path: str, h) -> torch.Tensor:
+        """uint8 view over the bank's plane data, pageable or pinned.
+
+        Default: np.memmap -- CUDA's pageable H2D path, 18.5 GiB/s.
+
+        SHOOTING_BRAKE_BANK_REGISTER=1: mmap MAP_PRIVATE|PROT_WRITE over the
+        O_RDONLY fd (legal: COW reserves the write option and never fires --
+        we never write; sidesteps cudaHostRegisterReadOnly and its device-
+        attribute lottery), then cudaHostRegister the plane region so the
+        existing non_blocking copy becomes true async DMA at 53.9 GiB/s
+        (measured, benchmarks/results/slab_h2d/hostregister_probe.json).
+
+        Registration happens here, i.e. lazily in the WORKER process --
+        after any engine fork. Pinned MAP_PRIVATE pages + fork() is the
+        classic get_user_pages COW hazard; constructing post-fork sidesteps
+        it. Hard-fail on register error: a failed cudaHostRegister poisons
+        the next CUDA runtime check in this process (measured), so a silent
+        pageable fallback would serve corrupted-context behaviour, not a
+        slower copy.
+        """
+        data_len = h.num_layers * h.layer_stride_bytes
+        if os.environ.get("SHOOTING_BRAKE_BANK_REGISTER", "0") != "1":
+            self._mm = np.memmap(path, dtype=np.uint8, mode="r")
+            return torch.from_numpy(
+                np.asarray(self._mm[h.data_offset: h.data_offset + data_len])
+            )
+
+        map_len = h.data_offset + data_len
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            self._mmap = mmap.mmap(
+                fd, map_len, flags=mmap.MAP_PRIVATE,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            )
+        finally:
+            os.close(fd)
+        self._mmap.madvise(mmap.MADV_WILLNEED)  # async readahead before gup
+        base = torch.frombuffer(
+            memoryview(self._mmap)[h.data_offset: h.data_offset + data_len],
+            dtype=torch.uint8,
+        )
+        # data_offset and layer_stride are ALIGNMENT(4096)-aligned by the
+        # bank ABI, so the registered range is page-aligned by construction.
+        t0 = time.perf_counter()
+        status = int(torch.cuda.cudart().cudaHostRegister(
+            base.data_ptr(), data_len, 0
+        ))
+        if status != 0:
+            raise RuntimeError(
+                f"cudaHostRegister({data_len} B) failed with cudaError {status}"
+                " -- refusing pageable fallback: the failed call poisons the"
+                " CUDA context. Unset SHOOTING_BRAKE_BANK_REGISTER to run"
+                " pageable."
+            )
+        logger.info(
+            "Registered %.1f GiB bank page cache in %.1f s (%.2f GiB/s)",
+            data_len / 2**30, time.perf_counter() - t0,
+            data_len / 2**30 / max(time.perf_counter() - t0, 1e-9),
+        )
+        return base
+
     def _layer_cpu(self, layer: int) -> torch.Tensor:
-        h = self._hdr
-        off = h.data_offset + layer * h.layer_stride_bytes
-        view = np.asarray(self._mm[off: off + h.layer_stride_bytes])
-        return torch.from_numpy(view)
+        stride = self._hdr.layer_stride_bytes
+        return self._base_t[layer * stride: (layer + 1) * stride]
 
     def prefetch(self, layer: int) -> None:
         """Start layer's arena H2D on the copy stream (idempotent)."""
@@ -173,11 +237,32 @@ class MarlinPrefillStreamer:
         ).to(torch.float32)
         ids = b70_ids.clamp_min(0).to(torch.int32)
 
-        y = fused_marlin_moe(
-            x.contiguous(), v["m13"], v["m2"], None, None, v["s13"], v["s2"],
-            weights, ids, quant_type_id=scalar_types.uint4b8.id,
-            global_num_experts=self._e,
-        )
+        # M-tiling: _fused_marlin_moe with None caches torch.empty's
+        # ~2*M*top_k*max(2N,K) bytes of GEMM scratch per call -- 1.6+ GiB at
+        # M=32768. Tiling token rows caps scratch at tile size while the
+        # arena (the expensive part: 584.7 MiB streamed once per layer per
+        # step) is reused by every tile. Numerically identical: the kernel
+        # is per-token independent (no atomics, ordered fp32 reduction,
+        # per-row top-k weighted sum). This is what makes MNBT=32K+
+        # stream-once prefill affordable: one step = one bank pass.
+        tile = max(1, int(os.environ.get("SHOOTING_BRAKE_PREFILL_TILE", "8192")))
+        m = x.shape[0]
+        if m <= tile:
+            y = fused_marlin_moe(
+                x.contiguous(), v["m13"], v["m2"], None, None, v["s13"], v["s2"],
+                weights, ids, quant_type_id=scalar_types.uint4b8.id,
+                global_num_experts=self._e,
+            )
+        else:
+            y = torch.empty_like(x)
+            for lo in range(0, m, tile):
+                hi = min(lo + tile, m)
+                y[lo:hi] = fused_marlin_moe(
+                    x[lo:hi].contiguous(), v["m13"], v["m2"], None, None,
+                    v["s13"], v["s2"], weights[lo:hi], ids[lo:hi],
+                    quant_type_id=scalar_types.uint4b8.id,
+                    global_num_experts=self._e,
+                ).to(x.dtype)
         # The kernel is enqueued; the event lands after it in stream order,
         # releasing this slot for the copy stream. Then start the next
         # layer's H2D so it overlaps this layer's kernel + everything else.

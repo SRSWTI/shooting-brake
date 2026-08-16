@@ -1,0 +1,63 @@
+{
+  "kind": "prefill_floor_compute",
+  "bank": "/home/shooting-brake007/srswti/shooting-brake/src/phase1/expert_bank_int4.bin.marlin",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.13.0+cu130",
+  "register_1layer_s": 0.5274346059999289,
+  "sweep": {
+    "2048": {
+      "moe_48layer_s_median": 0.09776566314697266,
+      "moe_per_layer_ms": 2.0367846488952637,
+      "raw_s": [
+        0.09766313934326172,
+        0.09757743835449219,
+        0.09720764923095702,
+        0.0983353271484375,
+        0.0979783706665039,
+        0.0982286376953125,
+        0.09776566314697266
+      ]
+    },
+    "8192": {
+      "moe_48layer_s_median": 0.3391732177734375,
+      "moe_per_layer_ms": 7.066108703613281,
+      "raw_s": [
+        0.33978579711914064,
+        0.33068051147460936,
+        0.3301768493652344,
+        0.3391474914550781,
+        0.3391732177734375,
+        0.3400701904296875,
+        0.3400827331542969
+      ]
+    },
+    "16384": {
+      "moe_48layer_s_median": 0.657803466796875,
+      "moe_per_layer_ms": 13.704238891601562,
+      "raw_s": [
+        0.6411192626953125,
+        0.6585337524414062,
+        0.657803466796875,
+        0.6477098388671875,
+        0.6562268676757812,
+        0.6584976806640624,
+        0.6582071533203125
+      ]
+    },
+    "32768": {
+      "moe_48layer_s_median": 1.295804443359375,
+      "moe_per_layer_ms": 26.995925903320312,
+      "raw_s": [
+        1.296380615234375,
+        1.2842630615234376,
+        1.29390234375,
+        1.29822900390625,
+        1.295804443359375,
+        1.278020263671875,
+        1.3005115966796874
+      ]
+    }
+  },
+  "note": "MoE floor only: same-layer weights reused 48x (identical shapes, identical compute; cache effects negligible at 585 MiB/layer). Add non-MoE busy (~0.30 s @ 8K, attribution_8k.json: attention 0.081 + gdn 0.070 + norms 0.022 + unattributed_gemm 0.149) for the full compute column.",
+  "kill_condition": "moe_48layer + 0.30 > ~2 s at M=8192"
+}

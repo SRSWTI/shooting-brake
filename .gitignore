@@ -12,6 +12,7 @@ vendor/
 *.bin
 !src/phase0/**/*.bin
 src/phase1/expert_bank*.bin
+src/phase1/expert_bank*.bin.marlin
 src/phase1/golden_reference.bin
 
 # --- build output -----------------------------------------------------------

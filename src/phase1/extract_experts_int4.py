@@ -107,7 +107,8 @@ DEFAULT_NVFP4_MODEL_DIR = (
     / "88dedc71dc874f2c5727cd4329e694c27ec7963d"
 )
 
-QZERO_WORD = 0x77777777
+QZERO_WORD = 0x77777777      # AutoGPTQ v1 / auto-round: stores zero_point - 1
+QZERO_WORD_V2 = 0x88888888   # GPTQModel v2: stores zero_point directly
 PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
 SUFFIXES = ("qweight", "scales", "qzeros")
 EXPERT_KEY = re.compile(
@@ -365,16 +366,22 @@ def discover_shape(
     group_size = int(_quant_field(quant_cfg, "group_size", -1))
     packing = str(_quant_field(quant_cfg, "packing_format", ""))
     symmetric = bool(_quant_field(quant_cfg, "sym", False))
-    if (bits, group_size, packing, symmetric) != (
-        BITS,
-        GROUP_SIZE,
-        "auto_round:auto_gptq",
-        True,
+    quant_method = str(_quant_field(quant_cfg, "quant_method", ""))
+    desc_act = bool(_quant_field(quant_cfg, "desc_act", False))
+    # Two admitted checkpoint families, one bank contract:
+    #   auto-round (88B: packing_format "auto_round:auto_gptq"), and plain
+    #   first-party GPTQ (122B: quant_method "gptq", desc_act False -- g_idx
+    #   tensors exist but must be the trivial ramp; spot-asserted at load).
+    auto_round_ok = packing == "auto_round:auto_gptq"
+    plain_gptq_ok = quant_method == "gptq" and not desc_act
+    if (bits, group_size, symmetric) != (BITS, GROUP_SIZE, True) or not (
+        auto_round_ok or plain_gptq_ok
     ):
         raise SystemExit(
             "checkpoint quantization does not match the int4 bank contract: "
-            f"bits={bits}, group_size={group_size}, packing_format={packing!r}, "
-            f"sym={symmetric}"
+            f"bits={bits}, group_size={group_size}, sym={symmetric}, "
+            f"packing_format={packing!r}, quant_method={quant_method!r}, "
+            f"desc_act={desc_act}"
         )
 
     seen_layers: set[int] = set()
@@ -454,17 +461,64 @@ def _require_tensor(
 
 
 def assert_qzeros(qzeros: torch.Tensor, key: str, expected_shape: tuple[int, int]) -> None:
-    """Reject any checkpoint whose stored AutoGPTQ zero point is not 7 (= 8-1)."""
+    """Reject any stored zero point whose effective value is not 8.
+
+    Two writer conventions exist for symmetric 4-bit, both meaning
+    effective zero_point=8 and therefore byte-identical qweight semantics:
+
+    * AutoGPTQ v1 / auto-round stores ``zero_point - 1``: 0x77777777 (88B).
+    * GPTQModel v2 (first-party Qwen 122B) removed the off-by-one and
+      stores the zero point directly: 0x88888888.
+
+    Every word in a tensor must match ONE of the two; anything else (or a
+    mix) means an asymmetric or foreign layout and the bank must refuse.
+    The cross-format NVFP4 check (cosine > 0.97 band) independently
+    confirms the interpretation on real weights.
+    """
     _require_tensor(qzeros, key, expected_shape, torch.int32)
-    mismatch = qzeros != QZERO_WORD
-    if mismatch.any().item():
-        flat_index = int(mismatch.flatten().nonzero()[0].item())
-        actual = int(qzeros.flatten()[flat_index].item()) & 0xFFFFFFFF
-        raise SystemExit(
-            f"FATAL qzeros contract violation in {key}: word[{flat_index}]="
-            f"0x{actual:08x}, expected 0x{QZERO_WORD:08x}; this bank format "
-            f"requires effective zero_point={ZERO_POINT}"
-        )
+    for word in (QZERO_WORD, QZERO_WORD_V2):
+        if bool((qzeros == word).all().item()):
+            return
+    mismatch = (qzeros != QZERO_WORD) & (qzeros != QZERO_WORD_V2)
+    flat_index = int(mismatch.flatten().nonzero()[0].item())
+    actual = int(qzeros.flatten()[flat_index].item()) & 0xFFFFFFFF
+    raise SystemExit(
+        f"FATAL qzeros contract violation in {key}: word[{flat_index}]="
+        f"0x{actual:08x}, expected uniform 0x{QZERO_WORD:08x} (v1) or "
+        f"0x{QZERO_WORD_V2:08x} (v2); this bank format requires effective "
+        f"zero_point={ZERO_POINT}"
+    )
+
+
+def assert_g_idx_trivial(
+    index: dict[str, str],
+    shape: BankShape,
+) -> None:
+    """Spot-assert that g_idx (when present) is the identity ramp.
+
+    desc_act=False promises no activation-order permutation, but the bank
+    copies qweight verbatim -- a non-trivial g_idx would silently permute
+    the K dimension out from under both the B70 kernel and Marlin. One
+    tensor per projection suffices: desc_act is a config-global property.
+    """
+    layer = shape.layer_ids[0] if hasattr(shape, "layer_ids") else 0
+    expert = shape.expert_ids[0]
+    for projection in PROJECTIONS:
+        key = tensor_key(layer, expert, projection, "g_idx")
+        shard = index.get(key)
+        if shard is None:
+            return  # auto-round checkpoints carry no g_idx at all
+        with safe_open(shard, framework="pt", device="cpu") as handle:
+            g_idx = handle.get_tensor(key)
+        k = int(g_idx.numel())
+        expected = torch.arange(k, dtype=g_idx.dtype) // GROUP_SIZE
+        if not torch.equal(g_idx, expected):
+            raise SystemExit(
+                f"FATAL g_idx contract violation in {key}: not the trivial "
+                f"ramp despite desc_act=False; refusing to copy qweight "
+                f"verbatim under an activation-order permutation"
+            )
+    print("g_idx spot check: trivial ramp on all three projections")
 
 
 class CountingDevNull:
@@ -763,8 +817,21 @@ def dequantize_nvfp4(
     global_scale: torch.Tensor,
     k: int,
     n: int,
+    convention: str = "multiplier",
 ) -> torch.Tensor:
-    """Decode linear ModelOpt NVFP4 into logical fp32 ``[K, N]`` weights."""
+    """Decode linear NVFP4 into logical fp32 ``[K, N]`` weights.
+
+    Two global-scale conventions exist and confusing them corrupts every
+    weight by global_scale**2 (code-verified in both sources):
+
+    * ``multiplier`` -- ModelOpt W4A16 (88B): ``weight_scale_2`` stores
+      amax/(6*448), a direct multiplier: ``w = codes * scale * gs``.
+    * ``divisor`` -- llm-compressor/compressed-tensors (122B):
+      ``weight_global_scale`` was MULTIPLIED into the e4m3 block scales at
+      quantization time (compressed_tensors/quantization/utils/helpers.py:102,
+      ``scales = global_scale * scales``), so dequant divides it back out:
+      ``w = codes * scale / gs``.
+    """
     if packed.dtype != torch.uint8 or tuple(packed.shape) != (n, k // 2):
         raise ValueError(
             f"unexpected NVFP4 packed shape/dtype: {tuple(packed.shape)} {packed.dtype}; "
@@ -776,15 +843,18 @@ def dequantize_nvfp4(
             f"expected {n * (k // 16)} elements"
         )
     if global_scale.numel() != 1:
-        raise ValueError(f"NVFP4 weight_scale_2 must be scalar, got {global_scale.shape}")
+        raise ValueError(f"NVFP4 global scale must be scalar, got {global_scale.shape}")
+    if convention not in ("multiplier", "divisor"):
+        raise ValueError(f"unknown NVFP4 global-scale convention: {convention}")
 
     low = (packed & 0xF).long()
     high = (packed >> 4).long()
     codes = torch.stack((low, high), dim=-1).reshape(n, k)
     values = E2M1_TABLE[codes]
     scales = block_scales.reshape(n, k // 16).float().repeat_interleave(16, dim=1)
-    # ModelOpt W4A16 stores weight_scale_2 = amax/(6*448), a direct multiplier.
-    return (values * scales * global_scale.float()).T.contiguous()
+    gs = global_scale.float()
+    factor = gs if convention == "multiplier" else 1.0 / gs
+    return (values * scales * factor).T.contiguous()
 
 
 def _nvfp4_key(layer: int, expert: int, projection: str, suffix: str) -> str:
@@ -808,8 +878,29 @@ def cross_validate_nvfp4(
         )
         int4_weight = dequantize_int4(int4["qweight"], int4["scales"])
 
+        # Variant detection: ModelOpt ships weight/weight_scale/weight_scale_2
+        # (multiplier); compressed-tensors ships weight_packed/weight_scale/
+        # weight_global_scale (divisor). Probe the index rather than trusting
+        # config shape.
+        modelopt = _nvfp4_key(layer, expert, projection, "weight_scale_2") in nv_index
+        if modelopt:
+            suffixes = ("weight", "weight_scale", "weight_scale_2")
+            convention = "multiplier"
+        else:
+            suffixes = ("weight_packed", "weight_scale", "weight_global_scale")
+            convention = "divisor"
+        packed_key, scale_key, gs_key = suffixes
+        if _nvfp4_key(layer, expert, projection, packed_key) not in nv_index:
+            # Mixed-precision checkpoints keep some layers off NVFP4 (the
+            # 122B stores layer 47's experts as FP8). Nothing to cross
+            # against; the bit-exact bank validation already covered it.
+            print(
+                f"  layer={layer} expert={expert} projection={projection}: "
+                f"no NVFP4 counterpart (mixed-precision layer) — SKIPPED"
+            )
+            continue
         nv: dict[str, torch.Tensor] = {}
-        for suffix in ("weight", "weight_scale", "weight_scale_2"):
+        for suffix in suffixes:
             key = _nvfp4_key(layer, expert, projection, suffix)
             shard = nv_index.get(key)
             if shard is None:
@@ -833,7 +924,8 @@ def cross_validate_nvfp4(
 
         try:
             nv_weight = dequantize_nvfp4(
-                nv["weight"], nv["weight_scale"], nv["weight_scale_2"], k, n
+                nv[packed_key], nv[scale_key], nv[gs_key], k, n,
+                convention=convention,
             )
         except (ValueError, RuntimeError) as exc:
             print(
@@ -967,6 +1059,7 @@ def main() -> int:
     print(f"Shards: {len(shards)}")
     shape = discover_shape(args.model_dir, index, args.layers, args.experts)
     print(shape.describe())
+    assert_g_idx_trivial(index, shape)
     samples = args.sample if args.sample is not None else default_samples(shape)
     validate_samples(shape, samples)
 

@@ -37,6 +37,47 @@ two boots died to a dead knob (`SHOOTING_BRAKE_B70_STREAM_T` gates the
 dormant cpu_stream tier, not the Marlin branch — the comment in
 `serve_88b_128k.sh` now names both).
 
+### run6 decode + saturation (`benchmarks/run6_decode.sh`, same config)
+
+The F_matrix grid has no 128-token cell and no throughput profile, so the
+decode-shaped and peak rows were measured separately on the byte-identical
+config (209,715 KV tokens, `B70_MAX_BATCH=256`). Full tables in
+`PRO_COMPARISON.md`; generator `compare_pro_matrix.py`.
+
+**Decode is unchanged from run4 within noise — as expected, we never touched
+the decode path this campaign:**
+
+| C | run4 out tok/s | run6 out tok/s | run4 ITL | run6 ITL |
+|---|---|---|---|---|
+| 1 | 78.3 | 80.7 | 12.23 | 11.88 |
+| 4 | 181.3 | 189.1 | 20.25 | 19.93 |
+| 8 | 235.2 | 251.7 | 26.81 | 26.60 |
+| 16 | 229.9 | **189.7** | 43.55 | 41.69 |
+| 32 | 225.0 | 240.5 | 45.24 | 46.44 |
+| 62 | 223.5 | **271.1** | 46.07 | 45.45 |
+
+Two rungs moved beyond noise and neither is explained: **C=16 lost 17%**
+(throughput down, ITL *better* — fewer requests actually co-resident, not
+slower tokens) while **C=62 gained 21%**. KV seats are not the cause (128+512
+tokens/seat fits trivially in either config). Logged as unexplained rather
+than claimed; the c016 cell ran 26 requests vs run4's 31, so measurement
+variance is the leading hypothesis.
+
+**Peak throughput, unbounded offered load:** 222.7 -> **270.0** out tok/s at
+128 tokens (+21% vs run4); 191.4 -> 195.5 at 2048 tokens (+2%).
+
+**And the honest loss:** the PRO's sweep peaks at **798** out tok/s @1K, 613
+@4K, 462 @8K. Our 2048-token peak of 195.5 against ~700 interpolated on their
+curve is **~3.6x behind**; our 270 @128 against their >=798 is **~3x behind**.
+Peak throughput at short context stacks many concurrent short prefills —
+precisely the regime where we are 1.8-11x behind per-request. This is the
+single worst number in the whole comparison and it is structural, not a
+tuning miss.
+
+Vendor recon and the resulting decision tiers now live in
+`docs/vendor-extraction.md` (12-agent deep scope over the vendored repos,
+four live verifications, TAKE/BENCH/PARK/REJECT verdicts).
+
 ## SHIPPED: registered page-cache DMA (run5) — PRO 6000 beaten at 130K
 
 `SHOOTING_BRAKE_BANK_REGISTER=1` (`marlin_prefill.py::_open_bank_source`):

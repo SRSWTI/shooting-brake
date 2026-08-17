@@ -1,0 +1,71 @@
+{
+  "cell": "A_decode/c002",
+  "grid": "A_decode",
+  "profile": "concurrent",
+  "prompt_tokens": 128,
+  "output_tokens": 512,
+  "streams": [
+    2
+  ],
+  "sweep_size": null,
+  "max_requests": 20,
+  "max_seconds": null,
+  "thinking": false,
+  "request_format": "/v1/chat/completions",
+  "notes": "decode-dominated; aggregate tok/s vs PRO 6000 baseline",
+  "command": [
+    "/home/shooting-brake007/srswti/shooting-brake/.venv/bin/python",
+    "-m",
+    "guidellm",
+    "run",
+    "--backend",
+    "kind=openai_http,target=http://127.0.0.1:8016,model=shooting-brake-88b,request_format=/v1/chat/completions,extras.body.chat_template_kwargs.enable_thinking=false",
+    "--tokenizer",
+    "kind=huggingface_auto,model=srswti/axe-superveloce-88b-nvfp4a16,load_kwargs.trust_remote_code=true",
+    "--profile",
+    "kind=concurrent,warmup=0.1,cooldown=0.1,rampup_duration=0.0",
+    "--data",
+    "kind=synthetic_text,prompt_tokens=128,output_tokens=512",
+    "--seed",
+    "kind=static,value=1683911069",
+    "--override",
+    "profile.streams",
+    "2",
+    "--constraint",
+    "kind=max_requests,count=20",
+    "--constraint",
+    "kind=max_errors,count=5",
+    "--output",
+    "kind=json,path=benchmarks/results/run6_final/matrix/A_decode/c002/report.json",
+    "--output",
+    "kind=csv,path=benchmarks/results/run6_final/matrix/A_decode/c002/report.csv",
+    "--output",
+    "kind=html,path=benchmarks/results/run6_final/matrix/A_decode/c002/report.html",
+    "--disable-console-interactive"
+  ],
+  "seed": 1683911069,
+  "return_code": 0,
+  "elapsed_seconds": 89.08,
+  "capacity": {
+    "peak_kv_tokens_if_full": 8352,
+    "kv_tokens_available": 262144,
+    "capacity_bound": false,
+    "interpretation": "fits in KV"
+  },
+  "measured": true,
+  "measurement_detail": {
+    "benchmarks": [
+      {
+        "index": 0,
+        "successful_measured": 15,
+        "retained_including_transients": 20,
+        "errored": 0,
+        "duration": 58.642560958862305,
+        "warmup_duration": 16.812474489212036,
+        "cooldown_duration": 8.356662273406982,
+        "measured": true
+      }
+    ]
+  },
+  "transients_trimmed": true
+}

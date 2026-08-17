@@ -27,6 +27,53 @@ PRO source: bench-matrix/superveloce_88b_nvfp4a16_c6. C=10 is ours alone.
 | 98304 | 21 / 17 | 21 / 18 | 22 / 19 | 21 / 19 | 22 / 19 | 22 / 19 | 22 / - |
 | 127000 | 16 / 12 | 15 / 13 | 15 / 12 | 15 / 12 | 15 / 11 | 15 / 10 | 15 / - |
 
+# Every shared metric at C=1 (ours / PRO)
+
+| ctx | TTFT s | ITL ms | TPOT ms | out tok/s |
+|---|---|---|---|---|
+| 1024 | 0.53 / 0.08 | 11.88 / 7.28 | 12.90 / 7.43 | 78 / 135 |
+| 4096 | 0.54 / 0.27 | 11.92 / 7.30 | 12.96 / 7.82 | 78 / 128 |
+| 8192 | 1.09 / 0.57 | 11.95 / 7.34 | 14.05 / 8.44 | 73 / 119 |
+| 16384 | 2.28 / 1.22 | 12.06 / 7.46 | 16.48 / 9.83 | 64 / 103 |
+| 32768 | 5.15 / 2.85 | 12.20 / 7.60 | 22.24 / 13.15 | 49 / 78 |
+| 65536 | 12.69 / 7.50 | 12.37 / 7.85 | 37.13 / 22.49 | 32 / 46 |
+| 98304 | 23.18 / 26.12 **W** | 13.49 / 9.26 | 58.73 / 60.25 **W** | 21 / 17 **W** |
+| 127000 | 33.99 / 39.06 **W** | 12.86 / 9.52 | 79.22 / 85.79 **W** | 16 / 12 **W** |
+
+# Decode-shaped grid (128-token prompt, 512 out) -- ours
+
+The PRO matrix has no 128-token cell; its nearest is ctx_1024,
+shown for the C rungs it covers (1-6). C>6 is ours alone.
+
+| C | out tok/s ours | out tok/s PRO@1K | ITL ms ours | ITL ms PRO@1K |
+|---|---|---|---|---|
+| 1 | 81 | 135 | 11.88 | 7.28 |
+| 2 | 116 | 191 | 15.33 | 9.60 |
+| 4 | 189 | 298 | 19.93 | 11.28 |
+| 8 | 252 | - | 26.60 | - |
+| 16 | 190 | - | 41.69 | - |
+| 32 | 241 | - | 46.44 | - |
+| 62 | 271 | - | 45.45 | - |
+
+# Peak throughput, unbounded offered load
+
+PRO bracket from their sweep profile: 798 @1K, 613 @4K, 462 @8K
+out tok/s. Our saturation cells sit at 128 and 2048 tokens, so the
+2048 row interpolates against ~700 on their curve [INFERENCE].
+
+| our cell | strategy | out tok/s |
+|---|---|---|
+| sweep_ctx2048 | synchronous | 77.6 |
+| sweep_ctx2048 | throughput | 195.5 |
+| sweep_ctx2048 | constant | 84.0 |
+| sweep_ctx2048 | constant | 91.1 |
+| sweep_ctx2048 | constant | 98.2 |
+| sweep_ctx2048 | constant | 105.3 |
+| throughput_ctx128 | throughput | 270.0 |
+| PRO ctx_1024 (reference) | sweep | synchronous 135, throughput 798, constant 59 |
+| PRO ctx_4096 (reference) | sweep | synchronous 128, throughput 613, constant 59 |
+| PRO ctx_8192 (reference) | sweep | synchronous 119, throughput 462, constant 30 |
+
 # Our runs, C=1 TTFT mean (s) -- the campaign, context by context
 
 run4 = pre-repacked bank; run5 = registered page-cache DMA;

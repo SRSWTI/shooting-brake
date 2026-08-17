@@ -1,0 +1,68 @@
+{
+  "cell": "D_saturation/throughput_ctx128",
+  "grid": "D_saturation",
+  "profile": "throughput",
+  "prompt_tokens": 128,
+  "output_tokens": 512,
+  "streams": null,
+  "sweep_size": null,
+  "max_requests": 124,
+  "max_seconds": 300,
+  "thinking": false,
+  "request_format": "/v1/chat/completions",
+  "notes": "unbounded offered load; ceiling is the 62 KV seats rather than the 64-seat max_num_seqs flag",
+  "command": [
+    "/home/shooting-brake007/srswti/shooting-brake/.venv/bin/python",
+    "-m",
+    "guidellm",
+    "run",
+    "--backend",
+    "kind=openai_http,target=http://127.0.0.1:8016,model=shooting-brake-88b,request_format=/v1/chat/completions,extras.body.chat_template_kwargs.enable_thinking=false",
+    "--tokenizer",
+    "kind=huggingface_auto,model=srswti/axe-superveloce-88b-nvfp4a16,load_kwargs.trust_remote_code=true",
+    "--profile",
+    "kind=throughput,warmup=0.1,cooldown=0.1,rampup_duration=0.0,max_concurrency=128",
+    "--data",
+    "kind=synthetic_text,prompt_tokens=128,output_tokens=512",
+    "--seed",
+    "kind=static,value=2144946116",
+    "--constraint",
+    "kind=max_requests,count=124",
+    "--constraint",
+    "kind=max_duration,seconds=300",
+    "--constraint",
+    "kind=max_errors,count=5",
+    "--output",
+    "kind=json,path=benchmarks/results/run6_final/matrix/D_saturation/throughput_ctx128/report.json",
+    "--output",
+    "kind=csv,path=benchmarks/results/run6_final/matrix/D_saturation/throughput_ctx128/report.csv",
+    "--output",
+    "kind=html,path=benchmarks/results/run6_final/matrix/D_saturation/throughput_ctx128/report.html",
+    "--disable-console-interactive"
+  ],
+  "seed": 2144946116,
+  "return_code": 0,
+  "elapsed_seconds": 241.53,
+  "capacity": {
+    "peak_kv_tokens_if_full": 267264,
+    "kv_tokens_available": 262144,
+    "capacity_bound": true,
+    "interpretation": "offered concurrency exceeds KV capacity; treat as admission capacity, not throughput"
+  },
+  "measured": true,
+  "measurement_detail": {
+    "benchmarks": [
+      {
+        "index": 0,
+        "successful_measured": 111,
+        "retained_including_transients": 124,
+        "errored": 0,
+        "duration": 240.0,
+        "warmup_duration": 29.999284029006958,
+        "cooldown_duration": -33.76588177680969,
+        "measured": true
+      }
+    ]
+  },
+  "transients_trimmed": true
+}

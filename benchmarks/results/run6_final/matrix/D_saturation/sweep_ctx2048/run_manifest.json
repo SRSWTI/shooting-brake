@@ -1,0 +1,121 @@
+{
+  "cell": "D_saturation/sweep_ctx2048",
+  "grid": "D_saturation",
+  "profile": "sweep",
+  "prompt_tokens": 2048,
+  "output_tokens": 512,
+  "streams": null,
+  "sweep_size": 6,
+  "max_requests": 62,
+  "max_seconds": 300,
+  "thinking": false,
+  "request_format": "/v1/chat/completions",
+  "notes": "GuideLLM sweep: locates the saturation knee",
+  "command": [
+    "/home/shooting-brake007/srswti/shooting-brake/.venv/bin/python",
+    "-m",
+    "guidellm",
+    "run",
+    "--backend",
+    "kind=openai_http,target=http://127.0.0.1:8016,model=shooting-brake-88b,request_format=/v1/chat/completions,extras.body.chat_template_kwargs.enable_thinking=false",
+    "--tokenizer",
+    "kind=huggingface_auto,model=srswti/axe-superveloce-88b-nvfp4a16,load_kwargs.trust_remote_code=true",
+    "--profile",
+    "kind=sweep,warmup=0.1,cooldown=0.1,rampup_duration=0.0",
+    "--data",
+    "kind=synthetic_text,prompt_tokens=2048,output_tokens=512",
+    "--seed",
+    "kind=static,value=1749315790",
+    "--override",
+    "profile.sweep_size",
+    "6",
+    "--constraint",
+    "kind=max_requests,count=62",
+    "--constraint",
+    "kind=max_duration,seconds=300",
+    "--constraint",
+    "kind=max_errors,count=5",
+    "--output",
+    "kind=json,path=benchmarks/results/run6_final/matrix/D_saturation/sweep_ctx2048/report.json",
+    "--output",
+    "kind=csv,path=benchmarks/results/run6_final/matrix/D_saturation/sweep_ctx2048/report.csv",
+    "--output",
+    "kind=html,path=benchmarks/results/run6_final/matrix/D_saturation/sweep_ctx2048/report.html",
+    "--disable-console-interactive"
+  ],
+  "seed": 1749315790,
+  "return_code": 0,
+  "elapsed_seconds": 1681.26,
+  "capacity": {
+    "peak_kv_tokens_if_full": 267264,
+    "kv_tokens_available": 262144,
+    "capacity_bound": true,
+    "interpretation": "offered concurrency exceeds KV capacity; treat as admission capacity, not throughput"
+  },
+  "measured": true,
+  "measurement_detail": {
+    "benchmarks": [
+      {
+        "index": 0,
+        "successful_measured": 37,
+        "retained_including_transients": 46,
+        "errored": 0,
+        "duration": 240.0,
+        "warmup_duration": 29.998120546340942,
+        "cooldown_duration": 30.001879453659058,
+        "measured": true
+      },
+      {
+        "index": 1,
+        "successful_measured": 50,
+        "retained_including_transients": 62,
+        "errored": 0,
+        "duration": 240.0,
+        "warmup_duration": 29.99864888191223,
+        "cooldown_duration": -135.24527192115784,
+        "measured": true
+      },
+      {
+        "index": 2,
+        "successful_measured": 41,
+        "retained_including_transients": 49,
+        "errored": 0,
+        "duration": 240.0,
+        "warmup_duration": 23.921791553497314,
+        "cooldown_duration": 36.078208446502686,
+        "measured": true
+      },
+      {
+        "index": 3,
+        "successful_measured": 45,
+        "retained_including_transients": 53,
+        "errored": 0,
+        "duration": 240.0,
+        "warmup_duration": 24.416817665100098,
+        "cooldown_duration": 35.5831823348999,
+        "measured": true
+      },
+      {
+        "index": 4,
+        "successful_measured": 48,
+        "retained_including_transients": 58,
+        "errored": 0,
+        "duration": 240.0,
+        "warmup_duration": 24.83784770965576,
+        "cooldown_duration": 35.16215229034424,
+        "measured": true
+      },
+      {
+        "index": 5,
+        "successful_measured": 52,
+        "retained_including_transients": 62,
+        "errored": 0,
+        "duration": 240.0,
+        "warmup_duration": 25.19878077507019,
+        "cooldown_duration": 34.80121922492981,
+        "measured": true
+      }
+    ]
+  },
+  "transients_trimmed": true
+}

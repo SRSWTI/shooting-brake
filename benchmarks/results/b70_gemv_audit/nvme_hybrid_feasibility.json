@@ -1,0 +1,75 @@
+{
+ "date": "2026-08-17",
+ "question": "122B hybrid prefill: pin what fits in 63 GB RAM, stream the rest from NVMe",
+ "measured": {
+  "nvme": "Samsung 990 PRO 2TB, Gen4 x4, 94% full",
+  "nvme_qd1_buffered_dd_gbs": 3.0,
+  "nvme_qd1_odirect_gbs": 6.05,
+  "nvme_parallel_odirect_gbs": {
+   "2": 6.22,
+   "4": 6.12,
+   "8": 5.74
+  },
+  "odirect_into_registered_region_gbs": {
+   "1thread": 3.45,
+   "2threads": 6.28,
+   "4threads": 5.43
+  },
+  "h2d_registered_gibs": 53.9,
+  "live_ram": {
+   "total_gib": 59,
+   "server_rss_gib": 32.9,
+   "swap": "7/7 full",
+   "note": "29.4 GB of RSS is today's pinned bank"
+  }
+ },
+ "notes": [
+  "prefill reads the WHOLE remote bank every pass; the cold fraction pays NVMe every pass (hotness ordering does not cut prefill bytes, only decode placement)",
+  "pass floor = max(bank/DMA, cold/NVMe); transfer floor only, compute additive",
+  "pinnable hot ceiling ~35-40 GB realistic (server 3.5 + system ~9 in 63 GB, swap already full); 44 GB is OOM territory",
+  "single drive; disk 94% full; GPTQ download was writing concurrently during measurement (negligible vs 6 GB/s)"
+ ],
+ "table": [
+  {
+   "hot_pinned_gb": 35,
+   "cold_nvme_gb": 24.8,
+   "pass_floor_s": 3.95,
+   "ttft_transfer_floor_s": {
+    "8K": 3.9,
+    "32K": 15.8,
+    "128K": 63.2
+   }
+  },
+  {
+   "hot_pinned_gb": 40,
+   "cold_nvme_gb": 19.8,
+   "pass_floor_s": 3.15,
+   "ttft_transfer_floor_s": {
+    "8K": 3.2,
+    "32K": 12.6,
+    "128K": 50.4
+   }
+  },
+  {
+   "hot_pinned_gb": 44,
+   "cold_nvme_gb": 15.8,
+   "pass_floor_s": 2.52,
+   "ttft_transfer_floor_s": {
+    "8K": 2.5,
+    "32K": 10.1,
+    "128K": 40.3
+   }
+  },
+  {
+   "hot_pinned_gb": 59.8,
+   "cold_nvme_gb": 0,
+   "pass_floor_s": 1.03,
+   "ttft_transfer_floor_s": {
+    "8K": 1.0,
+    "32K": 4.1,
+    "128K": 16.5
+   }
+  }
+ ],
+ "verdict": "hybrid is VIABLE but 3-4x slower per pass than upgraded RAM: ~3.2-4.0 s/pass (hot 35-40 GB) vs 1.03 s/pass all-hot. 128K transfer floor ~50-63 s hybrid vs ~17 s upgraded. Decode/capacity/MTP unaffected either way."
+}

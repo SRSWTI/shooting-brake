@@ -57,14 +57,34 @@ the capacity asymmetry vs the PRO nearly vanishes on this model (their 96 GB
 holds 74 GB of weights). Decode improves: ~8 remote routes split ~4/card
 in parallel ≈ 50–58 µs/card leg vs today's 94 µs single-card window.
 
-**The one hard constraint: host RAM.** The streamed prefill bank is
-59.8 GB vs 63 GB total host RAM — page-cache residency (the 53.9 GiB/s
-design) does not fit beside the system. Options, priced per 48-layer pass:
-RAM upgrade to 128 GB → 1.11 s/pass (clean, recommended); NVMe tail
-(~45 GB cached + ~15 GB at 7 GB/s) → ~3 s/pass; B70-VRAM pull-back
-(~10 GB/s aggregate, consumes the 5090 link) → ~6 s/pass, worst. Without
-the upgrade the 122B still wins on decode + capacity + MTP; short-context
-prefill degrades.
+**The one hard constraint: host RAM — now fully measured**
+(`benchmarks/results/b70_gemv_audit/nvme_hybrid_feasibility.json`). The
+streamed prefill bank is 59.8 GB and PINNED (cudaHostRegister —
+unevictable); with server (~3.5 GB beyond the bank) + system (~9 GB) the
+all-hot 122B needs ~72–75 GB vs 63 GB physical. Live: server RSS 32.9 GiB
+(29.4 = today's pinned bank), swap 7/7 full (pin-thrash residue).
+
+Measured NVMe (Samsung 990 PRO, Gen4 x4, 94% full): buffered QD1 dd reads
+3.0 GB/s, but **O_DIRECT reaches 6.05 GB/s single-stream and 6.28 GB/s
+with 2 threads reading straight into a cudaHostRegistered region** — the
+exact cold-tail production path, proven. Saturates at QD2; 4+ readers
+degrade. Hybrid pass floors (prefill reads the WHOLE bank every pass, so
+the cold fraction pays NVMe every pass; hotness ordering cannot cut
+prefill bytes, only decode placement):
+
+| config | cold GB/pass | pass floor | 8K / 32K / 128K transfer floors |
+|---|---|---|---|
+| 35 GB pinned (safe) | 24.8 | 3.95 s | 3.9 / 15.8 / 63.2 s |
+| 40 GB pinned (tight) | 19.8 | 3.15 s | 3.2 / 12.6 / 50.4 s |
+| **128 GB RAM, all hot** | 0 | **1.03 s** | **1.0 / 4.1 / 16.5 s** |
+
+**Verdict: hybrid is VIABLE (not dead as first written from the 3.0 GB/s
+misread) but 3–4× slower per pass than the RAM upgrade.** Recommendation
+unchanged: 2×64 GB DDR5-6000 (avoid 4-DIMM 96 GB — AM5 down-clock risk on
+the exact bandwidth being purchased). Hybrid is the honest interim: the
+122B can bring up and serve on today's RAM at ~3.2–4 s/pass prefill,
+with decode + capacity + MTP unaffected.
+
 
 ## SHIPPED: run6 — full PRO-matched smoke matrix; 4 outright wins
 

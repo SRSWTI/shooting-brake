@@ -16,7 +16,77 @@ kept for history; where the two disagree, this half wins.
 
 ---
 
-## Status at a glance (2026-08-13)
+## Status at a glance (2026-08-17, run6) — current
+
+We now **beat an RTX PRO 6000 Blackwell 96 GB at 98K and 127K context** on the
+same checkpoint and the same GuideLLM harness, while streaming 27.4 GiB of
+expert weights across PCIe on every forward pass.
+
+| | state |
+|---|---|
+| Prefill, streaming (Marlin) | **shipped and default** (`SHOOTING_BRAKE_PREFILL_MARLIN=1`) |
+| Registered page-cache DMA | **shipped** — 18.5 -> **53.9 GiB/s**, zero staging copy |
+| Long context (98K, 127K) | **we win** — 127K C=1 **33.99 s vs their 39.06 s (0.87x)** |
+| 64K | **parity** — C=4 1.00x, C=2/C=3 1.05/1.06x |
+| Short context (<=32K), C=1 | **1.8-1.9x behind** — pure GEMM compute |
+| Peak throughput | **~3.6x behind** — our worst number, structural |
+| Decode ITL | 11.87 ms vs their 7.28-9.52 — **1.35-1.63x behind, untouched by design** |
+| KV pool | 209,715 tokens = 1.60 seats @131K (they seat ~6) |
+| MoE kernel bake-offs | **two, both closed negative** — `fused_marlin_moe` keeps the crown |
+
+Headline table (ours / theirs, C=1):
+
+| ctx | TTFT | out tok/s | verdict |
+|---|---|---|---|
+| 8K | 1.09 s / 0.57 s | 73 / 119 | 1.91x behind |
+| 32K | 5.15 s / 2.85 s | 49 / 78 | 1.81x behind |
+| 64K | 12.69 s / 7.50 s | 32 / 46 | parity at C=2-4 |
+| 98K | **23.18 s** / 26.12 s | **21 / 17** | **WIN** |
+| 127K | **33.99 s** / 39.06 s | **16 / 12** | **WIN** |
+
+Across the 48 comparable cells (8 contexts x C=1..6) we take **5 TTFT wins,
+12 ITL wins, 15 TPOT wins and 14 throughput wins** — all at >=64K. The widest
+is 127K C=6 TPOT: **197 ms vs 554 ms (2.8x better)**, because their per-token
+latency collapses under concurrency at long context while ours stays flat.
+
+**Why the long-context win is structural:** co-batched prefills *share* one
+streamed slab, so our per-request stream cost divides by concurrency. Scaling
+C=1->C=6 at 64K: **ours +14%, theirs -28%.** Resident-weight systems cannot
+have this property — it only exists when weights move.
+
+**Two honest caveats.** (1) Their matrix may be under-tuned: the 65K->98K TTFT
+jump is superlinear (7.16 -> 25.6 s for 1.5x the tokens) and the harness never
+set `--max-num-batched-tokens`/chunked-prefill/prefix-caching. We beat their
+*measured* numbers, not necessarily their potential. (2) Effort asymmetry —
+theirs is one stock config, ours is two weeks of targeted work.
+
+Full grid: `benchmarks/results/run6_final/PRO_COMPARISON.md`.
+Direction and priced levers: `docs/next-steps-88b.md`.
+Vendor-repo extraction verdicts: `docs/vendor-extraction.md`.
+
+### The production recipe (run6)
+
+```
+SHOOTING_BRAKE_BANK_REGISTER=1                    # registered page-cache DMA
+SB_EXTRA_ARGS='--kv-cache-memory=2900000000 ...'  # explicit bytes, NOT utilization
+# serve_88b_128k.sh then sets B70_MAX_BATCH=256 under BANK_REGISTER=1
+```
+
+Three knobs earned by failure: **explicit KV bytes** (the boot profiler's
+estimate varies ~50 MiB per boot and three boots died to it);
+**`B70_MAX_BATCH=256`**, the *real* dispatch-vs-stream crossover — not
+`B70_STREAM_T`, which gates a dormant tier and cost two more boots; and a
+**warmup gate** (2x 8K requests, wait for PSI < 0.1) past the one-time ~9 GiB
+pin-eviction thrash.
+
+---
+
+## Status at a glance (2026-08-13) — SUPERSEDED by the run6 block above
+
+Kept for history. Where the two disagree, the run6 block wins: prefill
+streaming is now default (not "not yet default"), the ~2,000 tok/s dispatch
+prefill has been replaced by the Marlin streaming path, and the grouped NVFP4
+MoE kernel question was settled by two bake-offs (both negative).
 
 | | state |
 |---|---|

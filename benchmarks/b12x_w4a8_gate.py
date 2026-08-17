@@ -96,13 +96,21 @@ def _converter_inverse_map(e: int, rows: int, cols: int) -> torch.Tensor:
     return _INV_MAP_CACHE[key]
 
 
-def bank_sf_to_b12x(plane: torch.Tensor, e: int, rows: int, cols: int
-                    ) -> torch.Tensor:
-    """flashinfer-swizzled sf plane -> b12x-layout flat bytes [E, -1]."""
+def bank_sf_to_b12x(plane: torch.Tensor, e: int, rows: int, cols: int,
+                    swap_halves: bool = False) -> torch.Tensor:
+    """flashinfer-swizzled sf plane -> b12x-layout flat bytes [E, -1].
+
+    swap_halves reorders logical rows [gate;up] -> [up;gate]: bank v2 stacks
+    gate first (b12x "w31"); the kernel's safe layout is up-first ("w13") --
+    its w31 handling is the in-place-swap hazard, so production pre-swaps.
+    """
     inv = _converter_inverse_map(e, rows, cols)
     logical = torch.empty(e * rows * cols, dtype=torch.uint8)
     logical[inv] = plane.reshape(-1).cpu().view(torch.uint8)
     logical = logical.reshape(e, rows, cols)
+    if swap_halves:
+        half = rows // 2
+        logical = torch.cat([logical[:, half:], logical[:, :half]], dim=1)
     rp, cp = (rows + 127) // 128 * 128, (cols + 3) // 4 * 4
     pad = torch.zeros(e, rp, cp, dtype=torch.uint8)
     pad[:, :rows, :cols] = logical
@@ -175,12 +183,16 @@ def arm_a_kernel(v: dict, x, ids, w, hidden: int, inter: int):
     e = v["alpha1"].shape[0]
     ones = torch.ones(e, device=x.device, dtype=torch.float32)
     xb = x.to(torch.bfloat16)
+    half = inter
+    w1_up_first = torch.cat(
+        [v["w1"][:, half:], v["w1"][:, :half]], dim=1
+    ).contiguous()
     experts = prepare_tp_moe_fp4_experts(
         a=xb,
         a1_gscale=ones,           # our bank carries no input_scale; alpha is
-        w1_fp4=v["w1"],           # the full weight-side multiplier already
+        w1_fp4=w1_up_first,       # the full weight-side multiplier already
         w1_blockscale=bank_sf_to_b12x(
-            v["sf1"], e, 2 * inter, hidden // 16),
+            v["sf1"], e, 2 * inter, hidden // 16, swap_halves=True),
         w1_alphas=v["alpha1"].float(),
         a2_gscale=ones,
         w2_fp4=v["w2"],

@@ -281,6 +281,97 @@ def mode_b12x(args, path, h) -> dict:
     }
 
 
+def mode_vb12x(args, path, h) -> dict:
+    """vendor/b12x arm of kernel round 2: w4a8_nvfp4 or w4a16, REAL bank planes.
+
+    Unlike mode_b12x (flashinfer wrapper, synthetic weights), this runs
+    vendor/b12x's serving prepare/run path on the b12x bank's real planes via
+    the swizzle adapters proven byte-exact in b12x_w4a8_gate.py. Fidelity is
+    gated separately (w4a8_gate_cpu.json 0.998+, w4a8_gate_gpu.json); this
+    mode is the speed row plus finite/nonzero stability flags.
+    Incumbent: fused_marlin_moe 7.07 ms/layer @ M=8192.
+    """
+    import sys as _sys
+    from pathlib import Path as _P
+    _sys.path.insert(0, str(_P(__file__).resolve().parent))
+    _sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "vendor" / "b12x"))
+    from b12x_w4a8_gate import bank_sf_to_b12x
+    from b12x_bank_poc import load_bank_layer
+    from shooting_brake_vllm.b12x_bank_format import (
+        default_b12x_bank_path, read_b12x_bank_header,
+    )
+    from tests._reference.helpers import (
+        prepare_tp_moe_fp4_experts, run_tp_moe_fp4,
+    )
+
+    dev = "cuda"
+    bank = default_b12x_bank_path("src/phase1/expert_bank_int4.bin")
+    hb = read_b12x_bank_header(bank)
+    e, k, n = hb.experts_per_layer, hb.hidden, hb.moe_intermediate
+    v = load_bank_layer(bank, hb, args.vb12x_layer, dev)
+    # Production shape: up-first ("w13") planes -- bank v2 is gate-first, and
+    # the kernel's w31 handling is the in-place-swap hazard. Same pre-swap the
+    # gate script validated (A_vs_B cosine 0.9993).
+    w1_up = torch.cat([v["w1"][:, n:], v["w1"][:, :n]], dim=1).contiguous()
+    sf1_b = bank_sf_to_b12x(v["sf1"], e, 2 * n, k // 16, swap_halves=True)
+    sf2_b = bank_sf_to_b12x(v["sf2"], e, k, n // 16)
+    ones = torch.ones(e, device=dev, dtype=torch.float32)
+
+    # Prepare ONCE: weights are static in serving; per-call prepare re-derives
+    # scale grids each invocation and OOM'd the sweep (29 GiB of churn).
+    dummy = torch.empty(1, k, device=dev, dtype=torch.bfloat16)
+    experts = prepare_tp_moe_fp4_experts(
+        a=dummy, a1_gscale=ones, w1_fp4=w1_up, w1_blockscale=sf1_b,
+        w1_alphas=v["alpha1"].float(), a2_gscale=ones, w2_fp4=v["w2"],
+        w2_blockscale=sf2_b, w2_alphas=v["alpha2"].float(),
+        quant_mode=args.quant_mode,
+    )
+
+    def call(x, ids, w):
+        return run_tp_moe_fp4(
+            a=x, experts=experts, topk_weights=w, topk_ids=ids,
+            input_scales_static=True, quant_mode=args.quant_mode,
+        )
+
+    sweep = {}
+    for m in args.m_sweep:
+        x = torch.randn(m, k, device=dev, dtype=torch.bfloat16)
+        ids, w = _routing(m, e, dev)
+        y = call(x, ids, w)  # warmup: JIT specialization + workspace
+        torch.cuda.synchronize()
+        finite = bool(torch.isfinite(y).all())
+        nonzero = bool((y != 0).any())
+        ev_a, ev_b = torch.cuda.Event(True), torch.cuda.Event(True)
+        ts = []
+        for _ in range(args.iters):
+            torch.cuda.synchronize()
+            ev_a.record()
+            for _ in range(NUM_LAYERS):
+                call(x, ids, w)
+            ev_b.record()
+            torch.cuda.synchronize()
+            ts.append(ev_a.elapsed_time(ev_b) / 1000.0)
+        med = statistics.median(ts)
+        sweep[str(m)] = {
+            "moe_48layer_s_median": med,
+            "moe_per_layer_ms": med / NUM_LAYERS * 1e3,
+            "output_finite": finite,
+            "output_nonzero": nonzero,
+            "raw_s": ts,
+        }
+        del x, y
+    return {
+        "shapes": {"experts": e, "hidden": k, "intermediate": n, "top_k": TOP_K},
+        "weights": f"REAL bank planes, layer {args.vb12x_layer}",
+        "quant_mode": args.quant_mode,
+        "incumbent_marlin_ms_per_layer_at_8192": 7.07,
+        "sweep": sweep,
+        "kill_condition": (
+            "crash, non-finite output, or >= 7.07 ms/layer at M=8192"
+        ),
+    }
+
+
 def mode_overlap(args, path, h) -> dict:
     """Production-geometry ring H2D concurrent with fused kernels."""
     dev = "cuda"
@@ -389,8 +480,15 @@ def mode_register(args, path, h) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=("compute", "overlap", "register", "b12x"),
-                    required=True)
+    ap.add_argument(
+        "--mode",
+        choices=("compute", "overlap", "register", "b12x", "vb12x"),
+        required=True)
+    ap.add_argument("--quant-mode", default="w4a8_nvfp4",
+                    choices=("w4a8_nvfp4", "w4a16"),
+                    help="vb12x only: vendor/b12x quant recipe")
+    ap.add_argument("--vb12x-layer", type=int, default=24,
+                    help="vb12x only: bank layer whose real planes to use")
     ap.add_argument("--int4-bank", default=DEFAULT_INT4_BANK)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--iters", type=int, default=7)
@@ -407,7 +505,8 @@ def main() -> None:
         "gpu": torch.cuda.get_device_name(0),
         "torch": torch.__version__,
         **{"compute": mode_compute, "overlap": mode_overlap,
-           "register": mode_register, "b12x": mode_b12x}[args.mode](args, path, h),
+           "register": mode_register, "b12x": mode_b12x,
+           "vb12x": mode_vb12x}[args.mode](args, path, h),
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2))

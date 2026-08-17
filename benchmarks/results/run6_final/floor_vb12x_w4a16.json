@@ -1,0 +1,78 @@
+{
+  "kind": "prefill_floor_vb12x",
+  "bank": "/home/shooting-brake007/srswti/shooting-brake/src/phase1/expert_bank_int4.bin.marlin",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.13.0+cu130",
+  "shapes": {
+    "experts": 126,
+    "hidden": 3072,
+    "intermediate": 1024,
+    "top_k": 8
+  },
+  "weights": "REAL bank planes, layer 24",
+  "quant_mode": "w4a16",
+  "incumbent_marlin_ms_per_layer_at_8192": 7.07,
+  "sweep": {
+    "2048": {
+      "moe_48layer_s_median": 0.11174745941162109,
+      "moe_per_layer_ms": 2.3280720710754395,
+      "output_finite": true,
+      "output_nonzero": true,
+      "raw_s": [
+        0.10961817932128906,
+        0.11092086029052735,
+        0.11174745941162109,
+        0.11162796783447265,
+        0.11180950164794921,
+        0.11188787078857422,
+        0.11251638031005859
+      ]
+    },
+    "8192": {
+      "moe_48layer_s_median": 0.38131976318359373,
+      "moe_per_layer_ms": 7.944161732991535,
+      "output_finite": true,
+      "output_nonzero": true,
+      "raw_s": [
+        0.3773609008789062,
+        0.3809643249511719,
+        0.38180606079101564,
+        0.3807485961914063,
+        0.38131976318359373,
+        0.3813442687988281,
+        0.38146554565429686
+      ]
+    },
+    "16384": {
+      "moe_48layer_s_median": 0.73800732421875,
+      "moe_per_layer_ms": 15.375152587890627,
+      "output_finite": true,
+      "output_nonzero": true,
+      "raw_s": [
+        0.7329427490234375,
+        0.737082763671875,
+        0.7383689575195312,
+        0.73728271484375,
+        0.7391516723632813,
+        0.7388397216796875,
+        0.73800732421875
+      ]
+    },
+    "32768": {
+      "moe_48layer_s_median": 1.45303271484375,
+      "moe_per_layer_ms": 30.271514892578125,
+      "output_finite": true,
+      "output_nonzero": true,
+      "raw_s": [
+        1.4488973388671875,
+        1.45303271484375,
+        1.4527421875,
+        1.452199462890625,
+        1.453882568359375,
+        1.453473876953125,
+        1.4533790283203125
+      ]
+    }
+  },
+  "kill_condition": "crash, non-finite output, or >= 7.07 ms/layer at M=8192"
+}

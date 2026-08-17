@@ -339,12 +339,40 @@ Execution order (quality first — the process rule this campaign earned):
    the kernel's w31 path is the in-place-swap hazard, so **bank v3 emits
    up-first planes**. Remaining leg: kernel-vs-oracle on GPU (their in-repo
    gate: cos > 0.998) — folds into the speed floor run.
-3. **Speed floor:** `prefill_floor_bench.py` grows `--mode b12x-w4a8` and
-   `--mode b12x-w4a16`, M sweep 2048..32768, kill condition >= Marlin's
-   7.07 ms/layer @ M=8192.
-4. **Verdict** vs Marlin; only a quality-passing, faster kernel proceeds to
-   bank v3 (pre-derived grids + re-permuted scale planes), streamer switch
-   behind a flag, firsttok gate, serve A/B, matrix re-run.
+2b. **Kernel gate — MEASURED, PASSED** (`w4a8_gate_gpu.json`): kernel vs
+   their w4a8 oracle cos 0.9993/0.9992 (their in-repo bar: 0.998); kernel vs
+   exact fp32 cos 0.9985/0.9983 — the kernel adds nothing beyond w4a8's own
+   quantization. Ran through the production-shaped call: up-first planes
+   (bank-v2 gate-first rows pre-swapped; the wrong layout silently computes
+   silu(up)*gate and scores 0.87 — hit twice, once per arm).
+3. **Speed floor — MEASURED, FAILED** (`prefill_floor_bench.py --mode
+   vb12x`, artifacts `run6_final/floor_vb12x_w4a8.json` / `_w4a16.json`;
+   real bank planes, layer 24, eager, same loop discipline as the 7.07
+   incumbent):
+
+   | kernel | M=8192 ms/layer | quality | verdict |
+   |---|---|---|---|
+   | **Marlin (incumbent)** | **7.07** | W4A16 ref | **keeps the crown** |
+   | vendor-b12x w4a16 | 7.93 (+12%) | Marlin-class | slower |
+   | vendor-b12x w4a8_nvfp4 | 8.34 (+18%) | 0.9985 (passed) | slower |
+   | flashinfer-b12x W4A4 | 2.70 (-62%) | 0.82 | dead (round 1) |
+
+   w4a8 loses uniformly (2.61 @ 2K vs 2.04; 16.15 @ 16K; 31.62 @ 32K vs
+   27.0), GPU-event-verified kernel-bound (8.59 ms events vs 8.34 wall, the
+   1.55 ms/call helper overhead is not the story). The scouts' "half
+   Marlin's latency" projection came from a lab with zero 5090 numbers —
+   now the 5090 numbers exist, and they say otherwise at our geometry.
+4. **Verdict: ROUND 2 CLOSED, NEGATIVE for large-M prefill.** Marlin keeps
+   the crown a second time. Bank v3 / streamer switch / serve A/B are moot.
+   The process rule paid: quality gates ran on CPU during the matrix, the
+   speed kill landed in ~30 min of GPU. Durable salvage: (a) w4a8 quality
+   0.998+ on real weights is a standing result — any future faster sm_120
+   w4a8 kernel inherits a ready gate, byte-verified swizzle adapters, and
+   the up-first bank recipe; (b) the small-M-direct decode candidate (M<=8)
+   is untouched by this verdict — different regime, still queued for the
+   decode war; (c) hotness-ordered placement remains available on its own
+   merits (fewer streamed bytes + less remote compute, kernel-agnostic)
+   but is gated on an explicit go decision.
 
 ## Measured facts
 

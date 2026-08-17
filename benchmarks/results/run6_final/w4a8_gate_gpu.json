@@ -1,0 +1,38 @@
+{
+ "kind": "w4a8_quality_gate",
+ "bank": "src/phase1/expert_bank_int4.bin.b12x",
+ "m": 128,
+ "device": "cuda",
+ "layers": {
+  "24": {
+   "B_vs_C_intrinsic_w4a8": {
+    "cosine": 0.998551,
+    "rel_l2": 0.054134
+   },
+   "oracle_seconds": 48.1,
+   "A_vs_B_wiring": {
+    "cosine": 0.999302,
+    "rel_l2": 0.036986
+   },
+   "A_vs_C_total": {
+    "cosine": 0.998478,
+    "rel_l2": 0.055161
+   }
+  },
+  "0": {
+   "B_vs_C_intrinsic_w4a8": {
+    "cosine": 0.998415,
+    "rel_l2": 0.056423
+   },
+   "oracle_seconds": 45.9,
+   "A_vs_B_wiring": {
+    "cosine": 0.999244,
+    "rel_l2": 0.038575
+   },
+   "A_vs_C_total": {
+    "cosine": 0.998336,
+    "rel_l2": 0.057496
+   }
+  }
+ }
+}

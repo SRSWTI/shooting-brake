@@ -21,6 +21,10 @@ known, which is their first forward.
 from __future__ import annotations
 
 import ctypes
+import json
+import os
+import struct
+import threading
 from typing import Any
 
 import torch
@@ -53,6 +57,23 @@ class B70Poller:
             raise RuntimeError("sb_b70_poll_create returned NULL")
         self._started = False
         self._layers = 0
+        self._lib.sb_b70_poll_trace_snapshot.restype = ctypes.c_size_t
+        self._lib.sb_b70_poll_trace_snapshot.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+        ]
+        self._lib.sb_b70_clock_reference.restype = None
+        self._lib.sb_b70_clock_reference.argtypes = [
+            ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64),
+        ]
+        # Opt-in decode-trace dump: SHOOTING_BRAKE_B70_TRACE_DUMP=<path>
+        # snapshots the native per-dispatch trace ring to <path> every few
+        # seconds (atomic replace), for merging with a same-process torch
+        # profiler capture on the shared CLOCK_MONOTONIC timeline.
+        self._trace_dump_path = os.environ.get(
+            "SHOOTING_BRAKE_B70_TRACE_DUMP"
+        )
+        self._trace_thread: threading.Thread | None = None
+        self._trace_stop = threading.Event()
 
     def register_layer(
         self,
@@ -109,14 +130,71 @@ class B70Poller:
         if self._lib.sb_b70_poll_start(self._handle) != 0:
             raise RuntimeError("sb_b70_poll_start failed")
         self._started = True
+        if self._trace_dump_path and self._trace_thread is None:
+            self._trace_thread = threading.Thread(
+                target=self._trace_dump_loop, daemon=True,
+                name="sb-b70-trace-dump",
+            )
+            self._trace_thread.start()
+            logger.info(
+                "Shooting Brake B70 trace dump enabled -> %s",
+                self._trace_dump_path,
+            )
 
     def reset(self) -> None:
         """Zero native timing, shape, dispatch, and error counters."""
         self._lib.sb_b70_poll_reset(self._handle)
 
+    def trace_snapshot(self) -> list[dict]:
+        """Most recent per-dispatch windows from the native trace ring.
+
+        Timestamps are host CLOCK_MONOTONIC nanoseconds -- directly
+        comparable with a torch-profiler capture from this process.
+        """
+        capacity = 1 << 16
+        entry_bytes = 40
+        buf = (ctypes.c_uint8 * (capacity * entry_bytes))()
+        n = int(self._lib.sb_b70_poll_trace_snapshot(
+            self._handle, buf, ctypes.c_size_t(capacity)))
+        entries = []
+        for i in range(n):
+            t0, t1, kernel, total, layer, m = struct.unpack_from(
+                "<QQQQII", buf, i * entry_bytes)
+            entries.append({
+                "t0_ns": t0, "t1_ns": t1, "kernel_ns": kernel,
+                "total_ns": total, "layer": layer, "M": m,
+            })
+        return entries
+
+    def _trace_dump_loop(self) -> None:
+        """Periodically snapshot the ring to the dump path (atomic replace).
+
+        Tracing must never hurt serving: every failure is swallowed and the
+        loop simply tries again next period.
+        """
+        path = self._trace_dump_path
+        while not self._trace_stop.wait(5.0):
+            try:
+                monotonic = ctypes.c_uint64()
+                realtime = ctypes.c_uint64()
+                self._lib.sb_b70_clock_reference(
+                    ctypes.byref(monotonic), ctypes.byref(realtime))
+                payload = {
+                    "clock_monotonic_ns": monotonic.value,
+                    "clock_realtime_ns": realtime.value,
+                    "entries": self.trace_snapshot(),
+                }
+                tmp = f"{path}.tmp"
+                with open(tmp, "w") as f:
+                    json.dump(payload, f)
+                os.replace(tmp, path)
+            except Exception:
+                pass
+
     def stop(self) -> None:
         if not self._started:
             return
+        self._trace_stop.set()
         self._lib.sb_b70_poll_stop(self._handle)
         self._started = False
         self.report()

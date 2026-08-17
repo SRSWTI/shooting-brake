@@ -235,6 +235,27 @@ uint64_t sb_b70_poll_total_ns(sb_b70_poller_t* poller);
  */
 uint64_t sb_b70_poll_kernel_ns(sb_b70_poller_t* poller);
 
+/**
+ * Copy the most recent dispatch trace entries (oldest first) into @p out.
+ *
+ * Each entry is 40 bytes, packed:
+ *   uint64 t0_ns, t1_ns          dispatch window on host CLOCK_MONOTONIC
+ *   uint64 kernel_ns, total_ns   Level Zero event times (0 unless
+ *                                SHOOTING_BRAKE_B70_PROFILE=1)
+ *   uint32 layer, M
+ *
+ * The ring holds 65,536 entries (~13 decode steps at 48 layers). Returns
+ * the number of entries copied. Safe to call while the poller runs.
+ */
+size_t sb_b70_poll_trace_snapshot(sb_b70_poller_t* poller, void* out,
+                                  size_t capacity_entries);
+
+/**
+ * Paired host clock samples for aligning the trace with profilers that
+ * timestamp on CLOCK_REALTIME. Either pointer may be null.
+ */
+void sb_b70_clock_reference(uint64_t* monotonic_ns, uint64_t* realtime_ns);
+
 /** Stop if running, then release the handle. */
 void sb_b70_poll_destroy(sb_b70_poller_t* poller);
 

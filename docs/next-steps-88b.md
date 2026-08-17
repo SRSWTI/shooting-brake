@@ -212,20 +212,60 @@ the bank onto the **Gen3** B70 (the serve script honors caller values).
 Caught by the operator watching nvtop. Relaunches must scrub the env
 (`env -u ZE_AFFINITY_MASK`) or use a fresh shell.
 
-### What this leaves on the decode front
+## MEASURED: decode overlap trace — the max() question ANSWERED, presumption overturned
 
-1. **The unmeasured max(B70 leg, CUDA partial) overlap question** — still
-   gates everything; at 2800 MHz the B70 kernel leg is ~2.3 ms of an
-   11.7 ms step, and the registration result just showed ~75% of transfer
-   overhead is already hidden. A one-decode-step dual-runtime trace is the
-   instrument (research in progress: `zeDeviceGetGlobalTimestamps` + CUPTI
-   clock correlation).
-2. `down2` adaptive dispatch (free, pairs≥8; needs the trace to price).
-3. 150 W cap (④) — unaffected by the audit; bandwidth-bound argument
-   stands.
-4. Kernel replacement is DEAD: nothing in the vendored Intel trees beats
-   the in-house kernel at decode shapes, and our own M=1 headroom is
-   capped at ~1.35× by occupancy.
+The gate that blocked the decode roadmap ("which leg binds is unmeasured")
+is closed. Instrument: a native per-dispatch trace ring in the poller
+(`b70_capi.cpp` `TraceEntry`/`sb_b70_poll_trace_snapshot`, host
+CLOCK_MONOTONIC — verified 3 µs off Python's `monotonic_ns`), dumped by an
+opt-in thread (`SHOOTING_BRAKE_B70_TRACE_DUMP=<path>`), merged single-clock
+with a same-process torch-profiler capture (dev-mode `/start_profile`,
+`--profiler-config.profiler=torch`). 154 decode steps, 7,392 doorbell
+windows against 320K CUDA GPU events. Artifact:
+`benchmarks/results/b70_gemv_audit/decode_overlap_trace.json`.
+
+**The 12.35 ms step budget (C=1, registration on, profiler adds ~5%):**
+
+| component | ms | share |
+|---|---|---|
+| B70 windows (signal→completion) | 4.45 | 36% |
+| — **exposed: GPU idle inside windows** | **2.99** | **24%** |
+| — CUDA-busy under windows | 1.55 | 12% |
+| inter-dispatch gaps | 7.82 | 63% |
+| — CUDA-busy (attention/GDN/partial/sampler) | 5.90 | 48% |
+| — **GPU-idle (host/scheduling)** | **1.92** | **16%** |
+
+**The "B70 leg is hidden under the CUDA partial" presumption was WRONG** —
+it came from the cache-hot standalone table (44 µs vs 100 µs). Reality:
+94.3 µs windows per dispatch with the GPU idling through 66.7% of them.
+Consequences, each now priced in ms:
+
+1. **The B70 leg is live again: −3.0 ms/step reachable** (−24% ITL). In
+   order of cheapness: `down2` adaptive dispatch (in-tree), **dual-B70
+   route split** (banks built, split math proven; halves the leg →
+   ~−1.5 ms), kernel work (occupancy-capped ~1.35×).
+2. **Host/scheduling idle is a second pool: −1.9 ms/step** — the
+   launch-economics class the B70 cookbook measured (graph replay took a
+   comparable model 4×). SYCL-graph replay into `issue()` (built,
+   validated, parked at item 5 of the old plan) re-enters the queue.
+3. The CUDA-busy floor is 7.45 ms/step — the architecture's decode floor
+   without speculation; native MTP (see 122B section) divides it by
+   accepted tokens.
+4. This also reconciles the registration result: 2.2 of 8.8 µs/transfer
+   survived because transfer overhead partially sits in the hidden 33%;
+   the trace measures the split directly instead of inferring it.
+
+Instrument caveat: L0 `kernel_ns` read 0 this boot (`B70_PROFILE` did not
+reach the provider queue) — window timing is unaffected; chase before the
+kernel/transport sub-split is needed.
+
+### Decode front, re-priced by the trace
+
+1. Dual-B70 route split + `down2` — attack the 3.0 ms exposed pool.
+2. SYCL-graph/submission economics — attack the 1.9 ms host-idle pool.
+3. 150 W cap (④) — free, unaffected.
+4. Kernel replacement stays DEAD (audit); 122B native MTP divides the
+   7.45 ms CUDA floor.
 
 ## SHIPPED: registered page-cache DMA (run5) — PRO 6000 beaten at 130K
 

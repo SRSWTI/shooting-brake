@@ -1,0 +1,20 @@
+{
+ "date": "2026-08-17",
+ "config": "run6 + XPU_REGISTER on, torch profiler active (adds ~5% wall; shares are the result)",
+ "steps": 154,
+ "per_dispatch_us": {
+  "window": 94.3,
+  "exposed_gpu_idle": 62.9,
+  "hidden": 31.4
+ },
+ "per_step_ms": {
+  "span_median": 12.35,
+  "b70_window_sum": 4.45,
+  "b70_exposed_sum": 2.99,
+  "inter_dispatch_gaps_sum": 7.82,
+  "gap_cuda_busy_pct": 76,
+  "window_cuda_busy_pct": 35
+ },
+ "verdict": "B70 leg is 66.7% EXPOSED (GPU idles 3.0 ms of the 12.35 ms step inside doorbell windows) -- the 'hidden under CUDA partial' presumption from the cache-hot table is WRONG. ~25% of ITL is directly attackable B70-leg time: down2, dual-B70 split, GEMV speed are all live. Between dispatches CUDA is 76% busy (7.8 ms of gaps, 5.9 busy, 1.9 idle = host/scheduling).",
+ "instrument_note": "L0 kernel_ns read 0 -- B70_PROFILE flag did not reach the provider queue this boot; window timing unaffected"
+}

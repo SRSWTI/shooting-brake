@@ -34,6 +34,22 @@ int status_to_int(ProviderStatus s) noexcept {
   }
 }
 
+// One recorded dispatch window on the host CLOCK_MONOTONIC (steady_clock)
+// timeline, for merging with a torch-profiler capture taken in the same
+// process. t0 brackets issue(), t1 the completed take(); kernel/total are
+// the provider's Level Zero event timings (0 unless B70_PROFILE=1).
+struct TraceEntry {
+  uint64_t t0_ns;
+  uint64_t t1_ns;
+  uint64_t kernel_ns;
+  uint64_t total_ns;
+  uint32_t layer;
+  uint32_t M;
+};
+static_assert(sizeof(TraceEntry) == 40);
+
+constexpr size_t kTraceCapacity = 1u << 16;  // ~2.6 MiB, ~13 decode steps/48L
+
 // One registered layer's flags and pinned buffers. Buffers are owned by
 // the caller (they are CUDA pinned allocations) and must outlive the
 // poller.
@@ -152,10 +168,30 @@ class B70Poller {
         }
         if (status != ProviderStatus::ok) errors_.fetch_add(1);
 
+        const auto t1 = std::chrono::steady_clock::now();
         service_ns_.fetch_add(static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - t0)
+            std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0)
                 .count()));
+
+        // Lock-free single-producer trace ring on the host steady_clock
+        // (CLOCK_MONOTONIC) timeline; readers snapshot via
+        // sb_b70_poll_trace_snapshot and merge with a same-process torch
+        // profiler capture.
+        {
+          const uint64_t slot = trace_head_.load(std::memory_order_relaxed);
+          TraceEntry& te = trace_[slot % kTraceCapacity];
+          te.t0_ns = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  t0.time_since_epoch()).count());
+          te.t1_ns = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  t1.time_since_epoch()).count());
+          te.kernel_ns = static_cast<uint64_t>(result.kernel_us * 1000.0);
+          te.total_ns = static_cast<uint64_t>(result.total_us * 1000.0);
+          te.layer = static_cast<uint32_t>(entry.layer);
+          te.M = M;
+          trace_head_.store(slot + 1, std::memory_order_release);
+        }
 
         // The provider only fills these timings on a profiled queue; they
         // are 0 otherwise. Keeping both makes the dispatch self-describing:
@@ -225,6 +261,23 @@ class B70Poller {
   std::atomic<uint64_t> total_ns_{0};
   std::atomic<uint64_t> kernel_ns_{0};
   std::thread thread_;
+
+  std::vector<TraceEntry> trace_{kTraceCapacity};
+  std::atomic<uint64_t> trace_head_{0};
+
+ public:
+  // Copies the most recent `capacity` entries (oldest first) into `out`;
+  // returns the count copied. Racy by design against the producer -- the
+  // newest slot may tear -- so the copy skips the in-flight slot.
+  size_t trace_snapshot(TraceEntry* out, size_t capacity) const {
+    const uint64_t head = trace_head_.load(std::memory_order_acquire);
+    const uint64_t available = std::min<uint64_t>(head, kTraceCapacity);
+    const uint64_t n = std::min<uint64_t>(available, capacity);
+    for (uint64_t i = 0; i < n; ++i) {
+      out[i] = trace_[(head - n + i) % kTraceCapacity];
+    }
+    return static_cast<size_t>(n);
+  }
 
 };
 }  // namespace
@@ -410,6 +463,26 @@ uint64_t sb_b70_poll_total_ns(sb_b70_poller_t* poller) {
 uint64_t sb_b70_poll_kernel_ns(sb_b70_poller_t* poller) {
   if (!poller) return 0;
   return reinterpret_cast<B70Poller*>(poller)->kernel_ns();
+}
+
+size_t sb_b70_poll_trace_snapshot(sb_b70_poller_t* poller, void* out,
+                                  size_t capacity_entries) {
+  if (!poller || !out || capacity_entries == 0) return 0;
+  return reinterpret_cast<B70Poller*>(poller)->trace_snapshot(
+      reinterpret_cast<TraceEntry*>(out), capacity_entries);
+}
+
+void sb_b70_clock_reference(uint64_t* monotonic_ns, uint64_t* realtime_ns) {
+  if (monotonic_ns) {
+    *monotonic_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+  }
+  if (realtime_ns) {
+    *realtime_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+  }
 }
 
 void sb_b70_poll_destroy(sb_b70_poller_t* poller) {

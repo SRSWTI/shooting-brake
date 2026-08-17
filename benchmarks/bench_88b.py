@@ -158,6 +158,21 @@ def build_cells(output_tokens: int) -> list[Cell]:
             notes="TTFT vs context at C=1; cold prefix per request",
         ))
 
+    # -- Grid F: PRO-6000-matched smoke matrix. Mirrors the PRO bench-matrix
+    # cells (contexts x concurrent rates 1-6, plus C=10 which the PRO matrix
+    # lacks) so run6 compares mean-vs-mean against
+    # ~/srswti/benchmarks-vllm/bench-matrix/superveloce_88b_nvfp4a16_c6.
+    # Request budgets shrink with context so the matrix stays a smoke run:
+    # each rung is capped, high-C long-ctx rungs queue by design (KV seats).
+    for ctx in (1024, 4096, 8192, 16384, 32768, 65536, 98304, 127000):
+        reqs = 12 if ctx <= 8192 else (8 if ctx <= 32768 else 6)
+        cells.append(Cell(
+            grid="F_matrix", name=f"ctx_{ctx}", profile="concurrent",
+            prompt_tokens=ctx, output_tokens=output_tokens,
+            streams=[1, 2, 3, 4, 5, 6, 10], max_requests=reqs,
+            notes="PRO-matched concurrency matrix; C=10 rung is ours alone",
+        ))
+
     # -- Grid C: concurrency at long context, where KV capacity binds before
     # compute does. 2.23x at 131,072 means C=2 is the ceiling up there.
     cells.append(Cell(

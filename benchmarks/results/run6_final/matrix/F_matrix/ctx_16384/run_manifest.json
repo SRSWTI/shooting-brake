@@ -1,0 +1,137 @@
+{
+  "cell": "F_matrix/ctx_16384",
+  "grid": "F_matrix",
+  "profile": "concurrent",
+  "prompt_tokens": 16384,
+  "output_tokens": 512,
+  "streams": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    10
+  ],
+  "sweep_size": null,
+  "max_requests": 8,
+  "max_seconds": null,
+  "thinking": false,
+  "request_format": "/v1/chat/completions",
+  "notes": "PRO-matched concurrency matrix; C=10 rung is ours alone",
+  "command": [
+    "/home/shooting-brake007/srswti/shooting-brake/.venv/bin/python",
+    "-m",
+    "guidellm",
+    "run",
+    "--backend",
+    "kind=openai_http,target=http://127.0.0.1:8016,model=shooting-brake-88b,request_format=/v1/chat/completions,extras.body.chat_template_kwargs.enable_thinking=false",
+    "--tokenizer",
+    "kind=huggingface_auto,model=srswti/axe-superveloce-88b-nvfp4a16,load_kwargs.trust_remote_code=true",
+    "--profile",
+    "kind=concurrent,warmup=0,cooldown=0,rampup_duration=0.0",
+    "--data",
+    "kind=synthetic_text,prompt_tokens=16384,output_tokens=512",
+    "--seed",
+    "kind=static,value=1144716571",
+    "--override",
+    "profile.streams",
+    "1,2,3,4,5,6,10",
+    "--constraint",
+    "kind=max_requests,count=8",
+    "--constraint",
+    "kind=max_errors,count=5",
+    "--output",
+    "kind=json,path=benchmarks/results/run6_final/matrix/F_matrix/ctx_16384/report.json",
+    "--output",
+    "kind=csv,path=benchmarks/results/run6_final/matrix/F_matrix/ctx_16384/report.csv",
+    "--output",
+    "kind=html,path=benchmarks/results/run6_final/matrix/F_matrix/ctx_16384/report.html",
+    "--disable-console-interactive"
+  ],
+  "seed": 1144716571,
+  "return_code": 0,
+  "elapsed_seconds": 343.27,
+  "capacity": {
+    "peak_kv_tokens_if_full": 208800,
+    "kv_tokens_available": 262144,
+    "capacity_bound": false,
+    "interpretation": "fits in KV"
+  },
+  "measured": true,
+  "measurement_detail": {
+    "benchmarks": [
+      {
+        "index": 0,
+        "successful_measured": 6,
+        "retained_including_transients": 8,
+        "errored": 0,
+        "duration": 50.62364745140076,
+        "warmup_duration": 8.434439182281494,
+        "cooldown_duration": 8.46085810661316,
+        "measured": true
+      },
+      {
+        "index": 1,
+        "successful_measured": 7,
+        "retained_including_transients": 8,
+        "errored": 0,
+        "duration": 37.366657972335815,
+        "warmup_duration": 12.543239831924438,
+        "cooldown_duration": 0.02376842498779297,
+        "measured": true
+      },
+      {
+        "index": 2,
+        "successful_measured": 7,
+        "retained_including_transients": 8,
+        "errored": 0,
+        "duration": 29.65551471710205,
+        "warmup_duration": 17.201700687408447,
+        "cooldown_duration": 0.023369550704956055,
+        "measured": true
+      },
+      {
+        "index": 3,
+        "successful_measured": 7,
+        "retained_including_transients": 8,
+        "errored": 0,
+        "duration": 19.36940836906433,
+        "warmup_duration": 19.432412147521973,
+        "cooldown_duration": 0.0237882137298584,
+        "measured": true
+      },
+      {
+        "index": 4,
+        "successful_measured": 7,
+        "retained_including_transients": 8,
+        "errored": 0,
+        "duration": 17.089617490768433,
+        "warmup_duration": 25.646700859069824,
+        "cooldown_duration": 0.023914098739624023,
+        "measured": true
+      },
+      {
+        "index": 5,
+        "successful_measured": 8,
+        "retained_including_transients": 8,
+        "errored": 0,
+        "duration": 42.62230181694031,
+        "warmup_duration": 0.0,
+        "cooldown_duration": 0.023671865463256836,
+        "measured": true
+      },
+      {
+        "index": 6,
+        "successful_measured": 8,
+        "retained_including_transients": 8,
+        "errored": 0,
+        "duration": 40.61966586112976,
+        "warmup_duration": 0.0,
+        "cooldown_duration": 0.02375006675720215,
+        "measured": true
+      }
+    ]
+  },
+  "transients_trimmed": false
+}

@@ -1,0 +1,107 @@
+{
+ "kind": "w4a8_residual_quality_probe",
+ "what": "b12x nvfp4_mx_residual_quality_report (vendor/b12x reference.py:1035) run on the REAL checkpoint's weight_scale planes -- first ever run on real scales. Measures e4m3 residual underflow in the NVFP4->MX decomposition that w4a8_nvfp4 derives its weight grids through.",
+ "sample": "48 layers x 4 remote experts (54,96,140,179) x 3 projections",
+ "clean": "gate_proj/up_proj all layers: flushed 0, max pair exponent delta 2-3; down_proj clean on 45/48 layers",
+ "affected_down_proj": [
+  {
+   "layer": 0,
+   "flushed_fraction": 0.0619,
+   "max_pair_exponent_delta": 17,
+   "mean_rel_residual_error": 0.0621
+  },
+  {
+   "layer": 1,
+   "flushed_fraction": 0.0432,
+   "max_pair_exponent_delta": 17,
+   "mean_rel_residual_error": 0.0439
+  },
+  {
+   "layer": 41,
+   "flushed_fraction": 0.0039,
+   "max_pair_exponent_delta": 17,
+   "mean_rel_residual_error": 0.0039
+  }
+ ],
+ "verdict": "PASS with per-layer mitigation: the streamer is per-layer, so layers 0/1/41 can stay on Marlin (hybrid) if w4a8 wins the bake-off. Full-checkpoint GPU quality gate still required.",
+ "detail_by_layer_sample": {
+  "layer0": {
+   "gate_proj": {
+    "nonzero_scales": 786432.0,
+    "flushed_fraction": 0.0,
+    "subnormal_fraction": 0.0,
+    "max_rel_residual_error": 0.0,
+    "mean_rel_residual_error": 0.0,
+    "max_pair_exponent_delta": 2.0
+   },
+   "up_proj": {
+    "nonzero_scales": 786432.0,
+    "flushed_fraction": 0.0,
+    "subnormal_fraction": 0.0,
+    "max_rel_residual_error": 0.0,
+    "mean_rel_residual_error": 0.0,
+    "max_pair_exponent_delta": 2.0
+   },
+   "down_proj": {
+    "nonzero_scales": 786432.0,
+    "flushed_fraction": 0.061915,
+    "subnormal_fraction": 0.064407,
+    "max_rel_residual_error": 1.0,
+    "mean_rel_residual_error": 0.062094,
+    "max_pair_exponent_delta": 17.0
+   }
+  },
+  "layer24": {
+   "gate_proj": {
+    "nonzero_scales": 786432.0,
+    "flushed_fraction": 0.0,
+    "subnormal_fraction": 0.0,
+    "max_rel_residual_error": 0.0,
+    "mean_rel_residual_error": 0.0,
+    "max_pair_exponent_delta": 3.0
+   },
+   "up_proj": {
+    "nonzero_scales": 786432.0,
+    "flushed_fraction": 0.0,
+    "subnormal_fraction": 0.0,
+    "max_rel_residual_error": 0.0,
+    "mean_rel_residual_error": 0.0,
+    "max_pair_exponent_delta": 3.0
+   },
+   "down_proj": {
+    "nonzero_scales": 786432.0,
+    "flushed_fraction": 0.0,
+    "subnormal_fraction": 0.0,
+    "max_rel_residual_error": 0.0,
+    "mean_rel_residual_error": 0.0,
+    "max_pair_exponent_delta": 2.0
+   }
+  },
+  "layer47": {
+   "gate_proj": {
+    "nonzero_scales": 786432.0,
+    "flushed_fraction": 0.0,
+    "subnormal_fraction": 0.0,
+    "max_rel_residual_error": 0.0,
+    "mean_rel_residual_error": 0.0,
+    "max_pair_exponent_delta": 3.0
+   },
+   "up_proj": {
+    "nonzero_scales": 786432.0,
+    "flushed_fraction": 0.0,
+    "subnormal_fraction": 0.0,
+    "max_rel_residual_error": 0.0,
+    "mean_rel_residual_error": 0.0,
+    "max_pair_exponent_delta": 2.0
+   },
+   "down_proj": {
+    "nonzero_scales": 786432.0,
+    "flushed_fraction": 0.0,
+    "subnormal_fraction": 0.0,
+    "max_rel_residual_error": 0.0,
+    "mean_rel_residual_error": 0.0,
+    "max_pair_exponent_delta": 3.0
+   }
+  }
+ }
+}

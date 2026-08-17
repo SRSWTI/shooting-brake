@@ -1,0 +1,33 @@
+{
+  "concurrent_rates": [
+    1
+  ],
+  "contexts": [
+    1024
+  ],
+  "cooldown": "0.1",
+  "disable_console": true,
+  "max_errors": 5,
+  "max_requests": 4,
+  "max_seconds": 60.0,
+  "metrics_url": "http://127.0.0.1:8016/metrics",
+  "model": "srswti/axe-superveloce-88b-nvfp4a16",
+  "output_root": "benchmarks/results/run6_final/matrix_probe",
+  "output_tokens": 128,
+  "outputs": [
+    "json",
+    "csv",
+    "html"
+  ],
+  "profiles": [
+    "synchronous"
+  ],
+  "rampup": 10.0,
+  "random_seed": 42,
+  "request_format": "/v1/chat/completions",
+  "sample_interval": 5.0,
+  "skip_existing": false,
+  "sweep_steps": 6,
+  "target": "http://127.0.0.1:8016",
+  "warmup": "0.1"
+}

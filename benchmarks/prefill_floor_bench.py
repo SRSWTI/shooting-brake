@@ -191,6 +191,96 @@ def mode_compute(args, path, h) -> dict:
     }
 
 
+def mode_b12x(args, path, h) -> dict:
+    """b12x (FlashInfer SM12x native-FP4) arm of the kernel bake-off.
+
+    Step 1 of the bake-off: speed + stability at our exact shapes with
+    SYNTHETIC nvfp4 weights (random packed fp4 + positive e4m3 block
+    scales). Timing and crash behaviour are layout-dependent, not
+    value-dependent; fidelity vs the real checkpoint is step 2 (bank v2).
+    Incumbent to beat: fused_marlin_moe 7.07 ms/layer @ M=8192
+    (floor_compute.json). Wrapper call mirrors vLLM's
+    FlashInferB12xExperts.apply (b12x fuses dispatch, both GEMMs, SwiGLU
+    and topk reduction; same scope as fused_marlin_moe -- apples to
+    apples).
+    """
+    from flashinfer.fused_moe import B12xMoEWrapper
+    from vllm.utils.flashinfer import flashinfer_convert_sf_to_mma_layout
+
+    dev = "cuda"
+    e, k, n = h.experts_per_layer, h.hidden, h.moe_intermediate
+    torch.manual_seed(42)
+
+    # Packed fp4 weights: [E, 2N, K/2] and [E, K, N/2] uint8.
+    w1 = torch.randint(0, 256, (e, 2 * n, k // 2), device=dev, dtype=torch.uint8)
+    w2 = torch.randint(0, 256, (e, k, n // 2), device=dev, dtype=torch.uint8)
+    # Block scales (group 16), e4m3, small positive -- bake-in convention
+    # (w_gs absorbed, alpha = 1).
+    s1 = (torch.rand(e, 2 * n, k // 16, device=dev) * 0.5 + 0.25).to(
+        torch.float8_e4m3fn)
+    s2 = (torch.rand(e, k, n // 16, device=dev) * 0.5 + 0.25).to(
+        torch.float8_e4m3fn)
+    sf1 = flashinfer_convert_sf_to_mma_layout(
+        s1.reshape(e * 2 * n, k // 16), m=2 * n, k=k, num_groups=e)
+    sf2 = flashinfer_convert_sf_to_mma_layout(
+        s2.reshape(e * k, n // 16), m=k, k=n, num_groups=e)
+    alpha1 = torch.ones(e, device=dev, dtype=torch.float32)
+    alpha2 = torch.ones(e, device=dev, dtype=torch.float32)
+    fc2_scale = torch.ones(e, device=dev, dtype=torch.float32)
+
+    max_m = max(args.m_sweep)
+    wrapper = B12xMoEWrapper(
+        num_experts=e, top_k=TOP_K, hidden_size=k, intermediate_size=n,
+        use_cuda_graph=True, max_num_tokens=max_m,
+        num_local_experts=e, activation="silu",
+    )
+
+    def call(x, ids, w):
+        return wrapper.run(
+            x=x, w1_weight=w1, w1_weight_sf=sf1, w1_alpha=alpha1,
+            fc2_input_scale=fc2_scale, w2_weight=w2, w2_weight_sf=sf2,
+            w2_alpha=alpha2, token_selected_experts=ids,
+            token_final_scales=w,
+        )
+
+    sweep = {}
+    for m in args.m_sweep:
+        x = torch.randn(m, k, device=dev, dtype=torch.bfloat16)
+        ids, w = _routing(m, e, dev)
+        y = call(x, ids, w)  # warmup + graph capture
+        torch.cuda.synchronize()
+        finite = bool(torch.isfinite(y).all())
+        nonzero = bool((y != 0).any())
+        ev_a, ev_b = torch.cuda.Event(True), torch.cuda.Event(True)
+        ts = []
+        for _ in range(args.iters):
+            torch.cuda.synchronize()
+            ev_a.record()
+            for _ in range(NUM_LAYERS):
+                call(x, ids, w)
+            ev_b.record()
+            torch.cuda.synchronize()
+            ts.append(ev_a.elapsed_time(ev_b) / 1000.0)
+        med = statistics.median(ts)
+        sweep[str(m)] = {
+            "moe_48layer_s_median": med,
+            "moe_per_layer_ms": med / NUM_LAYERS * 1e3,
+            "output_finite": finite,
+            "output_nonzero": nonzero,
+            "raw_s": ts,
+        }
+        del x, y
+    return {
+        "shapes": {"experts": e, "hidden": k, "intermediate": n, "top_k": TOP_K},
+        "weights": "synthetic (timing/stability arm; fidelity is step 2)",
+        "incumbent_marlin_ms_per_layer_at_8192": 7.07,
+        "sweep": sweep,
+        "kill_condition": (
+            "crash, non-finite output, or >= 7.07 ms/layer at M=8192"
+        ),
+    }
+
+
 def mode_overlap(args, path, h) -> dict:
     """Production-geometry ring H2D concurrent with fused kernels."""
     dev = "cuda"
@@ -299,7 +389,8 @@ def mode_register(args, path, h) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=("compute", "overlap", "register"), required=True)
+    ap.add_argument("--mode", choices=("compute", "overlap", "register", "b12x"),
+                    required=True)
     ap.add_argument("--int4-bank", default=DEFAULT_INT4_BANK)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--iters", type=int, default=7)
@@ -316,7 +407,7 @@ def main() -> None:
         "gpu": torch.cuda.get_device_name(0),
         "torch": torch.__version__,
         **{"compute": mode_compute, "overlap": mode_overlap,
-           "register": mode_register}[args.mode](args, path, h),
+           "register": mode_register, "b12x": mode_b12x}[args.mode](args, path, h),
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2))

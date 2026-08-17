@@ -1,0 +1,10 @@
+{
+  "context_tokens": 1024,
+  "finished_at": 1786926321.1866164,
+  "metrics_path": "benchmarks/results/run6_final/matrix_probe/srswti__axe-superveloce-88b-nvfp4a16/ctx_1024/synchronous/vllm_metrics.jsonl",
+  "profile": "synchronous",
+  "return_code": 1,
+  "started_at": 1786926295.987169,
+  "stderr_path": "benchmarks/results/run6_final/matrix_probe/srswti__axe-superveloce-88b-nvfp4a16/ctx_1024/synchronous/guidellm_stderr.log",
+  "stdout_path": "benchmarks/results/run6_final/matrix_probe/srswti__axe-superveloce-88b-nvfp4a16/ctx_1024/synchronous/guidellm_stdout.log"
+}

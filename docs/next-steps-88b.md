@@ -1,6 +1,350 @@
 # 88B on 5090 + Arc Pro B70 — next steps
 
-State as of the 128K matrix run (`benchmarks/results/run2_88b_128k/`).
+State as of run6 (`benchmarks/results/run6_final/`).
+
+## SHIPPED: run6 — full PRO-matched smoke matrix; 4 outright wins
+
+Final config: Marlin + `SHOOTING_BRAKE_BANK_REGISTER=1`, explicit
+`--kv-cache-memory=2.9e9` (209,715 KV tokens; the utilization knob's
+profiler estimate varies ~50 MiB per boot and runtime concurrency transients
+OOM'd 3 boots — explicit bytes ended it), `SHOOTING_BRAKE_B70_MAX_BATCH=256`
+(the REAL dispatch-vs-stream crossover knob; routed_experts.py:2130 —
+ctx_1024 went 2.24 s -> 0.53 s, 4.2x), dual `--served-model-name`. Spot:
+8K TTFT 1.035 s, ITL 11.87 ms.
+
+Full grid: `benchmarks/results/run6_final/PRO_COMPARISON.md` (generator:
+`benchmarks/compare_pro_matrix.py`) — 8 contexts x C={1..6,10} vs the PRO's
+bench-matrix, mean-vs-mean, same harness, same checkpoint. Headlines:
+
+| cell | ours | PRO | verdict |
+|---|---|---|---|
+| 127K C=1 | **33.99 s** | 39.06 s | **0.87x WIN** |
+| 127K C=6 | 94.47 s | 97.39 s | **0.97x WIN** |
+| 98K C=1 | 23.18 s | 26.12 s | **0.89x WIN** |
+| 98K C=2 | 36.01 s | 39.70 s | **0.91x WIN** |
+| 64K C=4 | 25.73 s | 25.78 s | 1.00x tie (C=2/3: 1.05/1.06) |
+| 8K..32K C=1 | 1.09..5.15 s | 0.57..2.85 s | 1.81-1.91x behind (compute) |
+| out tok/s @ 98K+127K | 15-22 | 10-19 | **ours at every C** |
+
+Campaign C=1 (all runs, same cells): 8K 2.19 -> 1.08 -> 1.09; 32K 9.85 ->
+5.14 -> 5.15; 64K 22.26 -> 12.94 -> 12.69; 128K-class 55.14 -> 35.44 ->
+**33.99** vs PRO 39.06. Monotone, no regressions anywhere.
+
+Operational facts run6 pinned: the OOM class was concurrency transients
+(C=10 needs ~450+ MiB slack the boot profiler never charges); the 29.9 GiB
+b12x bank page cache was evicted (kernel lost the bake-off, dead weight);
+two boots died to a dead knob (`SHOOTING_BRAKE_B70_STREAM_T` gates the
+dormant cpu_stream tier, not the Marlin branch — the comment in
+`serve_88b_128k.sh` now names both).
+
+## SHIPPED: registered page-cache DMA (run5) — PRO 6000 beaten at 130K
+
+`SHOOTING_BRAKE_BANK_REGISTER=1` (`marlin_prefill.py::_open_bank_source`):
+the Marlin bank is mmap'd `MAP_PRIVATE|PROT_WRITE` over an `O_RDONLY` fd
+(COW never fires — we never write; sidesteps `cudaHostRegisterReadOnly` and
+its device-attribute lottery) and `cudaHostRegister`'d in the worker
+post-fork. The streamer's existing `non_blocking` ring copy becomes true
+copy-engine DMA at the ceiling. Probe:
+`benchmarks/results/slab_h2d/hostregister_probe.json`; production results:
+`benchmarks/results/run5_88b_register/`.
+
+Measured, GuideLLM synchronous C=1, same harness as run2/run4:
+
+| ctx | run2 | run4 (bank) | run5 (register) | PRO 6000 | gap |
+|---|---|---|---|---|---|
+| 8,192 | 21.9 s | 2.19 s | **1.08 s** | 0.556 s | 1.94x |
+| 32,768 | 84.2 s | 9.85 s | **5.14 s** | 2.71 s | 1.90x |
+| 65,536 | 185 s | 22.3 s | **12.79 s** | 7.16 s | 1.79x |
+| 130,048 | 339 s | 55.1 s | **35.44 s** | 38.79 s @127K | **0.91x — WIN** |
+
+Decode ITL 11.9-12.9 ms in all runs (doorbell untouched).
+
+Concurrent long-context (register arm, GuideLLM concurrent profile, means;
+PRO figures are the mean column of their `ctx_*/concurrent/benchmarks.csv` —
+an earlier reading that quoted their fastest percentile as "~40 s at C=6" is
+WRONG and withdrawn; their concurrent means rise 39.1 -> 97.4 s over C=1..6):
+
+| ctx / C | ours | PRO | gap |
+|---|---|---|---|
+| 64K C=1 | 12.9 s | 7.5 s | 1.72x |
+| 64K C=2 | 19.6 s | 18.8 s | **1.04x — tie** |
+| 64K C~2.5-2.8 | 28.5-32.0 s | 24.3 s (C=3) | 1.2-1.3x |
+| 128K C=1 | **35.2 s** | 39.1 s | **0.90x — WIN** |
+| 128K C=2 | 69.9 s | 58.7 s | 1.19x |
+| 128K C~2.4 (req 3) | 93.4 s | 66.3 s (C=3) | 1.41x |
+
+Amortization confirmed at 64K: our C=1->2 scaling is +52% for 2x work vs
+their +151% — shared streaming + co-batched prefill flattens our curve, and
+the 1.72x gap collapses to a tie at C=2. The 128K C>=2 losses are
+CAPACITY-BOUND (runner-flagged): 31 blocks x 4,176 tokens per 128K seq
+seats only TWO sequences in our KV budget, the third queues into TTFT,
+while the PRO packs 6 into one 96 GB pool. ITL held 12.95 ms throughout —
+this is KV real estate, not a streaming defect. The recovery lever is
+already on the books: the ~67K KV tokens held by the streamer's legacy
+repack buffers (dead since the pre-repacked bank) plus 4,176-block padding
+waste.
+
+Microbench trio (`benchmarks/prefill_floor_bench.py`, artifacts in
+`run5_88b_register/floor_*.json`), all kill conditions cleared:
+
+* **register**: full 27.4 GiB bank pinned in 3.7 s (7.4 GiB/s), DMA spot
+  checks 53.7-53.9 GiB/s across the whole bank, THP vmstat deltas all zero,
+  MemAvailable -27.7 GiB exactly.
+* **compute floor** (weights resident, zero streaming): remote-MoE 48-layer
+  0.098 s @ M=2048 / 0.339 s @ 8192 / 1.296 s @ 32768 — linear, 7.07
+  ms/layer @ 8K.
+* **overlap**: whole-bank stream concurrent with 48 layers of M=32K Marlin
+  compute degrades 2.4% vs ideal max() — `TTFT = max(stream, compute)` is
+  measured fact; copy engine and SMs coexist.
+
+Numerics gate (`run5_88b_register/firsttok_ab.json`): 8 shifted-window
+streamer-path prefills, first-token logprob deltas on-vs-off, max |d| 0.211
+(bug signature 0.49), mean 0.086 == the cross-boot noise floor measured on
+the dispatch path, 7/8 argmax match. Two dead ends recorded so they are not
+re-fought: (1) API `prompt_logprobs` CANNOT gate the streamer — >1K-token
+prompts OOM-kill the engine (M x vocab fp32 logits vs ~1.5 GiB free) and
+<1024-token prompts never engage the streamer (threshold); gate on
+generated-token logprobs, and only up to the first greedy divergence —
+cross-boot argmax flips on flat distributions are noise, not corruption.
+(2) Bit-equality across boots does not exist even flag-off (autotune picks
+different reduction orders); the envelope, not zero, is the gate.
+
+Operational notes:
+* The pin evicts ~9 GiB of server working set on first prefill (one-time,
+  measured 2.4M pages swapped): first requests after boot see tens-of-seconds
+  TTFT until swap-in completes. Warm with 2 x 8K requests and wait for
+  `/proc/pressure/memory` avg10 < 0.1 before measuring (or serving).
+  Follow-up worth doing: eager-init the streamer at boot so the thrash
+  window ends before health goes green.
+* JIT extension builds invoke bare `ninja`; non-activated shells need
+  `PATH="$PWD/.venv/bin:$PATH"` (two boots died to this).
+* Cross-vendor portability: the plugin replaces vLLM's generic
+  `RoutedExperts`/`MoERunner` pluggable layers; DeepSeek V2/V3.x and
+  GLM4-MoE construct experts through the same factory, so the expert plane
+  ports; the quant contract (int4 g128 vs FP8-native checkpoints) is the
+  only real lift.
+
+**Bottleneck moved.** Stream (0.51 s/pass) now hides under compute at every
+context, so stream-once/Tier A (MNBT=32K, recipe in `serve_88b_128k.sh`;
+M-tiling shipped in `partial()` via `SHOOTING_BRAKE_PREFILL_TILE`) buys only
+~5% and is parked. The remaining 1.7-1.9x at <=64K is pure compute — a
+grouped-GEMM contest, and the candidate list is now source-verified instead
+of assumed (see "Kernel round 2"). SM100 numbers are never evidence for
+SM120: they are separate compile-time gates
+(`CUTLASS_ARCH_MMA_SM120A_ENABLED` needs `-arch=sm_120a`, `..._SM120F_ENABLED`
+the forward-compatible `f` family) — and the `a`-vs-`f` suffix distinction is
+the recurring root cause behind nearly every SM120 kernel bug we found.
+
+**Kernel bake-off, step 1 CLOSED — NEGATIVE. Marlin keeps the crown.**
+vLLM ships `FlashInferB12xExperts` (`flashinfer.fused_moe.B12xMoEWrapper`), a
+consumer-Blackwell (SM12x) native-FP4 fused MoE excluded from auto-selection
+by an upstream SM121 MMA guard, opt-in via `moe_backend="flashinfer_b12x"`.
+It is 2.6x faster than Marlin and unusable.
+
+Speed (synthetic weights, our exact shapes E=126/K=3072/N=1024/top-8;
+`prefill_floor_bench.py --mode b12x`, artifact
+`run5_88b_register/floor_b12x.json`):
+
+| M | marlin ms/layer | b12x W4A4 | b12x W4A16 |
+|---|---|---|---|
+| 2048 | 2.04 | 0.92 (2.2x) | - |
+| 8192 | 7.07 | **2.70 (2.6x)** | **8.16 (slower)** |
+| 32768 | 27.0 | 10.42 (2.6x) | - |
+
+Quality killed it (`benchmarks/b12x_bank_poc.py` against the repo's validated
+CPU NVFP4 dequantizer, artifact `b12x_poc/poc.json`):
+
+* **W4A4 is terminal.** Driving the kernel with *flashinfer's own* quantizer
+  — bypassing our bank entirely — per-layer cosine tops out at **0.82**
+  (`b12x_encoding_probe.py`); ours reached 0.19, so the delta between those
+  is our encoding gap, but the 0.82 ceiling is theirs and it compounds over
+  48 layers. The cause is structural, not a bug: FC1 input quant uses a
+  **static** e2m1 grid with no per-block rescue (their own test
+  `test_input_global_scale_decouples_weight_alpha` states the contract), and
+  the NVFP4-activation literature puts flush-to-zero at 0.05-0.20 with
+  `up_proj` the worst offender. Half-order, nibble-order and sf2-layout
+  permutations all measured *identical* error (`b12x_halfswap_probe.py`),
+  which rules out layout and leaves the arithmetic.
+* **W4A16 is slower**, so its better fidelity buys nothing: 8.16 vs Marlin's
+  7.07 ms/layer (`b12x_w4a16_probe.py`). No speed, no reason.
+
+Salvage, all real:
+
+* **An upstream vLLM bug, filing-ready.** `FlashInferB12xExperts`' load-time
+  bake multiplies ModelOpt's per-expert `weight_scale_2` into the e4m3 block
+  scales; for this checkpoint the product falls below e4m3's smallest
+  subnormal and **86.5% of scales flush to zero** (`b12x_zero_bisect.py`).
+  ModelOpt itself clamps that scale to [2^-9, 448] "to avoid underflow->0",
+  so vLLM's b12x bake re-introduces a hazard the source library already
+  fixed (cf. ModelOpt PR #1397, the overflow-direction sibling). Our fix —
+  bake only the gate/up *ratio* (O(1), e4m3-safe) and carry the true scale as
+  per-expert fp32 alpha planes — is implemented in `b12x_bank_format.py`
+  (6-plane ABI) + `src/phase1/build_b12x_bank.py`.
+* **bank-v2 tooling**: 29.9 GiB NVFP4 bank built and bit-validated from the
+  checkpoint's native planes in 6 min, zero requantization. Ports to any
+  future FP4 kernel.
+* flashinfer went 0.6.16.post3 -> vendored nightly 0.6.18 for
+  `input_global_scale` (in 0.6.16 `w1_alpha` doubles as the FC1
+  activation-quant scale, making the fix unexpressible), then **rolled back**
+  to 0.6.16.post3 once the verdict landed: the serving path never touches
+  b12x, so the nightly's sampler/FP8 regression risk was unwarranted.
+
+## Kernel round 2 — source-verified candidates (four-repo recon)
+
+Four vendored clones read at source level (`vendor/b12x`, `vendor/qutlass`,
+`vendor/cutlass`, `vendor/cute`). Net: one real candidate, one multi-week
+lever, one confirmed wall, one design aid.
+
+**`vendor/b12x` — a sibling lab, and the next kernel candidate.** An
+SM120/121 CuTe-DSL inference-kernel lab aimed at our exact silicon (they even
+bench on the RTX PRO 6000, our comparison target).
+
+* **`w4a8_nvfp4` uses dynamic per-32-block activation quant** (UE8M0+E4M3,
+  amax per block, computed inline — `dynamic.py:3628+`). That is a
+  categorically different quality regime from the static-global W4A4 that
+  measured 0.82 today; per-block dynamic fp8 activations are near-lossless in
+  practice, and our KV cache already runs `fp8_e4m3`. It takes ModelOpt NVFP4
+  natively with a documented **direct-multiplier** convention
+  (`_impl.py:4953`) — no reciprocal guessing this time. Expected roughly half
+  Marlin's latency *if* it passes the gates.
+* **Two named streaming hazards — the exact class that burned us today,
+  identified before integration:**
+  - derived scale grids cached by `data_ptr` (`_impl.py:3448`) -> stale under
+    our rotating arenas. Mitigation: pre-materialize the grids into bank-v3
+    planes at build time (we own that pipeline now), or price per-layer
+    re-prepare.
+  - `_W13_NORMALIZED_STORAGES` (`_impl.py:4366`) does a one-time in-place row
+    swap and is deliberately never cleared -> silent skip on pointer reuse.
+    Mitigation: never use `w13_layout='w31'`.
+* **Decode-war gift:** `MoEMicroKernelW4A16SmallMDirect` — M=1-8, native
+  ModelOpt layout, `e4m3_k16` scales = our checkpoint verbatim, no repack. A
+  direct candidate for the 5090's local-54 decode partial, plus their
+  decode-policy sweep tooling as ready-made methodology.
+* **Not applicable:** their `comm.pcie` is CUDA-IPC-only (dead on a
+  mixed-vendor box); their vLLM plugin is FP6-only and the NVFP4 glue lives
+  in the maintainer's private fork — but their docs bless calling
+  `torch.ops.b12x.*` directly, which is exactly how our plugin consumes it.
+* **Sobering:** zero b12x-vs-Marlin comparisons and zero 5090 numbers exist
+  in that repo. We measure everything ourselves; the floor-bench harness is
+  already wired (`prefill_floor_bench.py --mode`).
+
+**`vendor/qutlass` (IST-DASLab — the Marlin authors) — the W4A4-quality
+answer, priced in weeks.** Fused Hadamard-as-micro-GEMM in the quantize
+epilogue with runtime-loaded rotation matrices: the literature-proven fix for
+exactly the 0.82 ceiling we measured. But it is dense-only (hard 2-D checks
+in `bindings.cpp`; no grouped/MoE path or roadmap), weights must be
+requantized from bf16 through their pipeline (our ModelOpt planes cannot feed
+it), it pins CUDA 12.8/torch 2.8 against our CUDA 13/torch 2.13, and carries
+no in-repo quality numbers (claims live in the papers). Verdict: parked R&D —
+the credible path to ~2.7 ms/layer *with* quality.
+
+**`vendor/cutlass` — confirms the wall, and shows the one door.** sm120's
+grouped collective hard-asserts F8F6F4 operands
+(`sm120_array_mma_builder.inl:83-84`): there is **no int4xbf16 mixed-input
+grouped GEMM for our silicon** anywhere in the tree. The mixed-input grouped
+kernels live on sm90/sm100 only — including a CuTe-DSL Python grouped
+mixed-input example, the cleanest skeleton if we ever hand-build
+"Machete-for-sm120" (Machete itself is Hopper-built; its sm120 support in
+vLLM is unverified). That fusion does not exist and would have to be written
+by hand: the deepest lever, weeks+.
+
+**`vendor/cute` — PyCuTe:** pure-Python layout algebra, no kernels.
+Design/prototyping aid only.
+
+### Revised ladder
+
+| when | move | expected |
+|---|---|---|
+| now | campaign on the proven Marlin+register stack: KV levers -> gates -> smoke matrix (contexts x C=1-6,10) -> PRO report | locked baselines; the 130K C=1 win defended with a full matrix |
+| kernel round 2 | bench b12x `w4a8_nvfp4` + native `w4a16` at our shapes. **Gate quality first, speed second** — today's order cost hours. Pre-materialize derived grids into bank v3 if it wins | ~3.5-5 ms/layer at near-W4A16 quality -> 8K TTFT toward ~0.8-0.9 s |
+| decode war | b12x small-M-direct for the local partial + their sweep methodology + our trace-gated ladder (one-step trace -> hotness placement -> graph replay) | 1.65x -> ~1.2-1.3x; speculation is the only lever that goes below 1x |
+| parked R&D | QuTLASS rotations (W4A4 + quality), hand-built sm120 mixed-input grouped GEMM, FP6-W6A8 (needs a bf16 base) | the 2.6x-with-quality endgame |
+
+**Process change earned today:** bake off *quality before speed*. The b12x
+detour measured 2.6x, then spent hours discovering the number was unusable.
+A single `b12x_encoding_probe.py`-style run against flashinfer's own
+quantizer would have closed it in minutes.
+
+### Round-2 execution plan (deep-scout verified, 4 agents over vendor/b12x)
+
+Corrections to the first-pass recon, all with file:line evidence in the scout
+transcripts (`history://W4A8Contract`, `://W4A8Quality`, `://W4A16Decode`,
+`://B12xBuildIntegration`):
+
+* **w4a8_nvfp4 is the same persistent-grid kernel as nvfp4**, specialized by a
+  const-baked `quant_mode` (`torch.ops.b12x.tp_moe_dynamic_launch`). Weights
+  stay ModelOpt-native — packed fp4 + FlashInfer-swizzled e4m3 K/16 scales,
+  i.e. **our bank v2 planes verbatim**. The derived grids (UE8M0 K/32 +
+  e4m3 K/16 residual, `_derive_w4a8_weight_grids`, `_impl.py:3448`) are pure
+  torch (frexp/exp2/clamp), **CPU-callable offline** -> bank-v3
+  pre-materialization is confirmed feasible, and the kernel launch takes the
+  grids as explicit tensor args, sidestepping the `data_ptr` cache.
+* **The w4a16 large-M path is cache-free**: `quant_mode=="w4a16"` dispatch
+  bypasses `_get_weight_views`/`_W13_NORMALIZED_STORAGES` entirely
+  (`_impl.py:10644-10715`); all its kernel caches are shape-keyed. Arena
+  rotation is safe there. But "native ModelOpt layout" is weight-bytes only:
+  **scales are always re-permuted** into b12x's own packed-scale order
+  (`prepare.py:292-420`) — a one-time prep we would bake as a bank plane.
+* **Alpha trap confirmed**: their benchmark loader derives the fused w13
+  alpha from gate_proj's `weight_scale_2` only, silently discarding up_proj
+  (`benchmark_moe.py:906-909`). Never copy it. For w4a8, alpha reduces to
+  pure `weight_scale_2` (MXFP8 activations carry no global scale) — our
+  ratio-bake convention maps, pending a numerics check.
+* **Operational hazards**: (a) documented segfault class when first-use CuTe
+  JIT happens inside a live vLLM engine-core worker (`smoke_bf16_gemv.py`
+  docstring) -> eager-compile at boot, then
+  `b12x.freeze_kernel_resolution("serving")`; (b) `w13_layout="w13"` is the
+  safe order (w31 triggers the never-cleared in-place swap); (c) workspace
+  pool is exact-shape-keyed and refuses to grow mid-capture — warm every
+  shape before graph capture.
+* **Install is free**: pure Python, no build step, `nvidia-cutlass-dsl==4.6.0`
+  already in `.venv` byte-for-byte, no flashinfer conflict.
+* **Decode (parked until round 2 lands):** small-M-direct is M<=8,
+  `expert_map=None`, modelopt-layout-only -> our 54-of-180 needs compact
+  local ids; the general path's `use_expert_map` mode (their Kimi-K3
+  benchmark analog is exactly our residency shape) needs the repacked
+  "packed" layout instead. Mutually exclusive; measure both.
+
+Execution order (quality first — the process rule this campaign earned):
+
+1. **CPU probe — MEASURED (first ever on real scales;
+   `benchmarks/results/run6_final/w4a8_residual_probe.json`).** Their
+   `nvfp4_mx_residual_quality_report` (`reference.py:1035`) over 48 layers x
+   4 remote experts x 3 projections of the real checkpoint: gate/up are
+   EXACT everywhere (pair exponent spread 2-3, zero flush); down_proj is
+   clean on 45/48 layers; **layers 0, 1, 41 hit the e4m3 residual-underflow
+   pathology on down_proj** (flushed 6.2% / 4.3% / 0.4%, pair spreads to
+   2^17). Verdict: PASS with per-layer mitigation — the streamer is
+   per-layer, so the three affected layers can stay on Marlin (hybrid) if
+   w4a8 wins. First-layer scale wildness is the classic pattern; the probe
+   turned a vague "quality risk" into three named layers.
+2. **Quality gate — ORACLE LEG MEASURED, PASSED**
+   (`benchmarks/b12x_w4a8_gate.py --cpu-only`, artifact
+   `run6_final/w4a8_gate_cpu.json`). b12x's own w4a8 reference
+   (`moe_reference_w4a8_mx`) fed from OUR bank-v2 planes, scored against the
+   exact fp32 checkpoint oracle, m=64, real routed inputs:
+
+   | layer | cosine | rel L2 | note |
+   |---|---|---|---|
+   | 24 (clean) | 0.9985 | 0.055 | |
+   | 0 / 1 / 41 (residual-flush) | 0.9984 / 0.9983 / 0.9983 | ~0.058 | flush is output-invisible |
+
+   Where W4A4 measured 0.82, w4a8's dynamic per-block quant lands 0.998+ on
+   real weights through our own planes — the per-layer hybrid mitigation for
+   0/1/41 is unnecessary. Two integration facts the gate surfaced:
+   (a) bank-v2 sf planes need a swizzle adapter (flashinfer emit order ->
+   b12x's TRT-LLM arrangement; both directions byte-verified in the gate
+   script); (b) our gate-first row stacking is b12x's `w13_layout="w31"` —
+   the wrong default silently computes silu(up)*gate and scores 0.87, and
+   the kernel's w31 path is the in-place-swap hazard, so **bank v3 emits
+   up-first planes**. Remaining leg: kernel-vs-oracle on GPU (their in-repo
+   gate: cos > 0.998) — folds into the speed floor run.
+3. **Speed floor:** `prefill_floor_bench.py` grows `--mode b12x-w4a8` and
+   `--mode b12x-w4a16`, M sweep 2048..32768, kill condition >= Marlin's
+   7.07 ms/layer @ M=8192.
+4. **Verdict** vs Marlin; only a quality-passing, faster kernel proceeds to
+   bank v3 (pre-derived grids + re-permuted scale planes), streamer switch
+   behind a flag, firsttok gate, serve A/B, matrix re-run.
 
 ## Measured facts
 

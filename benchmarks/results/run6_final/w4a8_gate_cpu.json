@@ -1,0 +1,36 @@
+{
+ "kind": "w4a8_quality_gate",
+ "bank": "src/phase1/expert_bank_int4.bin.b12x",
+ "m": 64,
+ "device": "cpu",
+ "layers": {
+  "24": {
+   "B_vs_C_intrinsic_w4a8": {
+    "cosine": 0.998527,
+    "rel_l2": 0.054525
+   },
+   "oracle_seconds": 79.4
+  },
+  "0": {
+   "B_vs_C_intrinsic_w4a8": {
+    "cosine": 0.998351,
+    "rel_l2": 0.05753
+   },
+   "oracle_seconds": 92.1
+  },
+  "1": {
+   "B_vs_C_intrinsic_w4a8": {
+    "cosine": 0.998333,
+    "rel_l2": 0.057948
+   },
+   "oracle_seconds": 102.1
+  },
+  "41": {
+   "B_vs_C_intrinsic_w4a8": {
+    "cosine": 0.998343,
+    "rel_l2": 0.057652
+   },
+   "oracle_seconds": 75.3
+  }
+ }
+}

@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Register-path A/B: SHOOTING_BRAKE_BANK_REGISTER=1 vs run4 baseline.
+# Register-path A/B, PHASE 1 (historical): microbench trio + first boot.
 #
-# Order matters:
-#   0. refuse to run while the run4 suite still owns the GPU
-#   1. capture baseline prompt logprobs from the LIVE flag-off server
-#      (bit-identical transport change -> gate at 1e-3, not nats)
-#   2. stop the server; run the microbench trio on the free GPU
-#   3. relaunch serve_88b_128k.sh with the flag; wait for health
-#   4. TTFT spot (8K, same tool/prompt as run4's ttft_8k.json),
-#      logprob capture + diff, then the 8K/32K matrix cells
+# SUPERSEDED for the numerics gate by ab_register_phase2.sh — this script's
+# prompt_logprobs gate is a recorded dead end: >1K-token prompts OOM-kill
+# the engine in vLLM's prompt-logprobs path, <1024-token prompts never
+# engage the streamer, and bit-equality across boots does not exist (see
+# docs/next-steps-88b.md, run5 section). The microbench trio steps here
+# remain the canonical way to re-run floor_{register,compute,overlap}.
 #
 # Everything lands under benchmarks/results/run5_88b_register/.
 set -e

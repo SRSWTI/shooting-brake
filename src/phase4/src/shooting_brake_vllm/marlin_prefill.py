@@ -30,11 +30,8 @@ verify cannot live inside vLLM's compiled forward.
 
 from __future__ import annotations
 
-import mmap
 import os
-import time
 
-import numpy as np
 import torch
 
 from vllm.logger import init_logger
@@ -131,63 +128,17 @@ class MarlinPrefillStreamer:
     def _open_bank_source(self, path: str, h) -> torch.Tensor:
         """uint8 view over the bank's plane data, pageable or pinned.
 
-        Default: np.memmap -- CUDA's pageable H2D path, 18.5 GiB/s.
-
-        SHOOTING_BRAKE_BANK_REGISTER=1: mmap MAP_PRIVATE|PROT_WRITE over the
-        O_RDONLY fd (legal: COW reserves the write option and never fires --
-        we never write; sidesteps cudaHostRegisterReadOnly and its device-
-        attribute lottery), then cudaHostRegister the plane region so the
-        existing non_blocking copy becomes true async DMA at 53.9 GiB/s
-        (measured, benchmarks/results/slab_h2d/hostregister_probe.json).
-
-        Registration happens here, i.e. lazily in the WORKER process --
-        after any engine fork. Pinned MAP_PRIVATE pages + fork() is the
-        classic get_user_pages COW hazard; constructing post-fork sidesteps
-        it. Hard-fail on register error: a failed cudaHostRegister poisons
-        the next CUDA runtime check in this process (measured), so a silent
-        pageable fallback would serve corrupted-context behaviour, not a
-        slower copy.
+        Delegates to the shared BankSource (bank_source.py) -- pageable
+        np.memmap by default, cudaHostRegister'd page cache under
+        SHOOTING_BRAKE_BANK_REGISTER=1 (53.9 GiB/s measured,
+        benchmarks/results/slab_h2d/hostregister_probe.json). Constructed
+        lazily in the worker, post-fork; hard-fails on register error.
         """
+        from .bank_source import BankSource
         data_len = h.num_layers * h.layer_stride_bytes
-        if os.environ.get("SHOOTING_BRAKE_BANK_REGISTER", "0") != "1":
-            self._mm = np.memmap(path, dtype=np.uint8, mode="r")
-            return torch.from_numpy(
-                np.asarray(self._mm[h.data_offset: h.data_offset + data_len])
-            )
-
-        map_len = h.data_offset + data_len
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            self._mmap = mmap.mmap(
-                fd, map_len, flags=mmap.MAP_PRIVATE,
-                prot=mmap.PROT_READ | mmap.PROT_WRITE,
-            )
-        finally:
-            os.close(fd)
-        self._mmap.madvise(mmap.MADV_WILLNEED)  # async readahead before gup
-        base = torch.frombuffer(
-            memoryview(self._mmap)[h.data_offset: h.data_offset + data_len],
-            dtype=torch.uint8,
-        )
-        # data_offset and layer_stride are ALIGNMENT(4096)-aligned by the
-        # bank ABI, so the registered range is page-aligned by construction.
-        t0 = time.perf_counter()
-        status = int(torch.cuda.cudart().cudaHostRegister(
-            base.data_ptr(), data_len, 0
-        ))
-        if status != 0:
-            raise RuntimeError(
-                f"cudaHostRegister({data_len} B) failed with cudaError {status}"
-                " -- refusing pageable fallback: the failed call poisons the"
-                " CUDA context. Unset SHOOTING_BRAKE_BANK_REGISTER to run"
-                " pageable."
-            )
-        logger.info(
-            "Registered %.1f GiB bank page cache in %.1f s (%.2f GiB/s)",
-            data_len / 2**30, time.perf_counter() - t0,
-            data_len / 2**30 / max(time.perf_counter() - t0, 1e-9),
-        )
-        return base
+        register = os.environ.get("SHOOTING_BRAKE_BANK_REGISTER", "0") == "1"
+        self._source = BankSource(path, h.data_offset, data_len, register)
+        return self._source.tensor
 
     def _layer_cpu(self, layer: int) -> torch.Tensor:
         stride = self._hdr.layer_stride_bytes
@@ -293,13 +244,24 @@ class MarlinPrefillStreamer:
 # complex kernel -- is a registered custom op: the compiler sees one opaque
 # node with a shape rule and never looks inside.
 
-_STREAMER: MarlinPrefillStreamer | None = None
+_STREAMER = None  # MarlinPrefillStreamer | B12xPrefillStreamer
 
 
-def _get_streamer(bank_path: str, act_dtype: torch.dtype) -> MarlinPrefillStreamer:
+def _get_streamer(bank_path: str, act_dtype: torch.dtype):
+    """Select the prefill streamer once per worker.
+
+    SHOOTING_BRAKE_PREFILL_B12X=1 serves the custom op with the B12x
+    (bank v2, native-FP4 tensor core) streamer instead of Marlin. Same
+    partial() contract, same ring/overlap semantics; W4A4 numerics --
+    gated by the firsttok envelope before any serving claim.
+    """
     global _STREAMER
     if _STREAMER is None:
-        _STREAMER = MarlinPrefillStreamer(bank_path, act_dtype=act_dtype)
+        if os.environ.get("SHOOTING_BRAKE_PREFILL_B12X", "0") == "1":
+            from .b12x_prefill import B12xPrefillStreamer
+            _STREAMER = B12xPrefillStreamer(bank_path, act_dtype=act_dtype)
+        else:
+            _STREAMER = MarlinPrefillStreamer(bank_path, act_dtype=act_dtype)
     return _STREAMER
 
 

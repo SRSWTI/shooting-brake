@@ -1,0 +1,137 @@
+{
+  "cell": "F_matrix/ctx_8192",
+  "grid": "F_matrix",
+  "profile": "concurrent",
+  "prompt_tokens": 8192,
+  "output_tokens": 512,
+  "streams": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    10
+  ],
+  "sweep_size": null,
+  "max_requests": 12,
+  "max_seconds": null,
+  "thinking": false,
+  "request_format": "/v1/chat/completions",
+  "notes": "PRO-matched concurrency matrix; C=10 rung is ours alone",
+  "command": [
+    "/home/shooting-brake007/srswti/shooting-brake/.venv/bin/python",
+    "-m",
+    "guidellm",
+    "run",
+    "--backend",
+    "kind=openai_http,target=http://127.0.0.1:8016,model=shooting-brake-88b,request_format=/v1/chat/completions,extras.body.chat_template_kwargs.enable_thinking=false",
+    "--tokenizer",
+    "kind=huggingface_auto,model=srswti/axe-superveloce-88b-nvfp4a16,load_kwargs.trust_remote_code=true",
+    "--profile",
+    "kind=concurrent,warmup=0.1,cooldown=0.1,rampup_duration=0.0",
+    "--data",
+    "kind=synthetic_text,prompt_tokens=8192,output_tokens=512",
+    "--seed",
+    "kind=static,value=917237760",
+    "--override",
+    "profile.streams",
+    "1,2,3,4,5,6,10",
+    "--constraint",
+    "kind=max_requests,count=12",
+    "--constraint",
+    "kind=max_errors,count=5",
+    "--output",
+    "kind=json,path=benchmarks/results/run6_final/matrix/F_matrix/ctx_8192/report.json",
+    "--output",
+    "kind=csv,path=benchmarks/results/run6_final/matrix/F_matrix/ctx_8192/report.csv",
+    "--output",
+    "kind=html,path=benchmarks/results/run6_final/matrix/F_matrix/ctx_8192/report.html",
+    "--disable-console-interactive"
+  ],
+  "seed": 917237760,
+  "return_code": 0,
+  "elapsed_seconds": 391.05,
+  "capacity": {
+    "peak_kv_tokens_if_full": 125280,
+    "kv_tokens_available": 262144,
+    "capacity_bound": false,
+    "interpretation": "fits in KV"
+  },
+  "measured": true,
+  "measurement_detail": {
+    "benchmarks": [
+      {
+        "index": 0,
+        "successful_measured": 8,
+        "retained_including_transients": 12,
+        "errored": 0,
+        "duration": 57.550551414489746,
+        "warmup_duration": 14.373398542404175,
+        "cooldown_duration": 14.372104167938232,
+        "measured": true
+      },
+      {
+        "index": 1,
+        "successful_measured": 9,
+        "retained_including_transients": 12,
+        "errored": 0,
+        "duration": 40.089324712753296,
+        "warmup_duration": 10.045911312103271,
+        "cooldown_duration": 10.00200605392456,
+        "measured": true
+      },
+      {
+        "index": 2,
+        "successful_measured": 10,
+        "retained_including_transients": 12,
+        "errored": 0,
+        "duration": 40.246904134750366,
+        "warmup_duration": 13.504478931427002,
+        "cooldown_duration": 0.0263671875,
+        "measured": true
+      },
+      {
+        "index": 3,
+        "successful_measured": 10,
+        "retained_including_transients": 12,
+        "errored": 0,
+        "duration": 28.9480619430542,
+        "warmup_duration": 14.603305578231812,
+        "cooldown_duration": 0.027690649032592773,
+        "measured": true
+      },
+      {
+        "index": 4,
+        "successful_measured": 10,
+        "retained_including_transients": 12,
+        "errored": 0,
+        "duration": 20.7025146484375,
+        "warmup_duration": 19.585923433303833,
+        "cooldown_duration": 9.014071941375732,
+        "measured": true
+      },
+      {
+        "index": 5,
+        "successful_measured": 10,
+        "retained_including_transients": 12,
+        "errored": 0,
+        "duration": 20.854225158691406,
+        "warmup_duration": 20.9067645072937,
+        "cooldown_duration": 0.02796626091003418,
+        "measured": true
+      },
+      {
+        "index": 6,
+        "successful_measured": 10,
+        "retained_including_transients": 12,
+        "errored": 0,
+        "duration": 20.043686151504517,
+        "warmup_duration": 21.980956554412842,
+        "cooldown_duration": 0.02801346778869629,
+        "measured": true
+      }
+    ]
+  },
+  "transients_trimmed": true
+}

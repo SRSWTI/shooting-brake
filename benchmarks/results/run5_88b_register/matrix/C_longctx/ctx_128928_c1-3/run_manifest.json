@@ -1,0 +1,93 @@
+{
+  "cell": "C_longctx/ctx_128928_c1-3",
+  "grid": "C_longctx",
+  "profile": "concurrent",
+  "prompt_tokens": 128928,
+  "output_tokens": 512,
+  "streams": [
+    1,
+    2,
+    3
+  ],
+  "sweep_size": null,
+  "max_requests": 6,
+  "max_seconds": null,
+  "thinking": false,
+  "request_format": "/v1/chat/completions",
+  "notes": "31 blocks x 4,176 = 129,456 tokens per seat: C=2 fits at 258,912, C=3 needs 388,368 and is the admission boundary",
+  "command": [
+    "/home/shooting-brake007/srswti/shooting-brake/.venv/bin/python",
+    "-m",
+    "guidellm",
+    "run",
+    "--backend",
+    "kind=openai_http,target=http://127.0.0.1:8016,model=shooting-brake-88b,request_format=/v1/chat/completions,extras.body.chat_template_kwargs.enable_thinking=false",
+    "--tokenizer",
+    "kind=huggingface_auto,model=srswti/axe-superveloce-88b-nvfp4a16,load_kwargs.trust_remote_code=true",
+    "--profile",
+    "kind=concurrent,warmup=0,cooldown=0,rampup_duration=0.0",
+    "--data",
+    "kind=synthetic_text,prompt_tokens=128928,output_tokens=512",
+    "--seed",
+    "kind=static,value=1369839660",
+    "--override",
+    "profile.streams",
+    "1,2,3",
+    "--constraint",
+    "kind=max_requests,count=6",
+    "--constraint",
+    "kind=max_errors,count=5",
+    "--output",
+    "kind=json,path=benchmarks/results/run5_88b_register/matrix/C_longctx/ctx_128928_c1-3/report.json",
+    "--output",
+    "kind=csv,path=benchmarks/results/run5_88b_register/matrix/C_longctx/ctx_128928_c1-3/report.csv",
+    "--output",
+    "kind=html,path=benchmarks/results/run5_88b_register/matrix/C_longctx/ctx_128928_c1-3/report.html",
+    "--disable-console-interactive"
+  ],
+  "seed": 1369839660,
+  "return_code": 0,
+  "elapsed_seconds": 759.7,
+  "capacity": {
+    "peak_kv_tokens_if_full": 388368,
+    "kv_tokens_available": 262144,
+    "capacity_bound": true,
+    "interpretation": "offered concurrency exceeds KV capacity; treat as admission capacity, not throughput"
+  },
+  "measured": true,
+  "measurement_detail": {
+    "benchmarks": [
+      {
+        "index": 0,
+        "successful_measured": 4,
+        "retained_including_transients": 6,
+        "errored": 0,
+        "duration": 167.2250738143921,
+        "warmup_duration": 41.827112436294556,
+        "cooldown_duration": 41.82413411140442,
+        "measured": true
+      },
+      {
+        "index": 1,
+        "successful_measured": 6,
+        "retained_including_transients": 6,
+        "errored": 0,
+        "duration": 208.60243797302246,
+        "warmup_duration": 0.0,
+        "cooldown_duration": 41.79420351982117,
+        "measured": true
+      },
+      {
+        "index": 2,
+        "successful_measured": 5,
+        "retained_including_transients": 6,
+        "errored": 0,
+        "duration": 208.57921886444092,
+        "warmup_duration": 0.0,
+        "cooldown_duration": 41.79247188568115,
+        "measured": true
+      }
+    ]
+  },
+  "transients_trimmed": false
+}

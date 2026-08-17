@@ -1,0 +1,137 @@
+{
+  "cell": "F_matrix/ctx_65536",
+  "grid": "F_matrix",
+  "profile": "concurrent",
+  "prompt_tokens": 65536,
+  "output_tokens": 512,
+  "streams": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    10
+  ],
+  "sweep_size": null,
+  "max_requests": 6,
+  "max_seconds": null,
+  "thinking": false,
+  "request_format": "/v1/chat/completions",
+  "notes": "PRO-matched concurrency matrix; C=10 rung is ours alone",
+  "command": [
+    "/home/shooting-brake007/srswti/shooting-brake/.venv/bin/python",
+    "-m",
+    "guidellm",
+    "run",
+    "--backend",
+    "kind=openai_http,target=http://127.0.0.1:8016,model=shooting-brake-88b,request_format=/v1/chat/completions,extras.body.chat_template_kwargs.enable_thinking=false",
+    "--tokenizer",
+    "kind=huggingface_auto,model=srswti/axe-superveloce-88b-nvfp4a16,load_kwargs.trust_remote_code=true",
+    "--profile",
+    "kind=concurrent,warmup=0,cooldown=0,rampup_duration=0.0",
+    "--data",
+    "kind=synthetic_text,prompt_tokens=65536,output_tokens=512",
+    "--seed",
+    "kind=static,value=1842891440",
+    "--override",
+    "profile.streams",
+    "1,2,3,4,5,6,10",
+    "--constraint",
+    "kind=max_requests,count=6",
+    "--constraint",
+    "kind=max_errors,count=5",
+    "--output",
+    "kind=json,path=benchmarks/results/run6_final/matrix/F_matrix/ctx_65536/report.json",
+    "--output",
+    "kind=csv,path=benchmarks/results/run6_final/matrix/F_matrix/ctx_65536/report.csv",
+    "--output",
+    "kind=html,path=benchmarks/results/run6_final/matrix/F_matrix/ctx_65536/report.html",
+    "--disable-console-interactive"
+  ],
+  "seed": 1842891440,
+  "return_code": 0,
+  "elapsed_seconds": 715.98,
+  "capacity": {
+    "peak_kv_tokens_if_full": 668160,
+    "kv_tokens_available": 262144,
+    "capacity_bound": true,
+    "interpretation": "offered concurrency exceeds KV capacity; treat as admission capacity, not throughput"
+  },
+  "measured": true,
+  "measurement_detail": {
+    "benchmarks": [
+      {
+        "index": 0,
+        "successful_measured": 4,
+        "retained_including_transients": 6,
+        "errored": 0,
+        "duration": 76.04628133773804,
+        "warmup_duration": 19.378208875656128,
+        "cooldown_duration": 19.012044191360474,
+        "measured": true
+      },
+      {
+        "index": 1,
+        "successful_measured": 5,
+        "retained_including_transients": 6,
+        "errored": 0,
+        "duration": 67.27558875083923,
+        "warmup_duration": 33.48338747024536,
+        "cooldown_duration": 0.0981588363647461,
+        "measured": true
+      },
+      {
+        "index": 2,
+        "successful_measured": 4,
+        "retained_including_transients": 5,
+        "errored": 0,
+        "duration": 48.655280351638794,
+        "warmup_duration": 48.587077140808105,
+        "cooldown_duration": 0.0,
+        "measured": true
+      },
+      {
+        "index": 3,
+        "successful_measured": 4,
+        "retained_including_transients": 5,
+        "errored": 0,
+        "duration": 48.71719479560852,
+        "warmup_duration": 48.55106973648071,
+        "cooldown_duration": 0.0,
+        "measured": true
+      },
+      {
+        "index": 4,
+        "successful_measured": 5,
+        "retained_including_transients": 6,
+        "errored": 0,
+        "duration": 48.810468435287476,
+        "warmup_duration": 48.72388291358948,
+        "cooldown_duration": 0.1118004322052002,
+        "measured": true
+      },
+      {
+        "index": 5,
+        "successful_measured": 5,
+        "retained_including_transients": 6,
+        "errored": 0,
+        "duration": 48.482324838638306,
+        "warmup_duration": 48.512755393981934,
+        "cooldown_duration": 0.09924840927124023,
+        "measured": true
+      },
+      {
+        "index": 6,
+        "successful_measured": 5,
+        "retained_including_transients": 6,
+        "errored": 0,
+        "duration": 48.676756143569946,
+        "warmup_duration": 48.47683906555176,
+        "cooldown_duration": 0.09938526153564453,
+        "measured": true
+      }
+    ]
+  },
+  "transients_trimmed": false
+}

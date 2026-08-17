@@ -32,7 +32,8 @@ export SHOOTING_BRAKE_B70_GRAPH=1
 export SHOOTING_BRAKE_PREEMPTIVE_SURGERY=1
 export SHOOTING_BRAKE_VRAM_SURGERY=1
 export SHOOTING_BRAKE_B70_PREFILL_STREAM=0
-export SHOOTING_BRAKE_B70_MAX_BATCH=2048
+# B70_MAX_BATCH default is mode-dependent; resolved after the register check
+# below so an explicit caller value always wins.
 export SHOOTING_BRAKE_B70_BANK="$PWD/src/phase1/expert_bank_int4.bin"
 export SHOOTING_BRAKE_B70_LIB="$PWD/src/phase7/libsb_b70_provider.so"
 # Measured wins, promoted to defaults (both overridable):
@@ -45,6 +46,19 @@ export SHOOTING_BRAKE_B70_LIB="$PWD/src/phase7/libsb_b70_provider.so"
 #                             21.86 s dispatch. Decode path untouched.
 export ZE_AFFINITY_MASK="${ZE_AFFINITY_MASK:-1}"
 export SHOOTING_BRAKE_PREFILL_MARLIN="${SHOOTING_BRAKE_PREFILL_MARLIN:-1}"
+# Forwards with M <= B70_MAX_BATCH take the doorbell dispatch (~2.2 ms/token,
+# routed_experts.py:2130 gates _prefill_forward_offloaded, which hosts the
+# Marlin-streamer branch). The crossover is a function of the stream's fixed
+# cost: pageable 1.48 s/pass -> dispatch wins to ~700 tokens; registered DMA
+# 0.51-0.6 s/pass -> dispatch wins only below ~280 (run6 F_matrix measured
+# ctx_1024 at 2.24 s on dispatch vs ~0.6 s streamed). NOTE: an earlier edit
+# set SHOOTING_BRAKE_B70_STREAM_T here -- a dead knob on this config; it
+# gates the cpu_stream tier (PREFILL_STREAM=1), not the Marlin branch.
+if [ "${SHOOTING_BRAKE_BANK_REGISTER:-0}" = "1" ]; then
+  export SHOOTING_BRAKE_B70_MAX_BATCH="${SHOOTING_BRAKE_B70_MAX_BATCH:-256}"
+else
+  export SHOOTING_BRAKE_B70_MAX_BATCH="${SHOOTING_BRAKE_B70_MAX_BATCH:-2048}"
+fi
 unset SHOOTING_BRAKE_B70_PROFILE VLLM_USE_BREAKABLE_CUDAGRAPH
 # Stream-once (Tier A) launch recipe, gated on the run5 A/B first:
 #   SB_MNBT=32768                      one scheduler step per 32K prompt
@@ -60,5 +74,5 @@ exec .venv/bin/vllm serve srswti/axe-superveloce-88b-nvfp4a16 \
   --host 127.0.0.1 --port 8016 \
   --trust-remote-code --language-model-only \
   --max-model-len 131072 --max-num-batched-tokens "${SB_MNBT:-8192}" \
-  --gpu-memory-utilization 0.90 --max-num-seqs "${SB_MNS:-16}" \
+  --gpu-memory-utilization "${SB_GPU_UTIL:-0.90}" --max-num-seqs "${SB_MNS:-16}" \
   --reasoning-parser qwen3 ${SB_EXTRA_ARGS}

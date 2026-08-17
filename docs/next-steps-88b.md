@@ -25,6 +25,47 @@ steady-state free VRAM 1,577 MiB; a C=10 + 8K-prefill burst peaks only
   (hybrid mamba page coupling) — a vLLM-geometry change, parked with the
   SGLang capacity-solve reference as the map.
 
+## PLANNED: 122B bring-up (unsloth/Qwen3.5-122B-A10B-NVFP4, already plugin-qualified)
+
+Config verified on disk: **attention/GDN geometry is field-for-field
+identical to the 88B** (heads 32/GQA-2, head_dim 256, full-attn every 4th
+of 48 layers, GDN k=128/16-64 heads, conv 4, vocab 248,320) — the whole
+plugin transfers; deltas are `num_experts` 180→256 and the quant recipe.
+Three unlocks verified in the checkpoint:
+
+1. **Experts are calibrated W4A4** (e2m1 g16 weights + FP4 g16 dynamic-local
+   activations with shipped scales; attention FP8 W8A8 dynamic; layer-47
+   experts kept FP8). The 2.6× FP4-activation MoE kernels killed in round 1
+   were killed for *uncalibrated* forced-W4A4 — this checkpoint is the
+   intended regime. Gate with logprob envelope; if it passes, the ≤32K
+   prefill compute gap shrinks structurally.
+2. **Native MTP head ships: 785 `mtp.*` tensors** (1-layer MoE draft with
+   its own 256 experts, ~1.4 GB). vLLM auto-detects
+   `qwen3_5_moe → Qwen3_5MoeMTP n_predict=1` — speculation is a config
+   flag, not a training project. Rollback mechanism for hybrid GDN is
+   in-tree and proposer-agnostic (three-scout recon); runtime gate before
+   trust. Spec cap 2 (vllm#34948 crash class above).
+3. **First-party GPTQ bank source** (Qwen/Qwen3.5-122B-A10B-GPTQ-Int4):
+   bits=4/g128/sym/desc_act=false all verified — direct bank source, zero
+   transcode, calibrated. Three-arm bank bake-off queued: GPTQ-native vs
+   NVFP4-transcode vs NVFP4-native (SBEXP001).
+
+**Placement (sized):** dual-B70 mandatory and exact — 128/128 experts =
+29.9 GB/card int4. All-remote placement frees the 5090: dense+embed ~8 GB
++ MTP experts 1.4 GB → **~17 GB KV ≈ 1.4M tokens ≈ 5.3 seats @262K** —
+the capacity asymmetry vs the PRO nearly vanishes on this model (their 96 GB
+holds 74 GB of weights). Decode improves: ~8 remote routes split ~4/card
+in parallel ≈ 50–58 µs/card leg vs today's 94 µs single-card window.
+
+**The one hard constraint: host RAM.** The streamed prefill bank is
+59.8 GB vs 63 GB total host RAM — page-cache residency (the 53.9 GiB/s
+design) does not fit beside the system. Options, priced per 48-layer pass:
+RAM upgrade to 128 GB → 1.11 s/pass (clean, recommended); NVMe tail
+(~45 GB cached + ~15 GB at 7 GB/s) → ~3 s/pass; B70-VRAM pull-back
+(~10 GB/s aggregate, consumes the 5090 link) → ~6 s/pass, worst. Without
+the upgrade the 122B still wins on decode + capacity + MTP; short-context
+prefill degrades.
+
 ## SHIPPED: run6 — full PRO-matched smoke matrix; 4 outright wins
 
 Final config: Marlin + `SHOOTING_BRAKE_BANK_REGISTER=1`, explicit

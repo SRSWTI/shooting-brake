@@ -135,6 +135,60 @@ bf16 GEMM) measured **0.5-1.2×, sometimes slower than bf16** — fused
 epilogue-dequant is mandatory, not optional
 (`b70_ai_things/zml/ZML_INT8_PERF_HANDOFF.md:88-93`).
 
+### 1b. Register the doorbell buffers with the B70's SYCL context — NEW, cheap
+**Found from a fresh `vllm-xpu-kernels` pull (upstream PR #519, commit
+`f1c4861`), and it is the missing half of our own biggest win.**
+
+Intel just landed `xpu_host_register` / `xpu_host_unregister`
+(`csrc/utils/host_register.cpp`) — explicitly "the SYCL counterpart of
+`cudaHostRegister`", wrapping `syclex::prepare_for_device_copy(ptr, n_bytes,
+ctx)`. Their own docstring describes our exact situation **[code-verified]**:
+
+> "Host memory that cannot be obtained from the caching host allocator --
+> notably a shared mmap region -- is otherwise pageable, which forces staged
+> (H2D) or synchronous (D2H) copies. **Registration is scoped to the device's
+> context, so each device that transfers to or from the range must register it
+> separately.**"
+
+That last clause is the finding. Our doorbell staging buffers
+(`routed_experts.py:926,930,1042,1046,1105`) are allocated `pin_memory=True`
+— which pins them into the **CUDA** caching host allocator. The B70's SYCL
+context knows nothing about that registration, so from the Arc's side those
+buffers are **pageable**, forcing staged H2D and *synchronous* D2H on **every
+doorbell round trip, every layer, every decode step**. Verified three ways
+**[measured-here]**:
+
+* `prepare_for_device_copy` / `release_from_device_copy` are **absent from our
+  compiled `src/phase7/libsb_b70_provider.so`** (checked with `strings`) — we
+  have never registered anything on the XPU side.
+* the provider takes raw host pointers (`const sycl::half* hidden`,
+  `b70_capi.cpp:44,270,352`) and copies from them.
+* the primitive **is available in our installed oneAPI 2026.1**
+  (`sycl/usm.hpp:341`) — no toolchain upgrade required.
+
+*Where:* one registration call per buffer at provider init, for each B70
+context that touches it. Our own CUDA-side precedent is exactly this move
+(pageable 18.5 -> registered 53.9 GiB/s).
+*Buys (unmeasured, order-of-magnitude):* the win is removing **fixed
+per-transfer overhead**, not bytes — at M=1 the payload is only 6 KiB, so
+bandwidth is irrelevant and the cost is the staging bounce plus a D2H
+serialization point. At 48 layers x 2 transfers per decode step, a 5 us
+per-transfer overhead is ~480 us (**~4% of our 11.88 ms ITL**); 20 us would be
+~1.9 ms (**~16%**). Decode is our worst metric (1.35-1.63x behind), and the
+doorbell wait itself is already hidden (B70 44 us vs CUDA MoE 100 us), so any
+saving here is not masked by overlap.
+*Cost:* a few lines in the provider + a rebuild. Pairs with item 1: that audit
+measures the *kernel's* achieved bandwidth, this one measures the *transport's*
+overhead — two afternoon experiments on the same metric, from opposite ends.
+*Secondary:* the same primitive would let the B70s DMA the 27.4 GiB expert bank
+straight from mmap'd page cache at boot instead of a staged copy — a boot-time
+win (ours is ~130 s), not a serving one.
+
+**The other two commits in that pull are off our path:** `#527` rewrites
+`csrc/moe/grouped_topk.cpp` (718 lines) but our router runs topk on the **5090**
+and dispatches only expert IDs to the B70; `#526` adds an XPU paged-decode
+config tuple, and our attention runs on the 5090 via FlashInfer.
+
 ### 2. GDN prefill: route to flashinfer's sm_120 kernel via our plugin
 **This is a bug-class hit we found live.** vLLM's selector
 (`qwen_gdn_linear_attn.py:116-133`) sets `supports_flashinfer` only for

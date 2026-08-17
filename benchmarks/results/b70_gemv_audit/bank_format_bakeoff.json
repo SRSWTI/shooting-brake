@@ -1,0 +1,35 @@
+{
+ "date": "2026-08-17",
+ "question": "122B remote bank format for the B70: int4-GPTQ transcode vs NVFP4-native (SBEXP001)",
+ "method": "xpu_bench synthetic at production geometry (E=126 proxy, K=3072, I=1024, topk8), sustained clocks (pin 2800), equal-valid-pairs accounting vs measured 599 GB/s ceiling",
+ "speed_leg": {
+  "pairs_8": {
+   "nvfp4_us": 67.9,
+   "nvfp4_pct": 92.8,
+   "int4_us": 82.5,
+   "int4_pct": 78.8,
+   "verdict": "nvfp4 +18%"
+  },
+  "pairs_16": {
+   "nvfp4_us": 156.4,
+   "int4_us": 154.1,
+   "verdict": "tie"
+  },
+  "pairs_32": {
+   "nvfp4_us": 282.4,
+   "int4_us": 295.9,
+   "verdict": "nvfp4 +5%"
+  }
+ },
+ "caveats": [
+  "synthetic fill: nvfp4 fixture weights byte-varied (ok) but scales cycle 4 values (~11% of bytes, mild compression risk)",
+  "int4 numbers from the audited random-fill fixture (gemv_bw_audit.json sustained cells)",
+  "nvfp4 fixture has no -1 route padding; int4 production carries it (small dead-WG cost already in int4's numbers)"
+ ],
+ "decision": "NVFP4-native (SBEXP001) is the 122B bank favorite: faster at the decode shape, zero transcode error, and prefill stays unified via an NVFP4 Marlin bank (bank-v2 tooling exists; 5090 local experts already run NVFP4-Marlin). GPTQ checkpoint's role narrows to a served-model-quality comparison (GPTQ-calibrated int4 vs NVFP4-W4A4 checkpoints), not a bank-format decision.",
+ "remaining_for_bringup": [
+  "extractor adaptation: compressed-tensors names (weight_packed/weight_global_scale/input_global_scale) + global-scale convention code-verified against compressed_tensors source (multiplier-vs-divisor trap)",
+  "quality gate on real 122B planes vs CPU dequant oracle (2-layer pilot banks, ~2.5 GB)",
+  "disk budget: full banks ~60 GB each; 119 GB free minus ~52 GB GPTQ remaining -- cleanup decision needed before full builds"
+ ]
+}

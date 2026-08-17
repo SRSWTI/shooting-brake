@@ -45,10 +45,23 @@ Three unlocks verified in the checkpoint:
    flag, not a training project. Rollback mechanism for hybrid GDN is
    in-tree and proposer-agnostic (three-scout recon); runtime gate before
    trust. Spec cap 2 (vllm#34948 crash class above).
-3. **First-party GPTQ bank source** (Qwen/Qwen3.5-122B-A10B-GPTQ-Int4):
-   bits=4/g128/sym/desc_act=false all verified — direct bank source, zero
-   transcode, calibrated. Three-arm bank bake-off queued: GPTQ-native vs
-   NVFP4-transcode vs NVFP4-native (SBEXP001).
+3. **Bank-format bake-off, speed leg MEASURED — NVFP4-native is the
+   favorite** (`b70_gemv_audit/bank_format_bakeoff.json`; sustained
+   clocks, equal valid pairs, vs the measured 599 GB/s ceiling):
+   `nvfp4_moe_split` beats `int4_moe_split` **+18% at the decode shape**
+   (8 pairs: 67.9 µs / 93% vs 82.5 µs / 79%), ties at 16, +5% at 32.
+   NVFP4-native also has ZERO transcode error, and prefill stays unified
+   via an NVFP4 Marlin bank (bank-v2 tooling; the 5090's local experts
+   already run NVFP4-Marlin). The first-party GPTQ checkpoint
+   (bits=4/g128/sym/desc_act=false, all verified) narrows to a
+   served-model-quality comparison (GPTQ-calibrated int4 vs NVFP4-W4A4
+   checkpoints), not a bank-format decision. Remaining for bring-up:
+   extractor adaptation to compressed-tensors names
+   (`weight_packed`/`weight_global_scale`/`input_global_scale`; verify
+   the global-scale multiplier-vs-divisor convention against
+   `compressed_tensors` source — the reciprocal trap), quality gate on
+   2-layer pilot banks, and a disk-budget decision before full ~60 GB
+   builds (119 GB free minus ~52 GB of in-flight GPTQ download).
 
 **Placement (sized):** dual-B70 mandatory and exact — 128/128 experts =
 29.9 GB/card int4. All-remote placement frees the 5090: dense+embed ~8 GB

@@ -74,16 +74,50 @@ DIM, BOLD, CYAN, GREEN, YELLOW, MAGENTA, RED, RESET = (
 # -- local tools --------------------------------------------------------------
 
 
+MAX_READ_LINES = 2000
+MAX_READ_CHARS = 40_000  # catches single huge/minified lines a line cap misses
+
+
 def _read(args: dict) -> str:
+    """Read with hard caps regardless of what the model requests.
+
+    A prior session hit a real incident from this: the model read a 15 MB
+    JSON report with no `limit`, the unbounded result went into history as
+    a tool message, and every subsequent turn -- including plain "hi" --
+    400'd with a context-length error, because the giant message never
+    left history. These caps make that structurally impossible: `limit` can
+    only shrink the read, never grow past MAX_READ_LINES, and the returned
+    string is additionally capped in bytes for the pathological case of a
+    few enormous (e.g. minified) lines.
+    """
     try:
+        offset = max(0, int(args.get("offset", 0) or 0))
+        requested = args.get("limit")
+        limit = min(int(requested), MAX_READ_LINES) if requested else MAX_READ_LINES
+        selected = []
         with open(args["path"]) as f:
-            lines = f.readlines()
-        offset = int(args.get("offset", 0) or 0)
-        limit = int(args.get("limit", len(lines)) or len(lines))
-        selected = lines[offset: offset + limit]
-        return "".join(
-            f"{offset + i + 1:5}| {ln}" for i, ln in enumerate(selected)
-        ) or "(empty selection)"
+            for _ in range(offset):
+                if f.readline() == "":
+                    break
+            for i, ln in enumerate(f):
+                if i >= limit:
+                    selected.append(None)  # marks "more remains"
+                    break
+                selected.append(ln)
+        truncated_by_lines = selected and selected[-1] is None
+        if truncated_by_lines:
+            selected = selected[:-1]
+        out = "".join(f"{offset + i + 1:5}| {ln}" for i, ln in enumerate(selected))
+        truncated_by_chars = len(out) > MAX_READ_CHARS
+        if truncated_by_chars:
+            out = out[:MAX_READ_CHARS]
+        if truncated_by_lines or truncated_by_chars:
+            why = "line cap" if truncated_by_lines else "char cap"
+            out += (
+                f"\n... [truncated at {why}: use offset={offset + limit} to "
+                f"continue, or a narrower limit]"
+            )
+        return out or "(empty selection)"
     except Exception as e:
         return f"error: {e}"
 
@@ -144,14 +178,18 @@ def _grep(args: dict) -> str:
                 with open(fp, errors="ignore") as f:
                     for n, line in enumerate(f, 1):
                         if pattern.search(line):
-                            hits.append(f"{fp}:{n}:{line.rstrip()}")
+                            line_text = line.rstrip()
+                            if len(line_text) > 300:
+                                line_text = line_text[:300] + "...[line truncated]"
+                            hits.append(f"{fp}:{n}:{line_text}")
                             if len(hits) >= 200:
                                 raise StopIteration
             except StopIteration:
                 break
             except Exception:
                 continue
-        return "\n".join(hits[:200]) or "(no matches)"
+        out = "\n".join(hits[:200]) or "(no matches)"
+        return out[:MAX_READ_CHARS]
     except Exception as e:
         return f"error: {e}"
 
@@ -411,6 +449,24 @@ class TagFilter:
         return "".join(out)
 
 
+class ChatRequestError(Exception):
+    """A 400/4xx/5xx from the server, with vLLM's actual error message.
+
+    Bare urllib.error.HTTPError prints as "HTTP Error 400: Bad Request" --
+    the useful text is in the response body, which HTTPError does not
+    surface by default. This reads it once at the failure site.
+    """
+
+    def __init__(self, status: int, body: str) -> None:
+        self.status = status
+        self.body = body
+        try:
+            self.message = json.loads(body).get("error", {}).get("message", body)
+        except Exception:
+            self.message = body
+        super().__init__(f"HTTP {status}: {self.message}")
+
+
 class Turn:
     __slots__ = ("content", "reasoning", "tokens", "ttft_s", "total_s")
 
@@ -446,7 +502,12 @@ def stream_turn(messages: list[dict], show_think: bool, max_tokens: int) -> Turn
     t0 = time.monotonic()
     tag_filter = TagFilter()
 
-    with urllib.request.urlopen(req, timeout=3600) as resp:
+    try:
+        resp_cm = urllib.request.urlopen(req, timeout=3600)
+    except urllib.error.HTTPError as e:
+        raise ChatRequestError(e.code, e.read().decode("utf-8", "replace")) from None
+
+    with resp_cm as resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
@@ -501,6 +562,41 @@ def stream_turn(messages: list[dict], show_think: bool, max_tokens: int) -> Turn
     turn.total_s = time.monotonic() - t0
     return turn
 
+CONTEXT_ERROR_MARKERS = ("maximum context length", "context length", "context_length_exceeded")
+HISTORY_CHAR_BUDGET = 300_000  # conservative proxy, well under 131,072 tokens
+
+
+def trim_oversized_history(messages: list[dict]) -> int:
+    """Stub out the largest messages in history until under budget.
+
+    Protects messages[0] (system) and the very last message (the turn that
+    just failed) so the retry is otherwise identical. Stubs content in
+    place rather than deleting the message: role/position sequencing is
+    what the chat template's tool_call/tool_response pairing depends on,
+    and removing a message could desync that pairing in ways a missing
+    tool response would not.
+    """
+    protect = {0, len(messages) - 1}
+    sized = sorted(
+        (i for i in range(len(messages)) if i not in protect),
+        key=lambda i: len(str(messages[i].get("content", ""))),
+        reverse=True,
+    )
+    total = sum(len(str(m.get("content", ""))) for m in messages)
+    dropped = 0
+    for i in sized:
+        if total <= HISTORY_CHAR_BUDGET:
+            break
+        sz = len(str(messages[i].get("content", "")))
+        if sz < 2000:
+            break  # remaining messages are small; stop, not worth stubbing
+        messages[i]["content"] = (
+            f"[pruned: this {sz}-char result was too large and was dropped "
+            f"from history to recover from a context-length error]"
+        )
+        total -= sz
+        dropped += 1
+    return dropped
 
 def preview(text: str, n: int = 100) -> str:
     lines = text.split("\n")
@@ -579,6 +675,18 @@ def main() -> int:
         for _ in range(MAX_TOOL_ITERS):
             try:
                 turn = stream_turn(messages, show_think, max_tokens)
+            except ChatRequestError as exc:
+                is_context_err = any(m in exc.message.lower() for m in CONTEXT_ERROR_MARKERS)
+                if is_context_err:
+                    dropped = trim_oversized_history(messages)
+                    if dropped:
+                        print(f"\n{YELLOW}context length exceeded -- pruned "
+                              f"{dropped} oversized message(s) from history, "
+                              f"retrying{RESET}")
+                        continue
+                print(f"\n{YELLOW}server error: {exc.message}{RESET}")
+                messages.pop()
+                break
             except (urllib.error.URLError, ConnectionError) as exc:
                 print(f"\n{YELLOW}request failed: {exc}{RESET}")
                 messages.pop()

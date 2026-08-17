@@ -62,9 +62,13 @@ bandwidth-bound, not frequency-bound. Measured on the same B70 SKU: 150 W gives
 *Where:* `hwmon power1_cap` on the decode B70, before the server boots.
 *Cost:* none, no code. *Caveat:* dense (non-MoE) shapes scale +18-30% with
 power, so this is MoE-decode-specific.
-Related pitfall: the `xe` driver has no `gt_min/gt_max` clock control and its
-PMU frequency readback is unreliable (reports 3400 MHz against a 2400 MHz
-request) — never gate a design decision on reported clock.
+Related pitfall, CORRECTED by the audit: the earlier claim "the `xe` driver
+has no `gt_min/gt_max` clock control" is WRONG on this kernel —
+`/sys/class/drm/cardN/device/tile0/gt0/freq0/{min,max}_freq` exist, min==max
+is a fixed frequency request, and the pin **holds** (verified via `act_freq`,
+the PCODE-resolved value; `cur_freq` only shows GuC's request and can hide
+SLPC overrides). Use `scripts/b70_tune.sh`. The PMU-readback distrust stands.
+**[measured-here, b70_gemv_audit]**
 
 ### 2. b12x's pure-torch NVFP4/MXFP8 **encode** + swizzle helpers
 `vendor/b12x/b12x/_lib/intrinsics.py` (~lines 55-320) holds
@@ -119,7 +123,7 @@ safety guard written for **exactly our GDN/Mamba + fp8-KV architecture**.
 
 # BENCH FIRST — real candidates, ordered by expected value
 
-### 1. B70 int4 GEMV bandwidth audit — the highest-value decode diagnostic
+### 1. B70 int4 GEMV bandwidth audit — MEASURED, CLOSED (2026-08-17)
 A prior dual-B70 campaign measured the **"int8 GEMV trap"**: at M=1, oneDNN/MKL
 int8 GEMV reaches only **309-361 GB/s (51-59%)** of the B70's **608 GB/s** peak,
 while bf16 GEMV reaches **434-460 GB/s (71-76%)**
@@ -134,6 +138,23 @@ silicon. If we are at 75%, the gap is real and we stop looking here.
 bf16 GEMM) measured **0.5-1.2×, sometimes slower than bf16** — fused
 epilogue-dequant is mandatory, not optional
 (`b70_ai_things/zml/ZML_INT8_PERF_HANDOFF.md:88-93`).
+
+**VERDICT [measured-here]** (`benchmarks/results/b70_gemv_audit/gemv_bw_audit.json`):
+the binary question had a third answer. Sustained-clock M=1 = **406 GB/s =
+68% of the measured 599 GB/s ceiling** (not the 55% trap, not 75%-clean);
+M≥8 = 88–90%. The cold half of the story is **DVFS**: the same kernel swings
+2.6× across cold starts (clocks 517–2200 MHz, never reaching 2800), fixable
+for microbenches by pinning `min_freq==max_freq` — but a production ITL A/B
+on a fresh run6 boot showed **zero serving effect** (11.89 ms baseline vs
+12.10 pinned; decode's 250 µs dispatch cadence self-warms the card, and
+prefill re-ramps it after idle). Two instrument corrections that gate all
+future B70 numbers: (a) constant-fill fixtures measure up to 111% of spec
+via Xe2 memory compression — random-fill only; (b) the measured
+incompressible read ceiling is 599 GB/s (`xpu_bench --kernel membw`).
+Consequence: our kernel's M=1 headroom is ~1.35× (occupancy — gate_up
+exposes only 1,024 subgroups), decode is NOT a bandwidth-utilization
+problem to fix by kernel swap, and the open levers are transport (1b) and
+the max(B70, CUDA-partial) overlap question.
 
 ### 1b. Register the doorbell buffers with the B70's SYCL context — NEW, cheap
 **Found from a fresh `vllm-xpu-kernels` pull (upstream PR #519, commit
@@ -189,9 +210,20 @@ win (ours is ~130 s), not a serving one.
 and dispatches only expert IDs to the B70; `#526` adds an XPU paged-decode
 config tuple, and our attention runs on the 5090 via FlashInfer.
 
-### 1c. `sgl-kernel-xpu`'s W4A16 grouped MoE GEMM — the strongest decode candidate
-**From a fresh `sgl-kernel-xpu` pull (`8c4f5e8..1b96817`). This is a ready-made
-replacement for our hand-written B70 per-route GEMV, built for our exact card.**
+### 1c. `sgl-kernel-xpu`'s W4A16 grouped MoE GEMM — MEASURED, CLOSED NEGATIVE for decode (2026-08-17)
+**VERDICT [measured-here]** (`b70_gemv_audit/sgl_w4a16.json`, `vllm_xpu_w4a16.json`;
+driver `benchmarks/b70_sgl_w4a16_bench.py`): built for bmg, correctness-gated
+(cosine 0.99998), benched at our exact geometry with rotating route sets and
+sustained clocks. **Loses to our `int4_moe_split` at every decode shape:
+2.1× slower at M=1 (100.7 vs 47.9 µs), 49% vs 79% of ceiling at M=2; closes
+only at M=32 — a prefill shape the B70 no longer serves.** The 5-launch
+orchestration (prepare + scatter + GEMM1 + silu_and_mul + GEMM2) is wrong
+for the latency-bound M=1 regime our fused 2-kernel split targets. vLLM's
+`XpuFusedMoe` int4 measures identical (±0.5%) — same Xe20 grouped-GEMM
+family underneath. Both packages remain installed in `.venv-xpu` for future
+shapes. Salvage: our own `down2` variant (already in-tree) wins at pairs≥8
+(85–95% of ceiling) — the provider-side follow-up. Original recon below,
+kept for the record.
 
 `moe_grouped_mm_nt_xe20_w4a16` (`include/sgl_kernel_ops.h:692-713`,
 `src/sycl/GroupGemmW4A16Xe20.cpp`) — "Unified int4/mxfp4 W4A16 MoE grouped
@@ -223,11 +255,11 @@ our format):
 | `rows_per_expert` per-expert row counts | our dispatch already computes these |
 | "The caller runs the activation between GEMM1 and GEMM2" | our provider is already two GEMMs + SwiGLU |
 
-**Why this outranks the bandwidth audit as a decode lever:** the audit only
-*measures* whether our GEMV wastes bandwidth; this is a candidate *fix* written
-by a team that tunes for this silicon. Our current kernel, by our own docstring,
-"does O(M x top_k) weight reads and does not amortise weight reads across
-tokens — it was written for decode, where an expert sees one or two rows."
+**Why this outranked the bandwidth audit as a decode lever (pre-measurement
+reasoning, now falsified):** the audit only *measures*; this was a candidate
+*fix* by a team tuning for this silicon. The measurement said otherwise —
+"written for decode where an expert sees one or two rows" turned out to be
+exactly the property that wins at M=1.
 
 **It ships its own instruments:** `benchmark/bench_fused_experts_w4a16.py` (perf
 at arbitrary shapes) and `tests/test_moe_gemm.py::_check_int4_grouped_mm`
@@ -243,10 +275,11 @@ this call. Days, not hours — but every step is measurable in isolation first.
 requirements for W4A16 MoE input weights and scales", which is what makes our
 bank's dtypes plausibly acceptable.
 
-**Pairs with 1b.** Register the host buffers (fixes the *transport*) and swap the
-kernel (fixes the *compute*) — two independent decode levers, both from vendored
-repos that actively develop against our hardware. Watch these two trees on every
-pull; they are the only ones targeting our decode silicon.
+**Pairing with 1b, revised.** The kernel-swap half is dead; 1b (host
+registration, the *transport* half) is now the top live decode lever. Still
+watch both trees on every pull — they remain the only ones developing
+against our decode silicon, and the audit's instruments make any future
+candidate a 30-minute measurement.
 
 ### 1d. `b70_ai_things` refresh — mechanisms worth knowing, numbers that don't transfer
 **[measured-elsewhere, same card class, different architecture]** Their new
@@ -739,12 +772,18 @@ targets now have named candidates: `tensor_fp8_linear` for the 0.149 s
 `unattributed_gemm` and the flashinfer sm_120 GDN kernel for the 0.070 s
 `gdn_attention`.
 
-**Decode (1.35-1.63× behind, the open front).** Sequence is now evidence-led:
-(1) audit our B70 int4 GEMV's achieved bandwidth against 608 GB/s — if we are at
-~55%, that is the gap; (2) the 150 W power cap, free; (3) graph/submission
+**Decode (1.35-1.63× behind, the open front). Step (1) is DONE — 2026-08-17
+audit, three arms, closed.** Our kernel is at 68% of the measured 599 GB/s
+ceiling at M=1 (occupancy-capped, ~1.35× max kernel headroom) and beats both
+vendored candidates 2.1× at that shape; DVFS explains the rest of the old
+variance and does NOT move serving ITL. Revised sequence: (1) **host
+registration of the doorbell buffers (1b)** — now the top lever; (2) the
+one-decode-step trace that resolves max(B70 leg, CUDA partial) — still the
+gate on everything downstream; (3) `down2` adaptive dispatch at pairs≥8
+(free, in-tree); (4) the 150 W power cap, free; (5) graph/submission
 economics with the three landmines designed around from the start;
-(4) predictive placement (PILOT) and adaptive split (`MoeCpuHost`);
-(5) persistent kernel last, as the hardware-matched team independently
+(6) predictive placement (PILOT) and adaptive split (`MoeCpuHost`);
+(7) persistent kernel last, as the hardware-matched team independently
 concluded. Speculation remains the only sub-1× lever and is now correctly priced
 as **draft-head training from the bf16 base**, with n-gram ruled out as actively
 unsafe on our model family.

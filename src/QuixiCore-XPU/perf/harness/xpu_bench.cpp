@@ -407,6 +407,55 @@ int main(int argc, char** argv) {
     sycl::free(output, q);
     return 0;
   }
+  if (kernel == "membw") {
+    // Device read-bandwidth ceiling with incompressible data: the measured
+    // number the int4_moe weight_gbps figures should be judged against on
+    // this card, rather than the 608 GB/s spec constant. --M is MiB.
+    const std::size_t bytes = M * (std::size_t{1} << 20);
+    const std::size_t vec_count = bytes / sizeof(sycl::uint4);
+    auto *buf = sycl::malloc_device<sycl::uint4>(vec_count, q);
+    auto *sink = sycl::malloc_device<std::uint32_t>(1, q);
+    if (buf == nullptr || sink == nullptr) throw std::bad_alloc();
+    {
+      auto *words = reinterpret_cast<std::uint32_t *>(buf);
+      const std::size_t word_count = bytes / 4;
+      q.parallel_for(sycl::range<1>(word_count), [=](sycl::id<1> idx) {
+        std::uint32_t h = static_cast<std::uint32_t>(idx[0]) * 2654435761u;
+        h ^= h >> 16; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u;
+        words[idx[0]] = h;
+      }).wait();
+    }
+    constexpr std::size_t kLocal = 256;
+    const std::size_t items =
+        std::min<std::size_t>(vec_count, std::size_t{1} << 20);
+    auto once = [&] {
+      q.parallel_for(
+          sycl::nd_range<1>(sycl::range<1>(items), sycl::range<1>(kLocal)),
+          [=](sycl::nd_item<1> it) {
+            std::uint32_t acc = 0;
+            for (std::size_t i = it.get_global_id(0); i < vec_count;
+                 i += items) {
+              const sycl::uint4 v = buf[i];
+              acc ^= v.x() ^ v.y() ^ v.z() ^ v.w();
+            }
+            // Impossible sentinel keeps the loads alive without adding
+            // write traffic: pure-read stream.
+            if (acc == 0x13579BDFu) sink[0] = acc;
+          });
+    };
+    const DeviceTiming timing = time_device_batches(once);
+    const double gbps =
+        static_cast<double>(bytes) / (timing.median_ms * 1e-3) / 1e9;
+    std::cout << "{\"schema_version\":2,\"kernel\":\"membw\",\"mib\":" << M
+              << ",\"iters\":" << iters << ",\"median_ms\":" << timing.median_ms
+              << ",\"min_ms\":" << timing.min_ms << ",\"max_ms\":"
+              << timing.max_ms << ",\"read_gbps\":" << gbps << ",\"device\":\""
+              << q.get_device().get_info<sycl::info::device::name>() << "\"}"
+              << std::endl;
+    sycl::free(buf, q);
+    sycl::free(sink, q);
+    return 0;
+  }
   if (kernel == "int4_moe") {
     constexpr std::size_t group_size = 128;
     const std::size_t experts = N;
@@ -503,28 +552,41 @@ int main(int argc, char** argv) {
     q.memcpy(expert_ids, host_ids.data(), host_ids.size() * sizeof(int));
     q.fill(router_weights, 1.0f / static_cast<float>(top_k), pairs);
 
-    for (std::size_t expert = 0; expert < experts; ++expert) {
-      const std::size_t offset = expert * expert_stride;
-      // Mixed signed magnitudes with an exact-zero nibble in each word. The
-      // two gate/up patterns differ so SwiGLU cannot collapse to a constant.
-      q.fill(reinterpret_cast<std::int32_t *>(bank + offset + gate_q_offset),
-             static_cast<std::int32_t>(0xA9877865u),
-             gate_q_bytes / sizeof(std::int32_t));
-      q.fill(reinterpret_cast<half_t *>(bank + offset + gate_s_offset),
-             static_cast<half_t>(0.0137f),
-             gate_s_bytes / sizeof(half_t));
-      q.fill(reinterpret_cast<std::int32_t *>(bank + offset + up_q_offset),
-             static_cast<std::int32_t>(0x6798A876u),
-             gate_q_bytes / sizeof(std::int32_t));
-      q.fill(reinterpret_cast<half_t *>(bank + offset + up_s_offset),
-             static_cast<half_t>(-0.00917f),
-             gate_s_bytes / sizeof(half_t));
-      q.fill(reinterpret_cast<std::int32_t *>(bank + offset + down_q_offset),
-             static_cast<std::int32_t>(0x9876A785u),
-             down_q_bytes / sizeof(std::int32_t));
-      q.fill(reinterpret_cast<half_t *>(bank + offset + down_s_offset),
-             static_cast<half_t>(0.0113f),
-             down_s_bytes / sizeof(half_t));
+    // Incompressible fixture data. The previous constant q.fill patterns
+    // compress on the memory path and reported weight_gbps above DRAM peak
+    // (656-677 "GB/s" at M>=8 vs the 608 spec). Real checkpoint weights are
+    // incompressible; hash-fill the whole bank, then rewrite the scale
+    // planes with small magnitudes so outputs stay finite and non-degenerate.
+    {
+      auto *bank_words = reinterpret_cast<std::uint32_t *>(bank);
+      const std::size_t word_count = experts * expert_stride / 4;
+      q.parallel_for(sycl::range<1>(word_count), [=](sycl::id<1> idx) {
+        std::uint32_t h = static_cast<std::uint32_t>(idx[0]) * 2654435761u;
+        h ^= h >> 16; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u;
+        bank_words[idx[0]] = h;
+      });
+      std::uint8_t *bank_base = bank;
+      const std::size_t stride = expert_stride;
+      const auto fill_scales = [&](std::size_t plane_offset,
+                                   std::size_t plane_bytes,
+                                   std::uint32_t salt) {
+        const std::size_t elems = plane_bytes / sizeof(half_t);
+        q.parallel_for(sycl::range<2>(experts, elems), [=](sycl::id<2> idx) {
+          std::uint32_t h =
+              (static_cast<std::uint32_t>(idx[0]) * 374761393u) ^
+              (static_cast<std::uint32_t>(idx[1]) * 2654435761u) ^ salt;
+          h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+          const float centered =
+              static_cast<float>(static_cast<int>(h & 0xFFu) - 128) / 128.0f;
+          auto *plane = reinterpret_cast<half_t *>(
+              bank_base + idx[0] * stride + plane_offset);
+          plane[idx[1]] = static_cast<half_t>(
+              0.012f * (centered == 0.0f ? 0.5f : centered));
+        });
+      };
+      fill_scales(gate_s_offset, gate_s_bytes, 0x9E3779B9u);
+      fill_scales(up_s_offset, gate_s_bytes, 0x85EBCA77u);
+      fill_scales(down_s_offset, down_s_bytes, 0xC2B2AE3Du);
     }
     q.wait();
 

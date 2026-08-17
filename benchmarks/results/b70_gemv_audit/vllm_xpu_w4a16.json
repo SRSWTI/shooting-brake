@@ -1,0 +1,97 @@
+{
+ "device": "Intel(R) Arc(TM) Pro B70 Graphics",
+ "backend": "vllm",
+ "geometry": {
+  "E": 126,
+  "hidden": 3072,
+  "intermediate": 1024,
+  "group": 128,
+  "topk_valid": 4,
+  "expert_bytes": 4866048
+ },
+ "measured_ceiling_gbps": 599.26,
+ "correctness": {
+  "rel_l2": 0.007962141185998917,
+  "cosine": 0.9999802708625793
+ },
+ "cells": [
+  {
+   "M": 1,
+   "valid_routes": 4,
+   "median_ms": 0.1012263025,
+   "min_ms": 0.10114934999999999,
+   "max_ms": 0.10133737,
+   "weight_mib": 18.5625,
+   "weight_gbps": 192.28393727015762,
+   "pct_of_measured_ceiling": 32.1,
+   "windows": 5,
+   "inner": 400,
+   "warmup": 300
+  },
+  {
+   "M": 2,
+   "valid_routes": 8,
+   "median_ms": 0.13236862,
+   "min_ms": 0.13223151,
+   "max_ms": 0.1325360675,
+   "weight_mib": 37.125,
+   "weight_gbps": 294.0907293586652,
+   "pct_of_measured_ceiling": 49.1,
+   "windows": 5,
+   "inner": 400,
+   "warmup": 300
+  },
+  {
+   "M": 4,
+   "valid_routes": 16,
+   "median_ms": 0.21086328249999997,
+   "min_ms": 0.2106513025,
+   "max_ms": 0.210916795,
+   "weight_mib": 74.25,
+   "weight_gbps": 369.22866360102313,
+   "pct_of_measured_ceiling": 61.6,
+   "windows": 5,
+   "inner": 400,
+   "warmup": 300
+  },
+  {
+   "M": 8,
+   "valid_routes": 32,
+   "median_ms": 0.34136041999999994,
+   "min_ms": 0.34096094,
+   "max_ms": 0.34218698,
+   "weight_mib": 148.5,
+   "weight_gbps": 456.1558015425456,
+   "pct_of_measured_ceiling": 76.1,
+   "windows": 5,
+   "inner": 100,
+   "warmup": 300
+  },
+  {
+   "M": 16,
+   "valid_routes": 64,
+   "median_ms": 0.6021541699999999,
+   "min_ms": 0.6013453099999999,
+   "max_ms": 0.6033052099999999,
+   "weight_mib": 297.0,
+   "weight_gbps": 517.1882675827023,
+   "pct_of_measured_ceiling": 86.3,
+   "windows": 5,
+   "inner": 100,
+   "warmup": 300
+  },
+  {
+   "M": 32,
+   "valid_routes": 128,
+   "median_ms": 1.10617708,
+   "min_ms": 1.10580834,
+   "max_ms": 1.10779375,
+   "weight_mib": 594.0,
+   "weight_gbps": 563.06911005605,
+   "pct_of_measured_ceiling": 94.0,
+   "windows": 5,
+   "inner": 100,
+   "warmup": 300
+  }
+ ]
+}

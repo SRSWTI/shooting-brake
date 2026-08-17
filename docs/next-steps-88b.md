@@ -78,6 +78,109 @@ Vendor recon and the resulting decision tiers now live in
 `docs/vendor-extraction.md` (12-agent deep scope over the vendored repos,
 four live verifications, TAKE/BENCH/PARK/REJECT verdicts).
 
+## MEASURED: B70 int4 GEMV bandwidth audit — decode roadmap ① CLOSED
+
+Three-arm audit of the decode kernel's achieved bandwidth on the idle B70
+(same silicon as the serving card; kernel bandwidth is link-independent).
+Artifacts: `benchmarks/results/b70_gemv_audit/` (`gemv_bw_audit.json`,
+`sgl_w4a16.json`, `vllm_xpu_w4a16.json`, `itl_probe.json`); driver
+`benchmarks/b70_sgl_w4a16_bench.py`; probe `benchmarks/b70_itl_probe.py`.
+
+**The discriminating question — "are we at ~55% or ~75% of peak at M=1?" —
+had a third answer: 68% sustained, 26–44% cold, and the cold half is DVFS,
+not kernel code.**
+
+### Instrument fixes that preceded any trustworthy number
+
+* **Xe2 memory compression inflated the old fixture.** `xpu_bench`'s
+  constant-fill int4_moe bank measured up to **111% of the 608 GB/s spec**
+  — physically impossible for DRAM reads. Random-filled (incompressible)
+  fixture shipped in `perf/harness/xpu_bench.cpp`; every constant-fill
+  bandwidth figure from before this fix is inflated ~25% at M≥8.
+* **New `membw` mode** (same file): measured device read ceiling
+  **599.2 GB/s = 98.6% of spec**, incompressible data, ±0.1% spread. All
+  utilization percentages below are against this measured ceiling.
+* **Cold-process runs of the same kernel swing 2.6×** (47–124 µs at M=1,
+  tight within-run) — GuC SLPC clock state, proven by concurrent
+  `act_freq` sampling (cold runs execute at 517–2200 MHz median, never
+  reaching 2800). Every microbench on this card MUST pin clocks
+  (`min_freq`=`max_freq` in `/sys/class/drm/cardN/device/tile0/gt0/freq0/`,
+  pin verified to hold via `act_freq` — PCODE-resolved; `cur_freq` only
+  shows GuC's request) or run long sustained windows. The vendored zml
+  claim "xe has no clock control" is WRONG for this kernel: `min_freq` /
+  `max_freq` exist and the min==max pin holds (pinned cold M=1:
+  46.7–47.1 µs dead flat, act_freq 2633–2800).
+
+### The numbers (sustained clocks, incompressible, rotating disjoint route sets)
+
+Geometry E=126 / K=3072 / I=1024 / g128, 4 valid routes per token,
+weight bytes = 4,866,048 per route (== bank stride). % of measured
+599 GB/s ceiling:
+
+| M | ours `split` | ours `down2` | sgl-kernel fused_experts | vllm-xpu XpuFusedMoe |
+|---|---|---|---|---|
+| 1 | **47.9 µs / 68%** | 50.4 / 64% | 100.7 / 32% | 101.2 / 32% |
+| 2 | 82.5 / 79% | **76.4 / 85%** | 131.9 / 49% | 132.4 / 49% |
+| 4 | 154.1 / 84% | 152.6 / 85% | 210.1 / 62% | 210.9 / 62% |
+| 8 | 295.9 / 88% | **282.5 / 92%** | 342.0 / 76% | 341.4 / 76% |
+| 16 | 580.2 / 90% | **553.5 / 94%** | 604.5 / 86% | 602.2 / 86% |
+| 32 | 1162.1 / 89% | **1093.5 / 95%** | 1108.4 / 94% | 1106.2 / 94% |
+
+* **Our kernel wins every decode shape.** At the production M=1 rung the
+  vendored candidates are **2.1× slower end-to-end** — their 5-launch
+  orchestration (prepare + scatter + GEMM1 + silu_and_mul + GEMM2) is
+  exactly wrong for the latency-bound M=1 regime our fused 2-kernel split
+  was written for. Both vendored providers measure identical (±0.5%): same
+  Xe20 grouped-GEMM family underneath, their own bench header says so.
+  Correctness-gated before timing (cosine 0.99998 vs their naive
+  reference). **vendor-extraction BENCH FIRST 1c: CLOSED, NEGATIVE for
+  decode.** (They close only at M=32 — a prefill shape the B70 no longer
+  serves.)
+* **M=1 at 68% is bf16-GEMV-class, not the 51–59% int8 trap.** Max kernel
+  headroom at M=1 is ~1.35× (48 → ~36 µs/layer), and gate_up (⅔ of bytes,
+  1,024 exposed subgroups) is the binding stage — occupancy, not decode
+  efficiency. The in-tree fix direction, if ever needed: a gate_up
+  analogue of `down_wide`.
+* **`down2` is a free provider win at pairs≥8** (85–95% vs 79–89%);
+  slightly worse at M=1. Candidate: dispatch `down2` when
+  `M × valid_routes ≥ 8`, keep `split` at M=1. One-line switch in
+  `b70_provider.cpp` (`int4_moe_split_down_wide_sycl` already exported).
+* **The old "44 µs @ k=8" standalone table was cache-hot** (E=8 fixture,
+  39 MB working set vs 18.6 MiB L2 + compressible fill). Cold-expert
+  reality at k≈5.6 is ~70 µs/layer. Do not price overlap decisions
+  against the old table.
+
+### Production A/B: the DVFS pin does NOT move serving ITL
+
+Fresh run6-config boot, warmed (2×8K + PSI<0.1), streaming probe
+128-in/256-out C=1:
+
+| arm | ITL | act_freq during decode |
+|---|---|---|
+| baseline min=400 | **11.89 ms** (== run6's 11.87) | median 2800, idle 0.4% |
+| pinned min=2800 | 12.10 ms | median 2800 |
+| sporadic (12 s idle), early-20 gaps | 11.08–11.16 ms both arms | — |
+
+Decode self-warms the card: 48 dispatches per ~12 ms step is one doorbell
+every 250 µs — the GPU never idles down, and after real idle the request's
+own prefill re-ramps it before decode starts. **DVFS is a microbenchmark
+hazard, not a serving lever at C=1.** (Untested: whether very low-QPS
+multi-second-gap traffic at higher concurrency ever exposes it.)
+
+### What this leaves on the decode front
+
+1. **② SYCL host registration of the doorbell staging buffers** — now the
+   top live decode lever (transport overhead, est. 4–16% of ITL).
+2. **The unmeasured max(B70 leg, CUDA partial) overlap question** — still
+   gates everything; at 2800 MHz the B70 kernel leg is ~2.3 ms of an
+   11.9 ms step, so if it is fully hidden, even a 2× faster kernel buys 0.
+3. `down2` adaptive dispatch (free, pairs≥8).
+4. 150 W cap (④) — unaffected by this audit; bandwidth-bound argument
+   stands.
+5. Kernel replacement is DEAD: nothing in the vendored Intel trees beats
+   the in-house kernel at decode shapes, and our own M=1 headroom is
+   capped at ~1.35× by occupancy.
+
 ## SHIPPED: registered page-cache DMA (run5) — PRO 6000 beaten at 130K
 
 `SHOOTING_BRAKE_BANK_REGISTER=1` (`marlin_prefill.py::_open_bank_source`):

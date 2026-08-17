@@ -1,0 +1,96 @@
+{
+ "device": "Intel(R) Arc(TM) Pro B70 Graphics",
+ "geometry": {
+  "E": 126,
+  "hidden": 3072,
+  "intermediate": 1024,
+  "group": 128,
+  "topk_valid": 4,
+  "expert_bytes": 4866048
+ },
+ "measured_ceiling_gbps": 599.26,
+ "correctness": {
+  "rel_l2": 0.007962141185998917,
+  "cosine": 0.9999802708625793
+ },
+ "cells": [
+  {
+   "M": 1,
+   "valid_routes": 4,
+   "median_ms": 0.1007269525,
+   "min_ms": 0.10058073000000001,
+   "max_ms": 0.10095065,
+   "weight_mib": 18.5625,
+   "weight_gbps": 193.2371775071821,
+   "pct_of_measured_ceiling": 32.2,
+   "windows": 5,
+   "inner": 400,
+   "warmup": 300
+  },
+  {
+   "M": 2,
+   "valid_routes": 8,
+   "median_ms": 0.131908335,
+   "min_ms": 0.1313880225,
+   "max_ms": 0.1323875,
+   "weight_mib": 37.125,
+   "weight_gbps": 295.11693859224295,
+   "pct_of_measured_ceiling": 49.2,
+   "windows": 5,
+   "inner": 400,
+   "warmup": 300
+  },
+  {
+   "M": 4,
+   "valid_routes": 16,
+   "median_ms": 0.2101300775,
+   "min_ms": 0.20992122500000002,
+   "max_ms": 0.21037187499999999,
+   "weight_mib": 74.25,
+   "weight_gbps": 370.5170098745145,
+   "pct_of_measured_ceiling": 61.8,
+   "windows": 5,
+   "inner": 400,
+   "warmup": 300
+  },
+  {
+   "M": 8,
+   "valid_routes": 32,
+   "median_ms": 0.34197812,
+   "min_ms": 0.34112448,
+   "max_ms": 0.34268698000000003,
+   "weight_mib": 148.5,
+   "weight_gbps": 455.33186743058303,
+   "pct_of_measured_ceiling": 76.0,
+   "windows": 5,
+   "inner": 100,
+   "warmup": 300
+  },
+  {
+   "M": 16,
+   "valid_routes": 64,
+   "median_ms": 0.6045348899999999,
+   "min_ms": 0.6037125,
+   "max_ms": 0.60492084,
+   "weight_mib": 297.0,
+   "weight_gbps": 515.1515274825578,
+   "pct_of_measured_ceiling": 86.0,
+   "windows": 5,
+   "inner": 100,
+   "warmup": 300
+  },
+  {
+   "M": 32,
+   "valid_routes": 128,
+   "median_ms": 1.10837187,
+   "min_ms": 1.1072625,
+   "max_ms": 1.11006771,
+   "weight_mib": 594.0,
+   "weight_gbps": 561.9541246567363,
+   "pct_of_measured_ceiling": 93.8,
+   "windows": 5,
+   "inner": 100,
+   "warmup": 300
+  }
+ ]
+}

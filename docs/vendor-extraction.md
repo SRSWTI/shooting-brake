@@ -199,15 +199,47 @@ analog is `MoEMicroKernelBackend` (`moe/_shared/kernels/micro.py:382`).
 (`_impl.py:4508-4655`, `:4366`) — a live staleness hazard under our rotating
 arenas. Pre-derive and pass explicitly, or don't take it.
 
-### 7. Doorbell payload compression — the INT8/MXFP8 wire codec
-`vendor/b12x/b12x/comm/pcie/_dma_kernels.py:1468-1502`: `DmaKernels._quant` /
-`_dequant_store` are **standalone elementwise CuTe kernels** taking raw device
-pointers, requiring only `elems % 128 == 0` — satisfied for hidden=3072 (24
-blocks) at any M. **[code-verified]** 132 B per 128 values vs 256 B for bf16 =
-**48.4% wire reduction** **[claim, their README:126-127]**.
-*Where:* the bf16 `[M, 3072]` hidden-state payload crossing to the B70.
-*Cost:* the quantize side is CUDA-only; a real cross-vendor win needs a
-**hand-written SYCL dequant on the B70**. Bench the link first — see item 1.
+### 7. b12x's PCIe **DMA discipline** — the transferable half of `comm.pcie`
+The collectives are dead for us (CUDA-IPC, needs >=2 CUDA GPUs), but the DMA
+layer underneath is a separate concern and it is the good part.
+
+* **CE beats SM-copy by 1.65x on PCIe.** Their own header: "NCCL's SM-copy
+  transport sustains ~34 GB/s on this fabric while CE peer copies run at
+  ~56 GB/s" (`pcie_dma.py:1-9`). **[measured-elsewhere]** This retro-validates
+  our registered path (18.5 pageable -> 53.9 GiB/s registered = the CE path)
+  and, forward-looking, it is a **guard**: if a future transfer silently lands
+  on an SM-driven copy kernel we lose ~40% with no error. The 9 us submit-wall
+  we measured is the signature to assert on.
+* **Separate CE stream + flag stream; device-resident *monotonic* flags;
+  `FLAG_STRIDE = 128`** (`pcie_dma.py:37,184-205`). **[code-verified]** The
+  monotonic never-reset counter is precisely what lets their graphs "replay
+  without host patching" — the property our decode-graph replay needs, and the
+  same class as the XPU NEO-overflow landmine (un-reclaimed events). If we
+  build the persistent doorbell, this is the proven shape: sync traffic on its
+  own stream so it never queues behind a 584 MiB copy, 128 B stride to avoid
+  false sharing between slots.
+* **`recommend_prefetch_depth`** (`overlap_probe.py:410-426`) makes prefetch
+  depth a *measured policy with a kill condition* — enable depth-1 only if some
+  context benefits AND none regresses past a threshold. **[code-verified]**
+  We hardcode depth-1 (2 arenas) because it fit VRAM, and never re-checked
+  after register-DMA cut the transfer from 1.48 to 0.51 s/pass. Depth-0 at some
+  contexts would free 584 MiB — material at 1.60 KV seats.
+* **Correctness-gate-before-timing** and median-of-slowest, plus "measure real
+  traffic on the deployed topology instead of inferring from PCIe link labels".
+  Our floor bench times first and gates separately; one harness that refuses to
+  report a number for a wrong kernel is strictly better.
+
+### 7b. The wire codec — DEMOTED, keep for the record
+`_dma_kernels.py:1468-1502` (`DmaKernels._quant`/`_dequant_store`) are
+standalone elementwise kernels needing only `elems % 128 == 0` (true for
+hidden=3072), giving 48.4% wire reduction. **[code-verified + claim]**
+**But it buys us essentially nothing and the earlier ranking was wrong.**
+Arithmetic: our decode payload at M=1 is 3072 x 2 B = 6 KiB; over the Gen3 x4
+link (~3.9 GB/s) that is ~1.5 us, so halving it saves 0.77 us against an
+11.88 ms ITL — **0.006%**. At M=16 it saves ~12 us, ~0.1%. The codec only pays
+on prefill-sized payloads, and prefill does not use the doorbell (it uses
+Marlin streaming). Revisit only if a future design pushes large activations
+across that link.
 
 ### 8. KV capacity — SGLang's mamba-capacity pool solve
 Our 1.60 seats at 131K is a hard wall versus the PRO's ~6. SGLang carries an
@@ -337,7 +369,50 @@ multi-hour LLVM-scale build.
 | **SGLang MoE kernels as a Marlin challenger** | Their sm_120 MoE story is the *same* Marlin/FlashInfer-CUTLASS families we already benched to a negative verdict. |
 | **flashinfer 0.6.18 upgrade** | Already tried and rolled back this campaign: its `input_global_scale` fix does not touch W4A4 activation quant, so it does not reopen the cosine-0.82 verdict, and it carries sampler/FP8 regression risk. Its `_moe_dynamic/` dispatch path is new but MoE-negative. |
 | **PRO 6000 collective evidence JSONs** | Every real number is TP8/DCP4 8-GPU *collective scaling*; only name/PCI/UUID are per-device. Does **not** transfer. Honest correction to my earlier hope. |
-| **`vendor/rtx6kpro` as competitor intelligence** | It is a third-party community wiki about *other* models (GLM-5.x, DeepSeek-V4, Kimi, Qwen3.5-397B). Valuable as same-arch tuning (see BENCH FIRST #9), useless as a source of our competitor's run flags. |
+| **`vendor/rtx6kpro` as a source of our competitor's run flags** | The 88B comparison directory is empty in this checkout and sibling results are unfetched LFS pointers. Useless for *that*. **But see the corrected hardware verdict below — the first pass wrongly dismissed the whole repo by conflating provenance ("not our model, not our team") with applicability.** |
+
+### Corrected: `vendor/rtx6kpro/hardware/**` is largely inapplicable but not empty
+
+~90% is multi-GPU NVIDIA tensor-parallel topology — c-payne/Broadcom switch
+fabrics, dual-CPU root complexes, xGMI, NCCL ring tuning, GPU-to-GPU P2P
+bandwidth, DCP, 8-16 GPU rigs. We have **one** CUDA GPU and one root complex,
+so none of it applies, including the otherwise-excellent
+`hardware/collapse-report.md` (its trigger needs a PCIe switch dispatching
+posted writes to GPUs behind >=2 root complexes; note in passing that **reads
+are unaffected because non-posted completions carry flow control** — our H2D
+copy-engine path is on the safe side of that distinction).
+
+Four items **do** apply, all checked against this box:
+
+1. **BAR1 / Resizable BAR.** Their named footgun: some BIOSes default BAR1 to
+   256 MB and "cripple" transfer performance (`hardware/pcie-bandwidth.md`).
+   **Checked: ours reports Total 32768 MiB = full VRAM.** Correctly configured,
+   no action — but now verified instead of assumed. **[measured-here]**
+2. **`pcie_aspm=off pcie_port_pm=off`.** Without `pcie_port_pm=off`, GPU dynamic
+   power management can suspend the root port during a Gen1<->Gen5 link retrain,
+   producing "Surprise Link Down" (`aer_uncor_status: 0x00000020`) and **system
+   lockups**. **Checked: we set no PCIe kernel params (kernel defaults), and AER
+   counters on `0000:01:00.0` are 0** — so this is *latent hardening*, not a live
+   bug. Cheap insurance for a box that DMAs 27.4 GiB across that link every
+   forward pass. **[measured-here]**
+3. **GB202 power sweep** (`hardware/gpu-configs.md`): 500 W ~= 600 W parity;
+   300 W MaxQ costs ~4% single-user and ~30% at 64-concurrent. Same die as our
+   5090. **[measured-elsewhere, same die]**
+4. **IOMMU mode is a genuine tension.** Their multi-GPU NVFP4 recipes want
+   `iommu=pt`; the dual-B70 journal needs IOMMU **disabled** for B70<->B70 P2P.
+   We run defaults with AMD-Vi active and are already at the DMA ceiling, so
+   there is nothing to gain today — but a future dual-B70 P2P design makes this
+   a boot-parameter decision with a real tradeoff.
+
+**One reframing datapoint worth more than the four:** the wiki notes 4x 5090s
+lose to a single PRO 6000 for TP because the PRO has ~1.5 TB/s on-die bandwidth
+versus ~50 GB/s of PCIe between 5090s. The corollary for a *single*-card
+comparison is the important part: **our 5090 and the PRO 6000 are the same
+GB202-class GDDR7 memory system — per-card bandwidth is essentially equal.**
+Their advantage over us is **capacity (96 vs 32 GB) and SM count**, not memory
+speed. So we are not fighting a faster machine; we are fighting one that never
+has to move weights. That is exactly why our long-context wins are real and our
+short-context losses are structural.
 
 ---
 

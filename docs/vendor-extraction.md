@@ -477,18 +477,69 @@ the parked "5-10% B70 expert cut" — now with arithmetic instead of intuition.
 
 # Meta-findings — the patterns worth more than any single asset
 
-### 1. sm_120 falls through arch gates, repeatedly and silently
-Four independent instances, all **[code-verified]**:
-* GDN prefill: admits sm_90 or family-100 only → our 12.0 falls back to Triton,
-  despite flashinfer shipping a kernel literally named `delta_rule_sm120`.
-* `FlashInferB12xExperts`: excluded from MoE auto-selection pending an upstream
-  **SM121** MMA guard fix — a guard for a *different* SKU that catches ours.
-* NVFP4 conversion needs the family-conditional **`sm120f`** PTX target; the
-  arch-specific `sm120a` misses it.
-* CUTLASS grouped/dense builders: F8F6F4-only static asserts on sm_120.
-**Action:** audit every backend selector we depend on for arch gates that
-exclude capability 12.0. This is a recurring, cheap-to-find, cheap-to-fix class,
-and we have now been bitten by it three times (`a`-vs-`f`, SM121 guard, GDN).
+### 1. sm_120 falls through arch gates — but the gates are mostly protecting us
+
+**The audit that corrects an earlier overclaim.** I first recorded "sm_120 falls
+through arch gates in four independent places" and called it a cheap-to-fix
+class. Then I audited every backend selector our running server actually logs
+(`run6_final/server_decode.log`) against what is installed. The gates are real,
+but in three of four cases **the kernel behind the gate quantizes activations to
+FP4 — the W4A4 regime we measured at cosine 0.82 per layer and killed in round
+1.** Fixing those gates would buy speed we cannot use.
+
+| instance | gate real? | would fixing it help? |
+|---|---|---|
+| GDN prefill (`family(100)`, `qwen_gdn_linear_attn.py:116-133`) | yes | **YES — linear attention, not a quantized GEMM; numerics preserved** |
+| `FlashInferB12xExperts` MoE (upstream SM121 guard) | yes | no — W4A4, measured 0.82 |
+| NVFP4 dense `FlashInferCuteDsl` (`family(100)`) | yes | no — and its sibling `FlashInferCutlass` *does* admit sm_120 via a `>=` check, but `input_quant_key() -> kNvfp4Dynamic` = W4A4 |
+| CUTLASS grouped/dense F8F6F4-only asserts | not a gate — an ISA fact | n/a |
+
+**What the server actually selects, and why each is right:**
+
+| selector | chosen | verdict |
+|---|---|---|
+| NVFP4 dense GEMM | `MarlinNvFp4LinearKernel` | correct — docstring is "weight-only GEMM (W4A16)"; of the six NVFP4 linear kernels **only `flashinfer.py` overrides `input_quant_key`**, so every faster option is W4A4 |
+| ModelOpt FP8 linear | `FlashInferFP8ScaledMMLinearKernel` | correct for our per-tensor-scalar FP8 `q/k/v/o_proj` + `linear_attn.*`. The vLLM #47749 "silent Marlin fallback" signature does **not** apply: our checkpoint is genuinely mixed, so two kernels for two formats is right |
+| Attention | `FLASHINFER`, `decode_backend=flashinfer-native`, `arch=sm120`, autotune cache under **`120f`** | correct, and already on the family-forward arch suffix |
+| MoE | `MARLIN` of 8 candidates | litigated across two bake-offs |
+| top-k/top-p sampler | logs "Using FlashInfer" | **phantom — never invoked.** `forward_cuda` opens `if (k is None and p is None) or generators: return self.forward_native(...)`; our harness sends no top-k/top-p, so we always take the native path. The log line announces *availability*, not use — do not chase FlashInfer issue #3389 on our numbers |
+| GDN prefill | **`Triton/FLA` fallback** | ⚠️ the only genuine gap |
+
+**Action, revised:** stop treating arch gates as a general opportunity class.
+The specific live item is GDN prefill; everything else our server selects is
+either correct or correct-for-quality-reasons we measured ourselves.
+
+### 1b. GDN **decode** has no backend selector at all — a different problem
+**[code-verified]** vLLM's GDN decode path calls vendored FLA Triton kernels
+directly (`fused_sigmoid_gating_delta_rule_update`,
+`fused_recurrent_gated_delta_rule_packed_decode`, imported from
+`vllm.third_party.flash_linear_attention.ops`). There is **no selector to be
+gated out of** — unlike prefill, no integration exists.
+
+Meanwhile our **installed** flashinfer 0.6.16.post3 ships `flashinfer/gdn_kernels/`
+with `gdn_decode_bf16_state`, `_bf16_wy_output_only`, `_mtp`, `_nontranspose`,
+`_pretranspose`, plus `blackwell/` and `delta_rule_dsl/`. Its documented contract
+lines up with what vLLM already passes:
+
+* `gated_delta_rule()` — **T=1 single-token decode**, i.e. exactly our step shape.
+* State **pool mode** `[pool_size, HV, V, K]` indexed by `initial_state_indices`
+  — the same shape as vLLM's `ssm_state_indices` / `non_spec_state_indices_tensor`.
+* **Split-pool writes** (`output_state_indices != initial_state_indices`) — matches
+  vLLM's separate read/write index tensors.
+* `gated_delta_rule_mtp()` for T>=1 — already the right shape for spec-decode
+  verify, if a draft head ever lands.
+* An ILP=4 higher-occupancy variant exists.
+
+The one flashinfer linear-attention backend that *does* have a proper selector
+(`mamba/ops/ssu_dispatch.py` -> `flashinfer.mamba.selective_state_update`) is the
+**Mamba-2 SSM** path, not GDN; our boot log never selects it.
+
+*Cost:* this is an integration we would write ourselves against a documented API
+through our existing `PluggableLayer` hook — days, not hours, and not a research
+project since the contract shapes match. Unverified: whether these kernels accept
+`head_k_dim=128` and our exact state dtype/layout.
+*Why it matters:* decode is our worst metric (1.35-1.63x), and unlike the prefill
+gap this one is not reachable by flipping a gate.
 
 ### 2. Small-M kernels leave 30-50% of memory bandwidth on the floor
 On the B70: int8 GEMV at M=1 reaches 51-59% of 608 GB/s where bf16 reaches

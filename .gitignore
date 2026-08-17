@@ -35,6 +35,7 @@ lib64
 # --- benchmark artifacts ----------------------------------------------------
 # Results are evidence of record and ARE tracked (benchmarks/results,
 # benchmarks/matrix). Raw logs and HTML dumps are not.
+*.html
 *.log
 benchmarks/matrix/**/guidellm_std*.log
 benchmarks/matrix/**/*.html

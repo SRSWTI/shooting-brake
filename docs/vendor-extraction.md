@@ -488,28 +488,60 @@ off the sm_120 bf16 tensor-core ceiling at our shape.** That analysis is cheap,
 analytical, and we have not done it. It is now the honest next step on
 short-context prefill.
 
-### Speculative decoding — a training project
-`vendor/speculators` (not `SpecForge`, which targets SGLang) is the correct
-vLLM-native vehicle: it already registers `qwen3_5_moe_text` model classes for
-both EAGLE3 hidden-state capture and MTP stitching
-(`base_components.py:86-96`, `mtp/model_definitions.py:57-70,191-199`) and ships
-a documented `--speculative-config` entry point. **[code-verified]**
-Two hard constraints, both verified:
-* **MTP is out** — no `mtp.*` keys in our checkpoint *or* base (verification #2).
-* **The zero-training n-gram/prompt-lookup probe is out, and it is worse than
-  unavailable — it is dangerous.** vllm#39273 is an open, still-unfixed
-  silent-corruption bug on **exactly** `qwen3_5_text` hybrid GDN+full-attention,
-  root-caused to missing SSM-state rollback on token rejection in
-  `v1/worker/mamba_utils.py`; last confirmed broken 2026-07-20 with "draft
-  acceptance looked healthy… while silently corrupting output." **[claim, but a
-  named upstream issue on our exact model family — treat as blocking.]**
-  This kills the "cheap risk-free probe" I previously proposed.
-*So:* speculation means training an EAGLE3 head from the bf16 base. Nearest
-ready-made configs target Qwen3.5-**A3B** (35B), not our 88B. Encouraging
-same-family evidence: MTP on Qwen3.5-397B-A17B NVFP4 measured **89.2%
-acceptance, MTP=2 sweet spot, +51-72% throughput** (with MTP>3 crashing)
-**[measured-elsewhere, same family, larger model]** — so the ceiling is real if
-we pay the training cost.
+### Speculative decoding — re-scoped by the 2026-08-17 three-scout recon (transcripts: `history://SpecForgeMap`, `://HybridSpecSafety`, `://XpuMtpEvidence`)
+
+Corrections to the paragraph this replaces, each **[code-verified]** by a scout:
+
+* **The `qwen3_5_moe_text` registration in `speculators` belongs to the
+  native-MTP path ONLY** (`eagle3/model_definitions.py:150-158` registers just
+  llama/qwen3 draft shapes) — the earlier claim that eagle3 "registers
+  qwen3_5_moe_text" was wrong. That is *good* news: EAGLE3 drafts are
+  verifier-agnostic ~1-layer dense heads, so the 88B hybrid-GDN target is
+  supported by construction. Native MTP stays dead (zero `mtp.*` tensors,
+  re-verified against both safetensors indices).
+* **The #39273 ngram ban is likely STALE for our install.** This 0.27.1 tree
+  carries a proposer-agnostic split-pool rollback for BOTH GDN recurrent and
+  causal-conv state: `_update_states_after_model_execute`
+  (`gpu_model_runner.py:1568-1623`, gated on `is_hybrid`, not proposer type)
+  computes `num_accepted_tokens` generically; the GDN mixer threads
+  `spec_state_indices_tensor` + `num_accepted_tokens` into
+  `fused_sigmoid_gating_delta_rule_update` (`qwen_gdn_linear_attn.py:
+  1264-1273, 1370-1393`) so a rejected token's state slot is never selected.
+  No ngram special-casing in the write path; no hybrid spec-decode guard
+  exists either way. **Runtime gate still required before trust** (greedy
+  on/off equivalence on repetition-heavy prompts) — code-verified ≠
+  runtime-verified, and the scout could not fetch the issue to confirm fix
+  lineage. If the gate passes, the zero-training ngram acceptance probe is
+  back on the table.
+* **The 397B evidence, properly qualified:** community-sourced
+  (`vendor/rtx6kpro/benchmarks/results.md:26-61`), 4× PRO 6000 TP4, and the
+  +51-72% is **aggregate offered-load throughput**, not single-request
+  latency. MTP>3 instability is a live upstream crash class (vllm#34948,
+  same GDN-rejection family) — **spec length 2 is the pragmatic cap**, which
+  matches the measured sweet spot.
+* **Intel B70 field notes** (`b70_ai_things/FINDINGS.md`): MoE MTP gains
+  collapse with a quantized draft head (+3%) vs BF16-preserved (+36%; dense
+  got +79%) — **the draft head stays BF16**. And one wiring bug silently
+  collapsed acceptance ~90% → ~0 with no model change — acceptance-rate
+  monitoring is a mandatory serving gate.
+* **Capture is self-hosted.** Stock vLLM cannot fit the 88B verifier on one
+  5090 for hidden-state capture (49.5 GB weights) and CUDA+XPU cannot share
+  a TP group — but our own serving stack runs this model on this card in
+  production; capture rides it. One real dependency:
+  `load_verifier_weights()` (`speculators` `model.py:123-177`) is
+  quantization-naive and our checkpoint's `lm_head` is NVFP4, so
+  training-side verifier weights load from the **bf16 base** — the third
+  lever that checkpoint gates.
+* **Verify-shape economics on our silicon** (from the GEMV audit): verify
+  turns M=1 into M=spec+1 on the B70 leg — 47.9 → ~120 µs at M=3 for mean
+  acceptance ~2.7 tokens/step. Strongly net-positive iff the B70 leg stays
+  hidden at M=3 — priced by the decode overlap trace, like everything else.
+
+Plan: **Phase 0** ngram runtime gate + acceptance economics (an afternoon,
+zero training); **Phase 1** capture through our stack + BF16 draft-head
+training on the 5090, verifier weights from the bf16 base; **Phase 2** serve
+at spec2 behind acceptance monitoring + logprob envelope + retokenized-ITL
+(recipe: `vendor/sglang/benchmark/hicache/bench_warm_cache.py`).
 
 ### Persistent B70 decode kernel
 Template exists: `PersistentTileSchedulerMoE`

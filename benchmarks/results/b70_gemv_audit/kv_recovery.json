@@ -1,0 +1,33 @@
+{
+ "date": "2026-08-17",
+ "change": "--kv-cache-memory 2.9e9 -> 3.7e9",
+ "kv_tokens": {
+  "before": 209715,
+  "after": 269633,
+  "gain_pct": 28.6
+ },
+ "seats_131k": {
+  "before": 1.6,
+  "after": 2.06
+ },
+ "sizing_evidence": {
+  "steady_state_free_mib": 1577,
+  "c10_plus_8k_burst_peak_mib": 31766,
+  "headroom_at_peak_mib": 841
+ },
+ "regression": {
+  "itl_ms": 11.705,
+  "note": "identical to registered arm"
+ },
+ "spot_128k_c2": {
+  "ttft_s": [
+   36.8,
+   70.3
+  ],
+  "mean_s": 53.6,
+  "run6_mean_s": 67.5,
+  "pro_mean_s": 58.7,
+  "caveat": "2-request spot probe; full GuideLLM cell rerun queued"
+ },
+ "stale_item_closed": "legacy repack buffers died with pre-repacked SBMARL01 bank; remaining KV item is 4176-token block padding (parked)"
+}

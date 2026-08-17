@@ -2,6 +2,29 @@
 
 State as of run6 (`benchmarks/results/run6_final/`).
 
+## SHIPPED: KV recovery — 209,715 → 269,633 tokens (+28.6%), 128K C=2 flips to a WIN
+
+The run6 `--kv-cache-memory=2.9e9` was sized under three OOM scars, not
+measurement. Measured on the production boot (registration on):
+steady-state free VRAM 1,577 MiB; a C=10 + 8K-prefill burst peaks only
+~740 MiB above idle. Handing 800 MiB to KV is safe with margin:
+
+* **New recipe: `--kv-cache-memory=3700000000`** → **269,633 KV tokens
+  = 2.06 full seats @131K** (was 1.60).
+* Verified under stress: C=10 + 8K prefill peaks at 31,766 MiB
+  (841 MiB headroom); ITL regression probe **11.705 ms — unchanged**.
+* **128K C=2 spot probe: TTFTs 36.8 s / 70.3 s, mean 53.6 s** — vs run6's
+  67.5 s (queue-bound) and the PRO's 58.7 s. The second seat now admits
+  immediately instead of queuing; the cell flips from 1.15× loss to
+  ~0.91× WIN pending the full GuideLLM matrix rerun (2-request spot
+  probe, not the harness cell).
+* The "legacy repack buffers" recovery item is STALE and closed: the
+  runtime repack died when the pre-repacked SBMARL01 bank shipped; the
+  streamer holds only its 2×584.7 MiB ring arenas, both load-bearing.
+  The remaining KV item is the 4,176-token attention-block padding
+  (hybrid mamba page coupling) — a vLLM-geometry change, parked with the
+  SGLang capacity-solve reference as the map.
+
 ## SHIPPED: run6 — full PRO-matched smoke matrix; 4 outright wins
 
 Final config: Marlin + `SHOOTING_BRAKE_BANK_REGISTER=1`, explicit

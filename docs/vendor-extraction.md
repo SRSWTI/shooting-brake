@@ -414,6 +414,65 @@ speed. So we are not fighting a faster machine; we are fighting one that never
 has to move weights. That is exactly why our long-context wins are real and our
 short-context losses are structural.
 
+### External research triaged: MMA, arXiv 2512.16056 (multipath host-GPU copies)
+
+**Mechanism: REJECT.** MMA relays a host->GPU copy through *peer CUDA GPUs*
+(peer reads host DRAM over its own PCIe link, forwards to the target over
+NVLink), reaching 245 GB/s vs a 53 GB/s single-link baseline on 8x H20. Three
+independent blockers for us: (a) we have exactly **one** CUDA GPU — the B70s
+cannot be CUDA relays; (b) **no NVLink** on consumer Blackwell, and the NVLink
+hop is what makes the relay pay; (c) even hypothetically, a B70 relay would
+read host DRAM over Gen4 x4 (~7 GB/s) and then forward with no cross-vendor
+P2P, i.e. B70->host->5090, **consuming the 5090's own Gen5 link anyway** plus
+extra DRAM traffic — strictly negative. Their own scope table measures **0.94x
+(a small loss) at TP=8** where no spare peer exists; that is our permanent
+regime.
+
+**Four residues worth keeping:**
+
+1. **Third-party confirmation that we are at the PCIe ceiling.** Their Table 1:
+   Gen5 x16 = 64 GB/s theoretical, **52-60 GB/s typical measured**; their native
+   baseline is 53 GB/s. Ours is 53.9 GiB/s = **57.9 GB/s = 90% of theoretical**,
+   top of their measured band. **[measured-here vs measured-elsewhere]**
+   Consequence: no headroom remains on the link. Further prefill-transfer gains
+   must come from moving **fewer bytes**, never from moving them faster. This
+   retires the "is there PCIe headroom?" question for good.
+2. **Our doorbell sync is already better than theirs — do not "improve" it.**
+   Their §3.3 enumerates and rejects `cudaDeviceSynchronize`,
+   `cudaLaunchHostFunc` (stream->CPU only), and CPU polling, then builds a
+   **spin kernel** polling a `cudaHostAllocMapped` flag with `__ldcg` +
+   `__nanosleep(100)`: one resident thread block, 1-2 us, requires the CUDA
+   context stay scheduled. We use `cuStreamWriteValue32_v2` /
+   `cuStreamWaitValue32_v2` (`stream_signal.py`) — **hardware stream memory
+   operations: zero SM footprint, no kernel, natively graph-capturable, no
+   tuning surface, and already fully hidden** (B70 44 us vs CUDA MoE 100 us).
+   The paper never mentions stream memory ops. If we ever need the *stream->CPU*
+   direction (we do not — the B70 thread polls a host flag), `cudaLaunchHostFunc`
+   is the documented primitive.
+3. **Outstanding-queue depth 2 is optimal** (depth 1 leaves idle gaps between
+   transfers, >2 coarsens scheduling) — independent confirmation of our 2-arena
+   double buffer, which we chose because it fit VRAM. Pairs with b12x's
+   `recommend_prefetch_depth`. **Do not** import their chunk-size numbers
+   (2.81 MB H2D): those size multipath load-balancing granularity, not
+   single-path efficiency. On one link our single 584.7 MiB contiguous copy per
+   layer is the right shape.
+4. **GPUDirect Storage would be a ~7x downgrade for us.** Their §7 notes GDS
+   targets NVMe->GPU and "NVMe throughput (~7 GB/s per drive) is an order of
+   magnitude below DRAM bandwidth". Our bank is deliberately page-cache resident
+   at 53.9 GiB/s. This also explains the pin-eviction thrash: losing page cache
+   drops us onto exactly that NVMe path. **Never propose GDS for the bank.**
+
+**The one applicable pointer, and why it stays parked.** Their related-work
+contrast with **ServerlessLLM** names the technique that does fit our box:
+*partitioned parallel load* over independent links (each device pulls its own
+shard through its own PCIe link) rather than relay. Our three links are
+independent and both B70 links are **idle during prefill**. Priced: aggregate
+weight-read bandwidth 57.9 -> ~68 GB/s (**+18%**). But stream is already fully
+hidden under compute at >=8K, so +18% on transfer buys **~0** there; and at
+short context, where stream *is* exposed, the B70's prefill compute is exactly
+what we abandoned (its per-route kernel left the 5090 97% idle). So this remains
+the parked "5-10% B70 expert cut" — now with arithmetic instead of intuition.
+
 ---
 
 # Meta-findings — the patterns worth more than any single asset

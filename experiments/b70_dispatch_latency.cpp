@@ -177,8 +177,30 @@ void spin_for_us(int idle_us) {
   }
 }
 
+enum class HostProvenance {
+  sycl_host,          // sycl::malloc_host in the B70's context
+  cuda_pinned,        // cudaHostAlloc — production pin_memory=True provenance
+  cuda_pinned_reg,    // cudaHostAlloc + prepare_for_device_copy (the 1b fix)
+  malloc_reg,         // plain malloc + prepare_for_device_copy
+};
+
+const char *provenance_name(HostProvenance p) {
+  switch (p) {
+  case HostProvenance::sycl_host:       return "sycl::malloc_host";
+  case HostProvenance::cuda_pinned:     return "cudaHostAlloc";
+  case HostProvenance::cuda_pinned_reg: return "cudaHostAlloc+reg";
+  case HostProvenance::malloc_reg:      return "malloc+reg";
+  }
+  return "?";
+}
+
 EnvironmentStats bench_environment_cell(sycl::queue &q, int iters,
-                                        bool cuda_pinned, int idle_us) {
+                                        HostProvenance prov, int idle_us) {
+  namespace syclex = sycl::ext::oneapi::experimental;
+  const bool cuda_pinned = prov == HostProvenance::cuda_pinned ||
+                           prov == HostProvenance::cuda_pinned_reg;
+  const bool registered = prov == HostProvenance::cuda_pinned_reg ||
+                          prov == HostProvenance::malloc_reg;
   void *h_act = nullptr;
   float *h_out = nullptr;
   if (cuda_pinned) {
@@ -193,9 +215,19 @@ EnvironmentStats bench_environment_cell(sycl::queue &q, int iters,
       throw std::runtime_error(
           std::string("cudaHostAlloc failed: ") + cudaGetErrorString(status));
     }
+  } else if (prov == HostProvenance::malloc_reg) {
+    h_act = std::malloc(kActBytes);
+    h_out = static_cast<float *>(std::malloc(kOutBytes));
+    if (h_act == nullptr || h_out == nullptr) throw std::bad_alloc();
   } else {
     h_act = sycl::malloc_host(kActBytes, q);
     h_out = sycl::malloc_host<float>(kOutBytes / sizeof(float), q);
+  }
+  if (registered) {
+    // The 1b primitive: make an externally-allocated range DMA-able from
+    // this SYCL context. Same call vllm-xpu-kernels' xpu_host_register wraps.
+    syclex::prepare_for_device_copy(h_act, kActBytes, q.get_context());
+    syclex::prepare_for_device_copy(h_out, kOutBytes, q.get_context());
   }
   void *d_act = sycl::malloc_device(kActBytes, q);
   float *d_out = sycl::malloc_device<float>(kOutBytes / sizeof(float), q);
@@ -222,9 +254,16 @@ EnvironmentStats bench_environment_cell(sycl::queue &q, int iters,
 
   sycl::free(d_act, q);
   sycl::free(d_out, q);
+  if (registered) {
+    syclex::release_from_device_copy(h_act, q.get_context());
+    syclex::release_from_device_copy(h_out, q.get_context());
+  }
   if (cuda_pinned) {
     cudaFreeHost(h_act);
     cudaFreeHost(h_out);
+  } else if (prov == HostProvenance::malloc_reg) {
+    std::free(h_act);
+    std::free(h_out);
   } else {
     sycl::free(h_act, q);
     sycl::free(h_out, q);
@@ -236,13 +275,14 @@ void bench_environment(sycl::queue &q, int iters) {
   std::printf(
       "\n[environment] full dispatch by host provenance and idle gap\n");
   std::printf("  %-18s %10s %12s\n", "host buffer", "gap", "latency");
-  for (bool cuda_pinned : {false, true}) {
+  for (HostProvenance prov :
+       {HostProvenance::sycl_host, HostProvenance::cuda_pinned,
+        HostProvenance::cuda_pinned_reg, HostProvenance::malloc_reg}) {
     for (int idle_us : {0, 180}) {
       const EnvironmentStats s =
-          bench_environment_cell(q, iters, cuda_pinned, idle_us);
+          bench_environment_cell(q, iters, prov, idle_us);
       std::printf("  %-18s %7d us   median %8.2f us   p95 %8.2f us\n",
-                  cuda_pinned ? "cudaHostAlloc" : "sycl::malloc_host",
-                  idle_us, s.median, s.p95);
+                  provenance_name(prov), idle_us, s.median, s.p95);
     }
   }
 }

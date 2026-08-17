@@ -167,17 +167,63 @@ own prefill re-ramps it before decode starts. **DVFS is a microbenchmark
 hazard, not a serving lever at C=1.** (Untested: whether very low-QPS
 multi-second-gap traffic at higher concurrency ever exposes it.)
 
+## SHIPPED: doorbell XPU host registration — ITL 11.92 → 11.71 ms (−1.8%)
+
+Decode lever ② from the audit, landed same day. The doorbell staging
+buffers (`routed_experts.py` `_b70_pinned_hidden`/`_pinned_b70_ids`/
+`_pinned_b70_weights`/`_b70_pinned_output`) are torch `pin_memory=True` —
+registered with the **CUDA** caching host allocator only. Registration is
+context-scoped, so from the B70's Level Zero side those ranges were
+pageable: staged H2D + synchronous D2H on every doorbell round trip,
+96 transfers per decode step.
+
+Fix: `B70Provider::register_host_range` (`b70_provider.cpp`, wraps
+`syclex::prepare_for_device_copy`, ranges released at shutdown), called
+from `sb_b70_poll_register` for all four buffers per layer. Default ON;
+kill switch `SHOOTING_BRAKE_B70_XPU_REGISTER=0`. This is the same move as
+run5's `cudaHostRegister` on the Marlin bank, pointed the other way.
+
+Measured ladder, every step gated before the next:
+
+1. **Standalone provenance A/B** (`b70_dispatch_latency environment`, new
+   `+reg` arms, clock-pinned): cudaHostAlloc 29.3 → **20.5 µs** per
+   dispatch at the production 180 µs duty cycle — registration fully
+   recovers sycl-native latency on CUDA-pinned ranges.
+2. **Numerics + lifecycle smoke** (`experiments/b70_xpu_register_smoke.py`,
+   real bank, real poller, torch-pinned buffers): cross-arm max delta
+   2.27e-13 on 1.75e-6-scale outputs = atomic-reorder noise; 0 dispatch
+   errors; clean register→release→shutdown.
+3. **Production A/B, same binary, flag on/off boots** (4 probe runs per
+   arm, `benchmarks/b70_itl_probe.py`, 128-in/256-out C=1):
+   OFF 11.895/11.920/11.914/11.934 (mean 11.916) vs
+   ON **11.700/11.701/11.706/11.712 (mean 11.705)** — zero overlap
+   between arms; flag-off reproduces the pre-change baseline exactly.
+
+**−211 µs/step = −1.8% ITL — the first decode improvement since run4, and
+a new best ITL for this config.** In-situ saving is ~2.2 µs/transfer vs
+8.8 standalone: the rest is masked by the CUDA-partial overlap, which is
+direct evidence for the max() cost model and prices the remaining
+transport headroom at roughly another ~2 µs/transfer if the B70 leg were
+ever the binding one.
+
+Operational scar from the A/B, recorded: `ZE_AFFINITY_MASK` exported by an
+earlier shell experiment leaked into a serve relaunch and silently loaded
+the bank onto the **Gen3** B70 (the serve script honors caller values).
+Caught by the operator watching nvtop. Relaunches must scrub the env
+(`env -u ZE_AFFINITY_MASK`) or use a fresh shell.
+
 ### What this leaves on the decode front
 
-1. **② SYCL host registration of the doorbell staging buffers** — now the
-   top live decode lever (transport overhead, est. 4–16% of ITL).
-2. **The unmeasured max(B70 leg, CUDA partial) overlap question** — still
+1. **The unmeasured max(B70 leg, CUDA partial) overlap question** — still
    gates everything; at 2800 MHz the B70 kernel leg is ~2.3 ms of an
-   11.9 ms step, so if it is fully hidden, even a 2× faster kernel buys 0.
-3. `down2` adaptive dispatch (free, pairs≥8).
-4. 150 W cap (④) — unaffected by this audit; bandwidth-bound argument
+   11.7 ms step, and the registration result just showed ~75% of transfer
+   overhead is already hidden. A one-decode-step dual-runtime trace is the
+   instrument (research in progress: `zeDeviceGetGlobalTimestamps` + CUPTI
+   clock correlation).
+2. `down2` adaptive dispatch (free, pairs≥8; needs the trace to price).
+3. 150 W cap (④) — unaffected by the audit; bandwidth-bound argument
    stands.
-5. Kernel replacement is DEAD: nothing in the vendored Intel trees beats
+4. Kernel replacement is DEAD: nothing in the vendored Intel trees beats
    the in-house kernel at decode shapes, and our own M=1 headroom is
    capped at ~1.35× by occupancy.
 

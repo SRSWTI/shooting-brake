@@ -156,7 +156,20 @@ exposes only 1,024 subgroups), decode is NOT a bandwidth-utilization
 problem to fix by kernel swap, and the open levers are transport (1b) and
 the max(B70, CUDA-partial) overlap question.
 
-### 1b. Register the doorbell buffers with the B70's SYCL context — NEW, cheap
+### 1b. Register the doorbell buffers with the B70's SYCL context — SHIPPED (2026-08-17)
+**VERDICT [measured-here]**: implemented as `B70Provider::register_host_range`
+(wraps `prepare_for_device_copy`; called from `sb_b70_poll_register` for all
+four staging buffers per layer; kill switch
+`SHOOTING_BRAKE_B70_XPU_REGISTER=0`). Standalone: cudaHostAlloc 29.3 →
+20.5 µs/dispatch at the 180 µs duty cycle. Numerics: cross-arm delta =
+atomic noise (`experiments/b70_xpu_register_smoke.py`). Production A/B,
+same binary, 4 probe runs per arm: **ITL 11.916 → 11.705 ms (−1.8%)** —
+the estimate range's low end, because ~75% of the per-transfer overhead is
+masked by the CUDA-partial overlap (evidence for the max() model). Details:
+`docs/next-steps-88b.md` SHIPPED section; artifacts in
+`benchmarks/results/b70_gemv_audit/`. Original recon below, kept for the
+record.
+
 **Found from a fresh `vllm-xpu-kernels` pull (upstream PR #519, commit
 `f1c4861`), and it is the missing half of our own biggest win.**
 

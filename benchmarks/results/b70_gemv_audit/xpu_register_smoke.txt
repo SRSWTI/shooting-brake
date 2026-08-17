@@ -1,0 +1,2 @@
+XPU_REGISTER=1  out_scale=1.753e-06  replay_max_delta=2.274e-13  round_trip_us median=226.0 min=223.6  provider_service_us=6934.6  errors=0  cross_arm_max_delta=2.274e-13
+clean shutdown

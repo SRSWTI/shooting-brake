@@ -189,6 +189,92 @@ win (ours is ~130 s), not a serving one.
 and dispatches only expert IDs to the B70; `#526` adds an XPU paged-decode
 config tuple, and our attention runs on the 5090 via FlashInfer.
 
+### 1c. `sgl-kernel-xpu`'s W4A16 grouped MoE GEMM — the strongest decode candidate
+**From a fresh `sgl-kernel-xpu` pull (`8c4f5e8..1b96817`). This is a ready-made
+replacement for our hand-written B70 per-route GEMV, built for our exact card.**
+
+`moe_grouped_mm_nt_xe20_w4a16` (`include/sgl_kernel_ops.h:692-713`,
+`src/sycl/GroupGemmW4A16Xe20.cpp`) — "Unified int4/mxfp4 W4A16 MoE grouped
+GEMM". **[code-verified]** Two facts make it a live candidate rather than a
+curiosity:
+
+* **It builds for our silicon by default:** `CMakeLists.txt:28` sets
+  `DPCPP_SYCL_TARGET "bmg"` — Battlemage, i.e. the Arc Pro B70.
+* **Decode shapes are first-class, not an afterthought.** Three tile policies
+  selected at runtime by average rows-per-expert
+  (`src/GroupGemmW4A16Xe20.cmake:17-20`, dispatch at
+  `GroupGemmW4A16Xe20.cpp:268-272`):
+  `policy_m_8 <8,64,32>` for **avg_m <= 4**, `policy_m_16` for <= 8,
+  `policy_m_32` for <= 128. Our decode is M=1-16 with ~1 row per routed expert.
+
+This closes the exact gap an earlier scout identified in the *other* Intel repo,
+whose grouped GEMM "targets large-M grouped GEMM, not M=1-16 per-route GEMV —
+the same gap our own B70 kernel has today."
+
+**The contract matches our bank almost line for line** (their header comment vs
+our format):
+
+| their requirement | ours |
+|---|---|
+| `packed_weights` int8/uint8 `[E, N, K/2]`, two 4-bit values per byte | int4-packed expert bank |
+| `scales [E, N, K/group_size]`, N-outer, **"activation-dtype direct multiplier for int4"** | our convention (direct, not reciprocal) |
+| `group_size` must be 32/64/128/256 | **g128** |
+| `zeros` optional; when absent, zero-point must be "pre-folded into a signed 4-bit code" | AutoGPTQ int4 **sym zp8** = the pre-folded case they support |
+| `rows_per_expert` per-expert row counts | our dispatch already computes these |
+| "The caller runs the activation between GEMM1 and GEMM2" | our provider is already two GEMMs + SwiGLU |
+
+**Why this outranks the bandwidth audit as a decode lever:** the audit only
+*measures* whether our GEMV wastes bandwidth; this is a candidate *fix* written
+by a team that tunes for this silicon. Our current kernel, by our own docstring,
+"does O(M x top_k) weight reads and does not amortise weight reads across
+tokens — it was written for decode, where an expert sees one or two rows."
+
+**It ships its own instruments:** `benchmark/bench_fused_experts_w4a16.py` (perf
+at arbitrary shapes) and `tests/test_moe_gemm.py::_check_int4_grouped_mm`
+(correctness, with configurable `group_size` and explicit zero-point handling
+plus `_make_int4_weight`/`_pack_int4_codes` helpers). So we can measure and
+correctness-gate it at our shapes **before** touching the provider.
+
+*Cost:* build `sgl-kernel-xpu` with icpx against oneAPI 2026.1 (targets `bmg`
+already); possibly an offline bank repack to `[E, N, K/2]` (we own the bank
+builder, so this is a known quantity); swap the provider's per-route GEMV for
+this call. Days, not hours — but every step is measurable in isolation first.
+*Actively developed:* commit `8c7317f` (#387) just "relaxed the data type
+requirements for W4A16 MoE input weights and scales", which is what makes our
+bank's dtypes plausibly acceptable.
+
+**Pairs with 1b.** Register the host buffers (fixes the *transport*) and swap the
+kernel (fixes the *compute*) — two independent decode levers, both from vendored
+repos that actively develop against our hardware. Watch these two trees on every
+pull; they are the only ones targeting our decode silicon.
+
+### 1d. `b70_ai_things` refresh — mechanisms worth knowing, numbers that don't transfer
+**[measured-elsewhere, same card class, different architecture]** Their new
+`results/unsloth_c1_graph_bench.md` (2026-08-15) serves an **NVFP4** 27B model on
+one B70 and logs two techniques we did not have:
+
+* `Using _XPUW4A4FusedAsW4A16Kernel for NVFP4 GEMM` — NVFP4 on the B70 runs as
+  **weight-only W4A16** through a shim. Relevant because our B70 bank is an int4
+  GPTQ *re-encode* of an NVFP4 checkpoint, a fidelity cost we accepted; if NVFP4
+  can run natively as W4A16 on the Arc, the re-encode may be droppable.
+* `[nvfp4-shim] channel-FP8 -> INT8-XMX int8_gemm_w8a16` — the B70 has no native
+  FP8, so channel-wise FP8 is mapped onto **int8 XMX** (367 TOPS peak).
+* Graph capture data point: `cudagraph_mode=PIECEWISE`,
+  `capture_sizes=[1,2,4,8]`, "finished in 2 secs, took 0.22 GiB" — cheap, and
+  informs our own SYCL-graph item.
+
+**Their throughput numbers do NOT transfer** (18.87 out tok/s at conc=1, TPOT
+42.5 ms): that is a 27B model *fully resident* on one B70 (24.7 GiB of weights,
+leaving 0.3 GiB = 4,096 KV tokens). We use the B70 only for 126 MoE experts with
+the 5090 doing attention, GDN and local experts. Different machine shape; only
+the mechanisms carry.
+
+**Off our path from the same batch:** `intel-xpu-backend-for-triton` (we author
+B70 code in SYCL, not Triton, and our vLLM runs on CUDA — though the
+`moe2-wna162` branch is where to look if we ever want Triton-authored W4A16 MoE);
+`llm-scaler` (ComfyUI-OmniXPU dynamic-VRAM/LoRA for image generation — nothing
+for us).
+
 ### 2. GDN prefill: route to flashinfer's sm_120 kernel via our plugin
 **This is a bug-class hit we found live.** vLLM's selector
 (`qwen_gdn_linear_attn.py:116-133`) sets `supports_flashinfer` only for

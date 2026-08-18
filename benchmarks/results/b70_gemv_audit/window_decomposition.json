@@ -1,0 +1,44 @@
+{
+ "date": "2026-08-18",
+ "question": "what is inside the 94.3 us doorbell window? (first in-situ device/host split)",
+ "instrument": "experiments/b70_xpu_register_smoke.py, per-dispatch trace ring via sb_b70_poll_trace_snapshot, SHOOTING_BRAKE_B70_PROFILE=1, 88B SBINT401 bank, Gen3 B70",
+ "method_note": "cumulative counters / dispatch_count is the WRONG estimator: dispatch 0 carries SYCL JIT (~252 ms) and destroys the mean. Trace-ring medians used throughout. Profiling inflates wall ~10-25%; shares are the result, not absolutes.",
+ "M": 1,
+ "cells_us_p50": {
+  "k2": {
+   "wall": 93.0,
+   "kernel": 32.7,
+   "device_total": 54.7,
+   "device_overhead": 22.0,
+   "host_remainder": 38.3
+  },
+  "k4": {
+   "wall": 100.5,
+   "kernel": 39.9,
+   "device_total": 62.1,
+   "device_overhead": 22.2,
+   "host_remainder": 38.5
+  },
+  "k6": {
+   "wall": 130.3,
+   "kernel": 69.3,
+   "device_total": 91.8,
+   "device_overhead": 22.5,
+   "host_remainder": 38.5
+  },
+  "k8": {
+   "wall": 156.2,
+   "kernel": 93.3,
+   "device_total": 117.1,
+   "device_overhead": 23.8,
+   "host_remainder": 39.1
+  }
+ },
+ "finding": "~61 us/dispatch is FIXED overhead (22 device-queue + 39 host), flat across k. Only the kernel scales. At production k~5.6 roughly half the doorbell window is not kernel.",
+ "consequences": {
+  "dual_b70": "per-card k 5.6 -> 2.8 moves kernel ~63 -> ~34 us; fixed 61 us stays. Window ~124 -> ~95 us => -5.9% ITL [INFERENCE]. RISK NOW QUANTIFIED: the 39 us host leg is CPU-side; two cards on one calling thread serialize it to ~78 us and the win is zero. One poller thread per card is a design REQUIREMENT.",
+  "gate_up_occupancy": "kernel is 60-75% of the window; 1.35x on it saves ~16 us => -4.3% ITL [INFERENCE]",
+  "graph_replay": "measured 4 us of the 39 us host leg, so ~35 us/dispatch = 1.7 ms/step = 14% of ITL is poller wakeup + take() path, NOT submission count. Largest unattributed decode item; the poller already spins, so 39 us is anomalous and unexplained."
+ },
+ "plumbing": "SHOOTING_BRAKE_B70_PROFILE works end to end (profiling_requested -> enable_profiling at b70_provider.cpp:974-979; kernel_us filled at :1424; accumulated at b70_capi.cpp:210-212). The earlier 'kernel_ns read 0' was env propagation into the vLLM worker, not dead code."
+}

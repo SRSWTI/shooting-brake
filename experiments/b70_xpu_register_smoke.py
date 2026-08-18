@@ -49,8 +49,12 @@ def main():
     lib.sb_b70_poll_service_ns.restype = ctypes.c_uint64
     lib.sb_b70_poll_dispatch_count.restype = ctypes.c_uint64
     lib.sb_b70_poll_error_count.restype = ctypes.c_uint64
+    lib.sb_b70_poll_kernel_ns.restype = ctypes.c_uint64
+    lib.sb_b70_poll_total_ns.restype = ctypes.c_uint64
+    lib.sb_b70_poll_row_count.restype = ctypes.c_uint64
     for f in ("sb_b70_poll_service_ns", "sb_b70_poll_dispatch_count",
-              "sb_b70_poll_error_count"):
+              "sb_b70_poll_error_count", "sb_b70_poll_kernel_ns", "sb_b70_poll_row_count",
+              "sb_b70_poll_total_ns"):
         getattr(lib, f).argtypes = [ctypes.c_void_p]
 
     provider = lib.sb_b70_create()
@@ -98,14 +102,18 @@ def main():
     assert rc == 0, f"poll_register rc={rc}"
     assert lib.sb_b70_poll_start(poller) == 0
 
-    # Deterministic M=4 dispatch: 4 tokens x 6 valid routes, seeded input.
-    M = 4
+    # Deterministic dispatch, seeded input. Defaults to the historical
+    # M=4 x 6-valid-route shape; SB_SMOKE_M / SB_SMOKE_ROUTES override so the
+    # same harness can be pointed at the production decode shape (M=1, ~6
+    # remote routes of top-8 under split:54).
+    M = int(os.environ.get("SB_SMOKE_M", "4"))
+    valid = int(os.environ.get("SB_SMOKE_ROUTES", "6"))
     rng = np.random.default_rng(42)
     hidden[:M] = torch.from_numpy(
         (rng.standard_normal((M, HIDDEN)) * 0.02).astype(np.float16))
     for m in range(M):
         for j in range(TOPK):
-            ids[m, j] = (m * 6 + j) % 126 if j < 6 else -1
+            ids[m, j] = (m * valid + j) % 126 if j < valid else -1
             weights[m, j] = 1.0 / 6.0 if j < 6 else 0.0
 
     print(f"inputs: |hidden|max={float(hidden[:M].abs().max()):.4f} "
@@ -138,8 +146,51 @@ def main():
                 float(np.abs(got - reference).max()))
 
     errors = lib.sb_b70_poll_error_count(poller)
-    service_us = (lib.sb_b70_poll_service_ns(poller) / 1000.0
-                  / max(1, lib.sb_b70_poll_dispatch_count(poller)))
+    dispatches = max(1, lib.sb_b70_poll_dispatch_count(poller))
+    service_us = lib.sb_b70_poll_service_ns(poller) / 1000.0 / dispatches
+    # Device-side split, non-zero only under SHOOTING_BRAKE_B70_PROFILE=1
+    # (the provider enables sycl::property::queue::enable_profiling at load,
+    # so the flag must be set before the process starts). kernel_us is the
+    # MoE kernel alone; total_us is dispatch_begin -> copy_out on the device
+    # queue. service_us - total_us is the host-side remainder: submission,
+    # poller wakeup and anything not on the device timeline.
+    kernel_us = lib.sb_b70_poll_kernel_ns(poller) / 1000.0 / dispatches
+    total_us = lib.sb_b70_poll_total_ns(poller) / 1000.0 / dispatches
+    print(f"  raw: dispatches={lib.sb_b70_poll_dispatch_count(poller)} "
+          f"rows={lib.sb_b70_poll_row_count(poller)} "
+          f"service_ns={lib.sb_b70_poll_service_ns(poller)} "
+          f"kernel_ns={lib.sb_b70_poll_kernel_ns(poller)} "
+          f"total_ns={lib.sb_b70_poll_total_ns(poller)} "
+          f"py_iters={len(lat)}")
+    # Cumulative counters divided by dispatch count are the WRONG estimator:
+    # dispatch 0 carries SYCL JIT and weight-upload warmup and dominates the
+    # sum. Use the per-dispatch trace ring instead (40-byte TraceEntry:
+    # t0_ns, t1_ns, kernel_ns, total_ns, layer, M).
+    lib.sb_b70_poll_trace_snapshot.restype = ctypes.c_size_t
+    lib.sb_b70_poll_trace_snapshot.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+
+    class TraceEntry(ctypes.Structure):
+        _pack_ = 1
+        _fields_ = [("t0_ns", ctypes.c_uint64), ("t1_ns", ctypes.c_uint64),
+                    ("kernel_ns", ctypes.c_uint64),
+                    ("total_ns", ctypes.c_uint64),
+                    ("layer", ctypes.c_uint32), ("M", ctypes.c_uint32)]
+    assert ctypes.sizeof(TraceEntry) == 40, ctypes.sizeof(TraceEntry)
+    buf = (TraceEntry * 4096)()
+    n = lib.sb_b70_poll_trace_snapshot(poller, ctypes.byref(buf), 4096)
+    if n:
+        ent = [buf[i] for i in range(n)]
+        wall = sorted((e.t1_ns - e.t0_ns) / 1000.0 for e in ent)
+        kern = sorted(e.kernel_ns / 1000.0 for e in ent)
+        devt = sorted(e.total_ns / 1000.0 for e in ent)
+        mid = len(ent) // 2
+        print(f"  trace n={n} M={ent[-1].M} "
+              f"wall_us[first={((ent[0].t1_ns-ent[0].t0_ns)/1000.0):.1f} "
+              f"p50={wall[mid]:.1f} min={wall[0]:.1f}] "
+              f"kernel_us[p50={kern[mid]:.1f} min={kern[0]:.1f}] "
+              f"device_total_us[p50={devt[mid]:.1f}] "
+              f"host_remainder_us_p50={wall[mid] - devt[mid]:.1f}")
     lat_sorted = sorted(lat)
     scale = float(np.abs(reference).max())
     assert errors == 0, f"{errors} dispatch errors"
@@ -156,11 +207,17 @@ def main():
         assert cross_delta <= 1e-4 * max(scale, 1e-3), (
             f"cross-arm delta {cross_delta} vs scale {scale}")
         cross = f"  cross_arm_max_delta={cross_delta:.3e}"
+    profile = os.environ.get("SHOOTING_BRAKE_B70_PROFILE", "0")
+    split = ""
+    if profile == "1":
+        split = (f"  [profile] kernel_us={kernel_us:.1f} "
+                 f"device_total_us={total_us:.1f} "
+                 f"host_remainder_us={service_us - total_us:.1f}")
     print(f"XPU_REGISTER={flag}  out_scale={scale:.3e}  "
           f"replay_max_delta={max_replay_delta:.3e}  "
           f"round_trip_us median={lat_sorted[len(lat)//2]:.1f} "
           f"min={lat_sorted[0]:.1f}  provider_service_us={service_us:.1f}  "
-          f"errors={errors}{cross}")
+          f"errors={errors}{cross}{split}")
 
     lib.sb_b70_poll_stop(poller)
     lib.sb_b70_poll_destroy(poller)

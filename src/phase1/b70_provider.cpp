@@ -335,6 +335,11 @@ struct B70Provider::Impl {
   std::optional<sycl::queue> queue;
   std::string async_error;
 
+  // Host ranges imported into the queue's context via
+  // prepare_for_device_copy; released in release_resources_locked while
+  // the context still exists.
+  std::vector<std::pair<void*, std::size_t>> registered_host_ranges;
+
   // SBEXP001 uses the six legacy SoA allocations below. SBINT401 uses one
   // contiguous AoS allocation so the six expert-0 plane pointers can share
   // the header's expert stride without repacking.
@@ -492,7 +497,16 @@ struct B70Provider::Impl {
       free_pointer(w2);
       free_pointer(s13);
       free_pointer(w13);
+
+      for (auto& range : registered_host_ranges) {
+        try {
+          sycl::ext::oneapi::experimental::release_from_device_copy(
+              range.first, queue->get_context());
+        } catch (...) {
+        }
+      }
     }
+    registered_host_ranges.clear();
 
     dispatch_begin.reset();
     kernel_begin.reset();
@@ -1489,6 +1503,24 @@ bool B70Provider::device_memory(std::size_t* free_bytes,
   } catch (...) {
     // Occupancy is reporting. A runtime that refuses the query must not be
     // able to take down a serving process through a telemetry call.
+    return false;
+  }
+}
+
+bool B70Provider::register_host_range(const void* ptr,
+                                      const std::size_t bytes) noexcept {
+  try {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (!impl_->health.loaded || !impl_->queue || ptr == nullptr ||
+        bytes == 0) {
+      return false;
+    }
+    void* mutable_ptr = const_cast<void*>(ptr);
+    sycl::ext::oneapi::experimental::prepare_for_device_copy(
+        mutable_ptr, bytes, impl_->queue->get_context());
+    impl_->registered_host_ranges.emplace_back(mutable_ptr, bytes);
+    return true;
+  } catch (...) {
     return false;
   }
 }

@@ -5,6 +5,8 @@
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <new>
@@ -68,6 +70,8 @@ class B70Poller {
  public:
   B70Poller(B70Provider* provider, uint64_t generation)
       : provider_(provider), generation_(generation) {}
+
+  B70Provider* provider() const { return provider_; }
 
   ~B70Poller() { stop(); }
 
@@ -407,8 +411,46 @@ int sb_b70_poll_register(sb_b70_poller_t* poller, size_t layer,
   entry.weights = weights;
   entry.output = output;
   entry.topk = topk;
+  // 1b: make the CUDA-pinned staging buffers DMA-able from the B70's SYCL
+  // context. torch pin_memory=True registers them with the CUDA caching
+  // host allocator only; from the Arc's side they are pageable, forcing a
+  // staged H2D and a synchronous D2H on every doorbell round trip.
+  // Measured (experiments/b70_dispatch_latency environment, clock-pinned):
+  // 29.3 -> 20.5 us per dispatch at the production 180 us duty cycle.
+  // Fail-open: an unregistered buffer still works, just slower.
+  // Kill switch: SHOOTING_BRAKE_B70_XPU_REGISTER=0.
+  static const bool xpu_register = [] {
+    const char* flag = std::getenv("SHOOTING_BRAKE_B70_XPU_REGISTER");
+    return flag == nullptr || std::strcmp(flag, "0") != 0;
+  }();
   try {
-    reinterpret_cast<B70Poller*>(poller)->add(entry);
+    auto* wrapped = reinterpret_cast<B70Poller*>(poller);
+    if (xpu_register) {
+      auto* prov = wrapped->provider();
+      const auto cap = prov->capability();
+      const size_t max_batch = cap.max_batch_remote;
+      const size_t hidden_elems = cap.supported_hidden_sizes.empty()
+          ? 0
+          : cap.supported_hidden_sizes.front();
+      if (max_batch != 0 && hidden_elems != 0) {
+        const bool ok =
+            prov->register_host_range(
+                hidden, max_batch * hidden_elems * sizeof(sycl::half)) &&
+            prov->register_host_range(
+                ids, max_batch * topk * sizeof(int32_t)) &&
+            prov->register_host_range(
+                weights, max_batch * topk * sizeof(float)) &&
+            prov->register_host_range(
+                output, max_batch * hidden_elems * sizeof(float));
+        static std::atomic<bool> warned{false};
+        if (!ok && !warned.exchange(true)) {
+          std::fprintf(stderr,
+                       "[sb_b70] XPU host registration unavailable; doorbell "
+                       "staging stays pageable from the B70 side\n");
+        }
+      }
+    }
+    wrapped->add(entry);
   } catch (...) {
     return -1;
   }

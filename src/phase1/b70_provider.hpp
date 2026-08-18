@@ -116,6 +116,22 @@ class B70Provider final {
   bool device_memory(std::size_t* free_bytes,
                      std::size_t* total_bytes) const noexcept;
 
+  // Registers an externally-pinned host range (e.g. a torch pin_memory
+  // staging buffer, which lives in the CUDA caching host allocator) with
+  // this provider's SYCL context via prepare_for_device_copy, so doorbell
+  // H2D/D2H copies from it run as direct DMA instead of staged (H2D) or
+  // synchronous (D2H) pageable copies. Registration is context-scoped:
+  // CUDA pinning is invisible to the B70's Level Zero context.
+  // Measured on this box (experiments/b70_dispatch_latency environment,
+  // clock-pinned): cudaHostAlloc 29.3 -> 20.5 us per dispatch at the
+  // production 180 us duty cycle.
+  //
+  // Requires load() to have succeeded (needs the context). Fail-open:
+  // returns false on any failure and the range simply stays pageable
+  // from the B70's side. Ranges are released at shutdown(); the memory
+  // itself must outlive the provider's use of it either way.
+  bool register_host_range(const void* ptr, std::size_t bytes) noexcept;
+
   void shutdown() noexcept;
 
  private:

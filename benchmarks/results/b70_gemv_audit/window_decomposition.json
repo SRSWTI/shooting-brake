@@ -40,5 +40,36 @@
   "gate_up_occupancy": "kernel is 60-75% of the window; 1.35x on it saves ~16 us => -4.3% ITL [INFERENCE]",
   "graph_replay": "measured 4 us of the 39 us host leg, so ~35 us/dispatch = 1.7 ms/step = 14% of ITL is poller wakeup + take() path, NOT submission count. Largest unattributed decode item; the poller already spins, so 39 us is anomalous and unexplained."
  },
- "plumbing": "SHOOTING_BRAKE_B70_PROFILE works end to end (profiling_requested -> enable_profiling at b70_provider.cpp:974-979; kernel_us filled at :1424; accumulated at b70_capi.cpp:210-212). The earlier 'kernel_ns read 0' was env propagation into the vLLM worker, not dead code."
+ "plumbing": "SHOOTING_BRAKE_B70_PROFILE works end to end (profiling_requested -> enable_profiling at b70_provider.cpp:974-979; kernel_us filled at :1424; accumulated at b70_capi.cpp:210-212). The earlier 'kernel_ns read 0' was env propagation into the vLLM worker, not dead code.",
+ "correction_2026_08_18_later": {
+  "what_changed": "The first pass read host_remainder off PROFILED runs and called ~35 us/dispatch unexplained (~14% of ITL). Both halves of that were wrong.",
+  "profiling_overhead_isolated": {
+   "method": "same card (Gen4, production), same shape (M=1 k=6), trace-ring wall p50, PROFILE off vs on",
+   "profile_off_wall_us": 83.9,
+   "profile_on_wall_us": 103.3,
+   "profiler_cost_us": 19.4,
+   "note": "four get_profiling_info calls in take(); the campaign's own rule -- shares are the result, not absolutes on a profiled run -- applies to this instrument too"
+  },
+  "irreducible_floor": {
+   "empty_kernel_submit_only_us": 1.32,
+   "empty_kernel_submit_plus_wait_us": 10.56,
+   "realistic_decode_layer_h2d4k_kernel_d2h8k_wait_us": 13.19,
+   "source": "experiments/b70_dispatch_latency launch|copy|dispatch, Gen4, 2000 iters"
+  },
+  "true_split_k6_gen4_unprofiled": {
+   "wall_us": 83.9,
+   "kernel_us": 53.3,
+   "kernel_share": 0.63,
+   "irreducible_floor_us": 13.2,
+   "addressable_chain_overhead_us": 17.4
+  },
+  "verdict": "NEGATIVE, and cheap. There is no hidden 14% in our software. ~half the claimed gap was the profiler, most of the remainder is a SYCL/L0 submit+wait floor. Ceiling on removing ALL addressable chain overhead is -4.6% ITL, and graph replay already showed it recovers only 4 of those 17 us. The kernel is 63% of the trip, not ~50% -- overhead was overblown and the levers that cut kernel WORK are the real ones.",
+  "reranked_decode_levers": {
+   "dual_b70_route_split": "-4.0% (kernel 50 -> 35 us per card at k 5.6 -> 2.8); still requires one poller thread per card or the host leg serializes",
+   "gate_up_occupancy": "-3.5% (1.35x on a 50 us kernel)",
+   "down2_at_C>=2": "-2.3% at C=8, zero at C=1",
+   "power_cap_150w": "+8% throughput claimed, same B70 SKU, STILL UNTESTED HERE",
+   "graph_replay": "-1.0%, 8 s boot cost"
+  }
+ }
 }

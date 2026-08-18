@@ -457,28 +457,51 @@ near-zero risk — it is a variant selection, both are correctness-gated.
 routes/token split ~4 per card, so each card sees the M=1-equivalent 4-pair
 shape at C=1 — where `down2` still loses. Same story, still a C≥2 lever.
 
-## SYCL-graph replay — the real one, and it works at C=1
+## SYCL-graph replay — capture works, but the lever is ~1%, not ~8%
 
 `grep command_graph src/phase1/b70_provider.cpp` returns nothing: `issue()` is
 eager. The graph work lives only in `src/QuixiCore-XPU/tests/xpu_graph_smoke.cpp`
 and `src/runtime/graph.cpp`.
 
-Validated standalone: **k=1 105.1 → 75.3 µs (−28%)**, k=4 114.1 → 83.6 µs,
-7.63e-08 vs eager, 1.13e-06 vs the CPU oracle. Then parked as item 5 behind a
-hotness-placement decision that never got a go.
+The mechanism is the 108 µs flat floor above: 7 queue submissions per dispatch
+collapse to one replay. An earlier standalone run recorded **k=1 105.1 → 75.3 µs
+(−28%)** and that number drove the roadmap. **It does not reproduce.**
 
-The mechanism is the 108 µs flat floor above: 7 queue submissions collapse to
-one replay. Priced against the trace: −29.8 µs × 48 = 1.43 ms/step gross, of
-which only the exposed 66.7% is recoverable → **~0.95 ms of 12.35 ms ≈ −7.7%
-ITL at C=1** [INFERENCE]. That is the largest remaining decode lever that is not
-speculation.
+**Re-measured 2026-08-18, `./b70_dispatch_latency int4-graph`, three runs**
+[measured-here]. Eager seven-command chain (A) vs one command-graph replay (B),
+same shape both arms, p50 µs:
 
-Two honest caveats. `docs/next-steps-88b.md` assigns graph replay to the 1.92 ms
-*host-idle* pool instead; the 7-submissions evidence points at the *window*, and
-that is the better-grounded reading — either way the arithmetic lands near 1 ms.
-And k=8 was never cleanly measured (eager and graph shared a queue, inflating the
-eager baseline to 365 µs against 188 standalone; an isolated rerun is written but
-unrun).
+| k | eager | graph | delta |
+|---:|---|---|---|
+| 1 | 50.76 / 50.16 / 50.53 | 46.46 / **54.71** / **54.53** | noise — graph *lost* 2 of 3 |
+| 4 | 58.98 / 58.57 / 59.07 | 56.17 / 56.09 / 56.31 | −2.8 µs (−4.7%) |
+| 8 | 106.98 / 106.54 / 106.74 | 102.64 / 102.58 / 102.63 | −4.2 µs (−3.9%) |
+
+The old −28% came from the contaminated run `docs/next-steps-88b.md` already
+flags — eager and graph sharing a queue, inflating the eager baseline. The real
+delta is a consistent but small ~4 µs at k=4–8, and **nothing at k=1**.
+
+Re-priced at the production shape (~5.6 of 8 routes remote at C=1, so k≈4–8):
+4 µs × 48 dispatches = 0.19 ms/step gross, × 66.7% exposed ≈ **−1.0% ITL**
+[INFERENCE]. Not −7.7%.
+
+**And it is not free.** The same run surfaces a cost nobody had recorded:
+
+```
+finalize_us = 250,000        M_contract: captured_M=1, dynamic_M=no
+required_decode_graph_buckets = 32
+reason = captured_copy_sizes_and_kernel_ranges
+projected_32_bucket_finalize_ms = 8221
+```
+
+Batch size is **baked into the captured copy sizes and kernel ranges**, so this
+is not capture-once — it is capture 32 times at ~250 ms each. **~8 seconds of
+boot for ~1% ITL.**
+
+Correctness is fine (`eager_graph_max_relative=7.63e-08`,
+`graph_cpu_max_relative=1.13e-06` against a 5e-05 bound), so the option stays
+open. It is simply no longer the top lever, and the decode ranking in §6 below
+reflects that.
 
 Feasible only because the doorbell staging buffers are **static addresses** —
 route *contents* change every step, addresses do not. Risk class is
@@ -492,9 +515,15 @@ staleness/freshness, exactly what the 200-replay oracle exists to catch.
    `linear_stream.h:84` after ~1–2k tokens (many-op graphs) to ~96k tokens. A
    doorbell firing every decode step is *exactly* this shape — sync every N
    replays or confirm a reclaiming primitive.
-2. **SLM kills capture.** Any kernel using `work_group_scratch_memory` cannot be
-   captured. **If our int4 GEMV uses SLM for its reduction it cannot enter a
-   captured graph at all** — check this first, it is a go/no-go.
+2. **SLM kills capture — CLOSED, does not apply to us** [measured-here].
+   The landmine is specific to the `work_group_scratch_memory` *extension*,
+   which is "not yet available with the SYCL Graph extension". Our kernel uses
+   classic SYCL 2020 `sycl::local_accessor`
+   (`int4_moe.sycl.cpp:60,176,277` — a `2 * kGateReductionSubgroups * kSG`
+   float scratch for the subgroup reduction), which captures fine:
+   `int4-graph` reports `graph_supported=1` and replays the real seven-command
+   chain correctly. Note `tests/xpu_graph_smoke.cpp` proves nothing here — it
+   only captures `ops::silu`, which uses no local memory.
 3. **One graph cannot span two devices.** `command_graph::begin_recording`
    rejects a second device. Dual-B70 means two graphs plus an external L0-IPC
    event or SYCL `external_semaphore`.
@@ -503,10 +532,28 @@ Plus a correctness trap: a persistent-scheduler work counter must be `at::zeros`
 not `at::empty` — SYCL does not guarantee group 0 runs first, and a dirty
 leftover becomes the starting tile index, especially under replay.
 
-**For the 122B graph replay gets *more* valuable.** Dual-card means two providers
-each paying the 7-submission floor, and host-side submission cost is serial on
-the calling thread even though the cards run concurrently. That is precisely the
-concurrent dual-card dispatch latency nobody has measured.
+**For the 122B, graph replay is the *dual-card* question, not an ITL lever.**
+Two providers each pay the 7-submission floor, and host-side submission cost is
+serial on the calling thread even though the cards run concurrently — so the
+~4 µs saving may double while the concurrent-dispatch serialization is the real
+unknown. Landmine 3 applies directly: one graph cannot span two devices, so this
+is two graphs plus an external L0-IPC event or SYCL `external_semaphore`.
+
+## Decode levers, ranked after the 2026-08-18 re-measurement
+
+| lever | expected | cost | status |
+|---|---|---|---|
+| **dual-B70 route split** | halves the remote leg → ~−1.5 ms ≈ **−12%** | on the 122B path anyway | banks built, split math proven |
+| **kernel occupancy** — gate_up exposes only 1,024 subgroups, ⅔ of the bytes | ~1.35× cap → ~0.6 ms ≈ **−5%** | real kernel work; a gate_up analogue of `down_wide` | not started |
+| **`down2`** at C≥2 | ~**−2.3%** at C=8, **zero at C=1** | ~20 min, one predicate | kernel built + exported |
+| **150 W power cap** | 8.2% throughput, same card class | free, no code | not applied |
+| **SYCL graph replay** | ~**−1.0%** | 8 s boot + 32-bucket cache | capture verified working |
+| speculation (122B native MTP) | divides the 7.45 ms CUDA floor | Phase F gates | 122B only |
+
+Graph replay was ranked first before today. It is now second-to-last. The
+re-measurement cost ten minutes and saved scheduling a mispriced lever — which
+is the campaign's own process rule (*bake off quality before speed*, and
+re-measure any number you did not take yourself) applied to our own roadmap.
 
 ## Also free, also unapplied
 
@@ -1245,10 +1292,14 @@ is touched.
    (73 GB weights text-only, 78 with MTP)?
 2. **RAM: order 2×64 GB now, or bring up on hybrid first?** Correctness does not
    care; the headline matrix does.
-3. **Does the int4 GEMV kernel use SLM for its reduction?** A yes makes SYCL
-   graph replay impossible to capture, which kills the largest remaining decode
-   lever. Cheap to check, and it should be checked before any graph work is
-   scheduled.
+3. **~~Does the int4 GEMV kernel use SLM?~~ ANSWERED 2026-08-18 — no landmine,
+   but graph replay is a ~1% lever, not ~8%.** Capture works
+   (`local_accessor`, not the blocked extension; `graph_supported=1`, replay
+   numerically clean). The old −28% figure does not reproduce: the real delta
+   is ~4 µs at k=4–8 and *nothing* at k=1, and finalize costs ~8 s of boot
+   across 32 M-buckets. Re-ranked to second-to-last in §6. **The live question
+   this replaces: schedule the dual-B70 route split and the gate_up occupancy
+   work instead — they are now the top two decode levers.**
 4. **`down2` — land it now?** Twenty minutes, +6–7% on the B70 leg at C≥2, zero
    at C=1. Best folded into whatever change next touches `issue()`.
 5. **Marlin roofline against the sm_120 bf16 tensor-core ceiling.** Cheap,

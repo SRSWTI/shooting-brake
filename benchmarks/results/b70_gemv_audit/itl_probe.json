@@ -394,5 +394,41 @@
    "active_median": 2800,
    "idle_fraction": 0.0
   }
+ },
+ {
+  "label": "kv37_regression",
+  "n": 4,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 11.704941990880494,
+  "ttft_s_mean_excl_first": 0.2926344336689605,
+  "requests": [
+   {
+    "ttft_s": 0.3041577359981602,
+    "itl_ms": 11.818492667998726,
+    "chunks": 257
+   },
+   {
+    "ttft_s": 0.29268985900853295,
+    "itl_ms": 11.6998890429727,
+    "chunks": 257
+   },
+   {
+    "ttft_s": 0.29292285899282433,
+    "itl_ms": 11.716197425755581,
+    "chunks": 257
+   },
+   {
+    "ttft_s": 0.29229058300552424,
+    "itl_ms": 11.698739503913202,
+    "chunks": 257
+   }
+  ],
+  "act_freq": {
+   "samples": 256,
+   "active_min": 2383,
+   "active_max": 2800,
+   "active_median": 2800,
+   "idle_fraction": 0.004
+  }
  }
 ]

@@ -1,0 +1,71 @@
+{
+ "date": "2026-08-18",
+ "question": "does the recovered doorbell XPU host registration reproduce the -1.8% ITL on the rebuilt binary?",
+ "commit": "1b7b8259 (restores work lost with the dual-provider rollback; c7998c6f committed zero src files)",
+ "config": "serve_88b_128k.sh, BANK_REGISTER=1, --kv-cache-memory=2900000000 (209,715 KV tokens, 1.60x), B70_MAX_BATCH=256, ZE_AFFINITY_MASK=1 (Gen4), same binary both arms, flag-toggled boots",
+ "probe": "benchmarks/b70_itl_probe.py, 128-in/256-out C=1, 4 runs/arm, warm 2x18,610-token prefills, PSI avg10 < 0.1",
+ "arms": {
+  "off": {
+   "runs": [
+    12.179857640626087,
+    12.132830703124617,
+    12.094116342447355,
+    11.931059790364648
+   ],
+   "mean_ms": 12.084
+  },
+  "on": {
+   "runs": [
+    11.923536180989439,
+    11.919160471353033,
+    11.89873857161435,
+    11.910758447918113
+   ],
+   "mean_ms": 11.913
+  }
+ },
+ "delta_ms": -0.171,
+ "delta_pct": -1.42,
+ "arm_overlap": "none (max ON 11.924 < min OFF 11.931)",
+ "recorded_2026_08_17": {
+  "off_mean": 11.916,
+  "on_mean": 11.705,
+  "delta_pct": -1.77
+ },
+ "verdict": "REPRODUCED. -1.42% vs the recorded -1.77%, same direction, zero arm overlap. Both arms sit ~0.17 ms above the 2026-08-17 absolutes (heavier desktop VRAM/CPU load today; the OOM at kv=3.7e9 that forced the fallback to 2.9e9 is the same cause). Registration also collapses run-to-run spread: ON 0.025 ms vs OFF 0.249 ms.",
+ "collateral_confirmations": {
+  "graph_aggregation_oracle_200_cycles": {
+   "worst_abs": 2.153683453798294e-09,
+   "min_discrimination_ratio": 1152510.4,
+   "combine_exact_failures": 0,
+   "note": "bit-identical to the recorded gate, both flag arms"
+  },
+  "membw_gbps": {
+   "measured": 599.635,
+   "recorded": 599.2
+  },
+  "int4_moe_M1_us": {
+   "measured_sustained": 48.57,
+   "roofline_pct": 65.9,
+   "recorded": 47.9,
+   "recorded_pct": 68
+  },
+  "int4_moe_M8_us": {
+   "measured": 298.7,
+   "roofline_pct": 85.7,
+   "recorded": 295.9,
+   "recorded_pct": 88
+  },
+  "dispatch_latency_180us_gap_us": {
+   "cudaHostAlloc": 20.06,
+   "cudaHostAlloc_plus_reg": 17.32
+  },
+  "prefill_18610_tok_s": [
+   3.24,
+   3.09,
+   3.08,
+   3.0
+  ],
+  "kv_tokens_at_3.7e9": 269633
+ }
+}

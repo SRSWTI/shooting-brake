@@ -25,6 +25,80 @@ steady-state free VRAM 1,577 MiB; a C=10 + 8K-prefill burst peaks only
   (hybrid mamba page coupling) — a vLLM-geometry change, parked with the
   SGLang capacity-solve reference as the map.
 
+## DISCUSSION GATE: 122B — scout synthesis before execution
+
+**Status:** research is complete; the serving experiment is **not** complete.
+Do not boot, benchmark, enable MTP, or call the dual-B70 path production-ready
+until the operator chooses the four decisions below. A dual-provider
+implementation was started in the working tree after “continue working,” but
+it is uncommitted and has not passed the real two-card smoke or a vLLM boot.
+Treat it as a reviewable draft, not a shipped result.
+
+### What the five scouts actually established
+
+| Scout / evidence | Established | Did **not** establish |
+|---|---|---|
+| `DualDeviceL0` + `b70_multi_topology` | One process can own two independent per-device SYCL contexts/queues. Our correct topology is a 5090 hub with no B70↔B70 edge and no oneCCL. Both B70s share the 09:00.0 Gen4 x4 upstream link; bandwidth traffic degrades to 4.53 GB/s aggregate, but doorbell payloads are too small for that to price decode by itself. | Concurrent two-card doorbell latency, graph replay, and full-vLLM stability. |
+| `CompressedTensorsPath` | The 122B dense checkpoint is loadable in principle on sm_120: layers 0–46 routed experts are calibrated W4A4, layer 47 is FP8 W8A8, attention/dense groups are FP8, and the W4A4 shared expert is a dense module outside `RoutedExperts`. The mixed quant groups resolve per layer. | A successful 122B load in our plugin, NaN-free output, or the final 5090 VRAM footprint. |
+| `MtpLoadContract` + `XpuMtpEvidence` | The checkpoint really contains 785 `mtp.*` tensors. vLLM's native Qwen3.5 MTP path is selected with `method=mtp`; no separately named draft model is required. The plugin's class-wide routed-expert surgery would also see the MTP MoE unless `mtp.` is explicitly exempted. Intel's field data strongly favors a BF16 MTP head over a quantized head. | Acceptance rate, rollback correctness on this exact checkpoint, ITL gain, or stability beyond speculative length 2. |
+| `W4a4KernelMap` | Calibrated `input_global_scale` is consumed by the normal FlashInfer-CUTLASS/vLLM-CUTLASS W4A4 paths already installed. No FlashInfer upgrade is required for the standard path. The specific B12x wrapper still hardcodes one input scale and needs a private low-level launch to use per-expert scales. | That B12x remains 2.6× faster after the calibrated-scale integration, or that its end-to-end quality passes. |
+| `ProSerdeNotes` | No published single-RTX-PRO-6000 122B baseline exists in the checked vendor tree. The available 122B recipes use 2×96 GB cards. The operator's single-card run is therefore the first relevant baseline. A sibling SGLang compressed-tensors load produced NaNs; that is a named gate, not proof vLLM fails. | Single-card KV capacity, TTFT/ITL, or whether stock vLLM fits the desired context on 96 GB. |
+
+### New source-level constraint the scouts missed
+
+The current CUDA partial always executes and masks remote routes through a real
+local dummy slot. `validate_cuda_dummy_slot_placement()` therefore rejects
+**zero CUDA experts**. The lowest-risk first boot is not 128/128/all-remote:
+it is **128 experts on B70 index 0, 127 on B70 index 1, and expert 255 local
+on the 5090** (`fractional:2:0.00390625`). This costs only about one expert
+across 48 layers (~0.25 GB order of magnitude) and keeps the proven fused-CUDA
+path intact. True all-remote-256 requires a separate no-CUDA fast path and
+must be priced as implementation work, not assumed.
+
+### Decisions to make together
+
+1. **First-boot placement — RECOMMENDED: 255 remote / 1 local.**
+   It preserves the current local-partial invariant and de-risks the boot.
+   Alternative: implement and review a zero-local CUDA bypass before any
+   model load, solely to recover roughly one expert's VRAM.
+2. **First-boot bank — RECOMMENDED: existing GPTQ-int4 split banks.**
+   They are built, bit-exact against the first-party GPTQ checkpoint, and the
+   monolithic Marlin prefill bank is built. NVFP4-native measured +18% at the
+   eight-pair decode shape and remains the optimization favorite, but its
+   compressed-tensors extractor, two-layer quality gate, full split banks,
+   and Marlin bank are separate work. Do not mix an NVFP4 prefill bank with
+   an int4 decode bank inside one request.
+3. **Host RAM — RECOMMENDED: bring up pageable/hybrid first; buy 2×64 GB
+   before the performance campaign.** Today's 63 GB can prove correctness,
+   decode, MTP, and capacity, but cannot keep the 59.8 GB prefill bank pinned
+   beside the server. Measured hybrid is viable at ~3.2–4.0 s/pass; 128 GB
+   restores the ~1.03 s/pass all-hot floor. Avoid 4-DIMM 96 GB because the
+   AM5 down-clock attacks the exact bandwidth the streamer buys.
+4. **Baseline order — RECOMMENDED: operator runs the PRO first.**
+   Record weight footprint, explicit KV tokens/seats, max context, C=1
+   TTFT/ITL, and whether 262K fits before optimizing our side. If the
+   checkpoint plus useful KV does not fit one 96 GB card, that capacity
+   result is part of the comparison rather than a failed benchmark.
+
+### Ordered work after the decisions
+
+1. Review the uncommitted dual-provider draft against the chosen placement;
+   production selectors must be explicit PCI BDFs
+   (`0000:15:00.0` Gen4, `0000:11:00.0` Gen3), never enumeration indices or
+   process-wide `ZE_AFFINITY_MASK`.
+2. Run the real two-bank/two-card standalone gate: both loads, both signals
+   issued before either wait, independent partials, summed CPU oracle,
+   sentinel cross-card isolation, 200 replays, and concurrent latency.
+3. Only after that gate passes, first vLLM boot with MTP off,
+   `BANK_REGISTER=0`, a conservative explicit KV allocation, load-count
+   audit, and first-forward NaN/logprob checks.
+4. Run greedy/logprob parity against the operator's PRO output, then the
+   128-token ITL probe and 8K/32K TTFT cells. Do not start the GuideLLM
+   matrix until those gates pass.
+5. Enable native MTP last: preserve/side-load the BF16 head, cap speculative
+   length at 2, and gate acceptance rate, rejection rollback, logprobs, and
+   retokenized ITL before reading throughput.
+
 ## PLANNED: 122B bring-up (unsloth/Qwen3.5-122B-A10B-NVFP4, already plugin-qualified)
 
 Config verified on disk: **attention/GDN geometry is field-for-field
@@ -97,6 +171,100 @@ unchanged: 2×64 GB DDR5-6000 (avoid 4-DIMM 96 GB — AM5 down-clock risk on
 the exact bandwidth being purchased). Hybrid is the honest interim: the
 122B can bring up and serve on today's RAM at ~3.2–4 s/pass prefill,
 with decode + capacity + MTP unaffected.
+
+### 122B EXECUTION PLAN — de-risked by five scouts + the trunk bench (2026-08-17)
+
+Banks BUILT and gated (see commit d74c785a): dev0/dev1 splits bit-exact,
+Marlin bank bit-exact, pilot planes served on B70 silicon at rel 4.8e-07.
+Scout transcripts: `history://DualDeviceL0`, `://CompressedTensorsPath`,
+`://MtpLoadContract`, `://W4a4KernelMap`, `://ProSerdeNotes`.
+
+**Trunk saturation MEASURED** (`b70_gemv_audit/trunk_saturation.json`):
+5090 registered DMA + 2-thread NVMe O_DIRECT + B70 doorbell loop all
+concurrent → H2D 57.7→54.8 GB/s (−5%), NVMe 6.39→6.22 (−2.5%), doorbell
+87→89 µs median (+2%). **The shared trunk holds the full hybrid dataflow;
+contention risk retired.** Doorbell 87 µs tight-loop corroborates the
+94.3 µs production trace window.
+
+**Topology fact that shapes dual-card decode:** both B70s share ONE
+upstream Gen4 x4 link (09:00.0). Measured (b70_multi_topology): B70-A
+alone 6.24 GB/s, both concurrent 4.53 aggregate — the shared uplink
+DEGRADES under bandwidth load. Doorbell payloads are tiny (~1.7 MB/step
+total) so bandwidth is irrelevant, but **concurrent dual-card dispatch
+LATENCY is the one unmeasured number left** — first bench after the ABI
+lands. B70↔B70 communication: NONE by design (star through the 5090);
+oneCCL rejected — the vendor dual-B70 journal's TP=2 wedge catalogue
+(GP-faults, BCS engine resets, zeMemOpenIpcHandle failures, kernel-7.1
+cure) is structurally inapplicable to a topology with zero cross-card
+edges.
+
+**Phase A — dual-B70 foundation**
+1. Extend the C ABI with `device_selector` (string; `select_b70()` at
+   `b70_provider.cpp:226-321` already implements index/BDF selection;
+   each provider gets its own implicit per-device SYCL context —
+   code-verified safe). POLICY: always PCI BDF strings
+   (`0000:15:00.0` dev0 / `0000:11:00.0` dev1), never indices — L0
+   enumeration order put the Gen3 card at index 0 and cost 40% for weeks.
+2. Dual-card smoke (`experiments/b70_dual_card_smoke.py`, written, blocked
+   on 1): both banks, parallel dispatch, summed partials vs oracle; add
+   the concurrent-dispatch-latency measurement on the shared uplink.
+3. Plugin wiring: provider-per-card + two slot maps (from the banks'
+   `source_expert_ids`) + flags/staging ×2 (copy the CPU-tier pattern,
+   routed_experts.py:1068) + poller-per-card (`get_b70_poller` singleton
+   → keyed instances) + graph path: write both signals, wait both
+   completions, sum partials. Marlin prefill unchanged (monolithic bank).
+   Register staging with BOTH device contexts (prepare_for_device_copy is
+   context-scoped; two-context registration is flagged untested — smoke
+   it in 2).
+4. Tier-3 standalone replay gate (200-replay style) before any boot.
+
+**Phase B — first serve**
+5. Placement all-remote-256 (0 local) first: 5090 keeps dense ~8 GB +
+   MTP experts 1.4 GB → ~17 GB KV ≈ 5.3 seats @262K. Compressed-tensors
+   resolution is sm_120-clean per scout: W4A4 → FlashInferCutlass/CUTLASS
+   fp4 (family(120) passes), FP8 groups → Cutlass FP8; per-layer
+   heterogeneity (layer-47 FP8 experts) resolves per-prefix; the W4A4
+   shared expert is dense LinearBase — surgery never touches it.
+6. First boot: MTP OFF, `BANK_REGISTER=0` (pageable path — no RAM
+   dependency), explicit --kv-cache-memory after seeing the dense
+   footprint. **Named crash-class to gate:** SGLang's compressed-tensors
+   loader left 45/60 hybrid-GDN attention layers uninitialized → 100%
+   NaN on the 397B sibling (untested on vLLM) — boot with a weight-load
+   count audit + first-forward NaN probe. Useful 397B-proven vLLM flags:
+   `VLLM_NVFP4_GEMM_BACKEND=cutlass`; driver 590.48+/CUDA 13 ✓.
+7. Quality gate: greedy + logprob envelope, cross-referenced against the
+   operator's PRO 122B baseline (same checkpoint, stock vLLM — and the
+   community has NO single-card 122B numbers; both baselines are firsts).
+
+**Phase C — numbers**
+8. ITL probe (dual-card decode headline), TTFT 8K/32K, act_freq both
+   cards; then the GuideLLM matrix vs the PRO baseline, plus 262K cells.
+
+**Phase D — multipliers**
+9. **MTP** (`--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`
+   — no draft model path; N=2 re-invokes the single MTP layer; MTP=2 is
+   the 397B-proven vLLM sweet spot, MTP>3 crashes). **REQUIRED plugin fix
+   first:** the MTP block's MoE constructs through the same
+   `RoutedExperts` pluggable layer our surgery hook intercepts, keyed on
+   class name with NO prefix filter — an unguarded boot would strip the
+   draft head's experts. Add an `mtp.` prefix exemption. **BF16 draft
+   head** (+36% vs +3% quantized, Intel field notes): the GPTQ
+   checkpoint's mtp.* tensors are already BF16 — side-load them (or the
+   Intel null-quant-config gate) instead of the NVFP4's W4A4 MTP planes.
+10. **W4A4 prefill re-arm — NO flashinfer upgrade needed** for the
+   standard path: vLLM's CUTLASS NVFP4 MoE consumes the calibrated
+   `a1_gscale` today and is already the selected backend
+   (`freeze.yaml: FLASHINFER_CUTLASS (nvfp4)`). The B12x 2.6× kernel
+   specifically stays API-blocked in 0.6.16.post3 (`input_gs=w1_alpha`
+   hardcoded, moe_dispatch.py:2700/2723) — but the low-level kernels
+   accept per-expert `input_global_scale`, so a private-API bypass
+   (`launch_sm120_static_moe` direct) is available without a version
+   bump. Only MARLIN forces weight-only; every other backend threads
+   calibrated scales.
+11. Hybrid pinning (35–40 GB hot) or full pin after the RAM decision;
+   stream-once/Tier-A (32K chunks) returns specifically for hybrid mode
+   (4× fewer passes = 4× less NVMe re-read; routing-selective fetch can
+   NEVER save prefill bytes — 8K tokens × top-8 touches all 256 experts).
 
 
 ## SHIPPED: run6 — full PRO-matched smoke matrix; 4 outright wins
@@ -264,7 +432,7 @@ own prefill re-ramps it before decode starts. **DVFS is a microbenchmark
 hazard, not a serving lever at C=1.** (Untested: whether very low-QPS
 multi-second-gap traffic at higher concurrency ever exposes it.)
 
-## SHIPPED: doorbell XPU host registration — ITL 11.92 → 11.71 ms (−1.8%)
+## SHIPPED (lost, then recovered 2026-08-18): doorbell XPU host registration — ITL −1.4 to −1.8%
 
 Decode lever ② from the audit, landed same day. The doorbell staging
 buffers (`routed_experts.py` `_b70_pinned_hidden`/`_pinned_b70_ids`/
@@ -308,6 +476,62 @@ earlier shell experiment leaked into a serve relaunch and silently loaded
 the bank onto the **Gen3** B70 (the serve script honors caller values).
 Caught by the operator watching nvtop. Relaunches must scrub the env
 (`env -u ZE_AFFINITY_MASK`) or use a fresh shell.
+
+### 2026-08-18: this change was NOT in the tree, and has been recovered
+
+`c7998c6f` above committed the docs, `itl_probe.json` and the
+`b70_dispatch_latency.cpp` `+reg` arms — and **zero files under `src/`**.
+The production wiring only ever existed in a working tree and died in the
+rollback to the single-B70 baseline. At `d74c785a`, `grep
+register_host_range` over `src/` returned nothing and the built
+`libsb_b70_provider.so` exported 52 symbols with no registration entry
+point, so every ITL figure served from that tree was the **flag-off**
+arm. `experiments/b70_xpu_register_smoke.py` survived but was inert: it
+set an env var nothing read.
+
+Restored in `1b7b8259` from the three verbatim edit-tool calls in the
+session JSONL, replayed as a patch against `d66fb0ea` and applied with
+offsets only. It does not collide with `bf378987`'s trace ring
+(registration touches the includes, a `provider()` accessor and the body
+of `sb_b70_poll_register`; the ring touches `TraceEntry`, the poll loop
+and `trace_snapshot`) — **that commit is the first tree to carry both.**
+
+Re-measured on the rebuilt binary rather than inherited
+(`benchmarks/results/xpu_register_ab/AB_SUMMARY.json`; same config both
+arms, `--kv-cache-memory=2.9e9`, warm 2×18,610-token prefills, PSI
+avg10 < 0.1, 4 probes/arm):
+
+| arm | runs (ms) | mean |
+|---|---|---|
+| OFF | 12.180 / 12.133 / 12.094 / 11.931 | 12.084 |
+| ON | 11.924 / 11.919 / 11.899 / 11.911 | **11.913** |
+
+**−1.42% reproduced** (recorded: −1.77%), zero arm overlap. Two things
+the original entry missed: registration also collapses run-to-run spread
+(ON 0.025 ms vs OFF 0.249 ms), and the boot logs **zero** "XPU host
+registration unavailable" warnings, so all 48 layers × 4 buffers land.
+
+Both arms sit ~0.17 ms above the 2026-08-17 absolutes. Cause found, and
+it matters for the 122B budget: gnome-remote-desktop now holds 504 MiB of
+5090 VRAM that run6 did not have. The first boot at
+`--kv-cache-memory=3.7e9` OOM'd on an 8K prefill **by 2 MiB**, which is
+the 841 MiB headroom in the KV-recovery entry spent on desktop VRAM. The
+3.7e9 recipe is not wrong; it has no margin against a changing desktop.
+
+Everything else re-confirmed against this build the same day: graph
+aggregation oracle 200 replays bit-identical to the recorded gate
+(worst 2.153683453798294e-09, discrimination 1,152,510×, 0 non-exact
+combines) on **both** flag arms; `membw` 599.635 GB/s (rec. 599.2);
+int4 MoE M=1 sustained 48.57 µs / 65.9% (rec. 47.9 / 68%); M=8 298.7 µs /
+85.7% (rec. 295.9 / 88%); dispatch `+reg` 20.06 → 17.32 µs at the 180 µs
+duty cycle; KV 269,633 tokens at 3.7e9; pytest 6/6, placement 30/30,
+int4-hybrid enablement 9/9. Two suites are unrunnable for missing
+artifacts, not code: `int4_bank_roundtrip_test.py` needs the 88B GPTQ
+source checkpoint (evicted from the HF cache; the bank remains) and
+`phase5/placement_test.py` wants the pre-int4 `expert_bank.bin`.
+
+Process rule earned: a commit whose message describes a `src/` change
+must contain one. Check `git show --name-only` before writing "SHIPPED".
 
 ## MEASURED: decode overlap trace — the max() question ANSWERED, presumption overturned
 

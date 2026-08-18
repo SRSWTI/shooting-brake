@@ -1,0 +1,23 @@
+{
+ "date": "2026-08-17",
+ "question": "does the shared trunk (host DRAM + root complex) sustain the full 122B hybrid dataflow?",
+ "conditions": "88B production server resident (idle) throughout; idle Gen3 B70 for doorbell arm; 122B GPTQ blobs as NVMe source",
+ "solo": {
+  "h2d_5090_gbs": 57.7,
+  "nvme_odirect2_gbs": 6.39,
+  "doorbell_m1k6_us": {
+   "median": 87,
+   "p95": 89
+  }
+ },
+ "concurrent_all_three": {
+  "h2d_gbs": 54.8,
+  "nvme_gbs": 6.22,
+  "doorbell_us": {
+   "median": 89,
+   "p95": 91
+  },
+  "aggregate_dram_side_gbs": 61.5
+ },
+ "verdict": "TRUNK HOLDS: <=5% per-link degradation with 5090 registered DMA + 2-thread NVMe O_DIRECT + B70 doorbell loop simultaneous. Hybrid-mode contention risk retired. Doorbell 87us tight-loop corroborates the 94.3us production trace window. Remaining: dual-card concurrent doorbell latency on the shared 09:00.0 uplink (needs C-ABI device selection first)."
+}

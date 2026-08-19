@@ -1136,3 +1136,62 @@ half costs 0.999x of cold, and the server reports `Prefix cache hit rate:
 **Every request pays full prefill, permanently.** At ~1,790 µs/token an 8K
 system prompt costs ~14.5 s on *every* call. This raises the value of prefill
 work and removes the usual "amortise it with caching" escape.
+
+### 11. Long context to 110K (MML 131072, prose+code corpus)
+
+| prompt tokens | TTFT | µs/token | ITL |
+|---|---|---|---|
+| 24,614 | 43.8 s | 1,780 | 14.69 ms |
+| 33,931 | 60.7 s | 1,788 | 14.79 ms |
+| 67,738 | 123.4 s | 1,822 | 15.45 ms |
+| **110,372** | **206.0 s** | 1,866 | **16.13 ms** |
+
+KV pool 14.1 GiB, **max concurrency 4.44x for 131,072-token requests**
+(~582K KV tokens). Prefill µs/token rises only **4.8%** over a 4.5x token
+range, so the quadratic attention term is ~5.9% of prefill even at 110K —
+**MoE dispatch dominates at every context length we can serve.** Decode is
+*not* flat here: ITL climbs 14.69 -> 16.13 ms (**+9.8%**), the first
+context-dependent decode cost measured on this rig.
+
+Long-context concurrency (prose, out=64): C=1 0.72 -> C=2 1.45 -> C=4 2.14
+aggregate tok/s. Unlike the 8K surface (flat 4.03 -> 4.14), concurrency does
+buy throughput once prefill chunks from several requests pack the 2048-token
+MNBT budget.
+
+A 110K request costs **206 s of TTFT with no prefix cache to amortise it**
+(§10). That is the production headline, not decode.
+
+### 12. Decode is 5090-bound, and the 88B regression is the gap
+
+The trace reconstructs ITL exactly: `48 x 64 µs service + 47 x 211 µs gap =
+12.99 ms`, matching the measured 48-layer sweep p50 of 12.99 ms, with
+1.24 ms outside the sweep (embed, lm_head, sample, scheduler).
+
+| component | ms | share of 14.23 ms ITL |
+|---|---|---|
+| B70 dispatch service | 3.07 | **21.6%** |
+| 5090-side inter-dispatch gap | 9.92 | **69.7%** |
+| non-sweep remainder | 1.24 | 8.7% |
+
+**An infinitely fast B70 buys 21.6%**, landing at 11.16 ms — i.e. roughly the
+88B's 11.51 ms. Chasing the doorbell is chasing a fifth of decode.
+
+The 88B runs **one** lane at a 142 µs gap; the 99B runs **two** at 211 µs.
+That 69 µs/layer excess is 3.24 ms over 47 layers, which is **119% of the
+observed 2.72 ms ITL regression** — the entire decode gap between the models
+is accounted for by inter-dispatch time, and the 99B is marginally faster
+than the 88B everywhere else. `[INFERENCE]` that the excess is the second
+lane's issue/wait cost; isolating it needs a one-card 99B, which does not fit
+(204 experts x 48 layers = 48.4 GiB > 31.85 GiB VRAM).
+
+### 13. What this campaign changed
+
+- **Dead:** `B70_MAX_BATCH` (-1.17%), static asymmetric split (+0.03% on
+  prose, -6.43% if tuned on synthetic), 5090-side streaming prefill of any
+  kernel (host-RAM wall, §8).
+- **Alive, sized:** per-layer route-aware placement (+7.80%, needs a provider
+  ABI change), the 5090 inter-dispatch gap (69.7% of decode), and shrinking
+  B70 residency (frees host RAM 1:1, the only thing that reopens §8).
+- **Reframed:** prefill is the product problem (206 s at 110K, no caching),
+  decode is within 24% of the 88B and structurally capped at 11.16 ms by the
+  5090 leg.

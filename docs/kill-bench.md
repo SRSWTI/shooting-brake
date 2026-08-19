@@ -905,9 +905,9 @@ is written for it.
     - Resident-subset loads off one mmap: 22–28 s/card. **No per-split
       bank rebuilds exist in the NVFP4 world** — the half-day-per-arm
       bank tax was an SBINT401-ism. Bench 12's sweep just got cheap.
-  - **What this does NOT establish:** full-vLLM stability with two lanes,
-    per-card achieved GB/s at the production k≈2.8 split (Bench 14's
-    latency-bound risk), or any ITL claim. Those wait on the first boot.
+  - **What this does NOT establish:** normal full-vLLM graph capture,
+    graph-mode KV capacity, or any serving ITL claim. The production 99B
+    placement is ~3.98 routes/card at M=1, not the old 2.8 estimate.
 
 ## Bench 16 — sm_120 W4A4 MoE backend qualification (the 99B first boot)
 
@@ -929,25 +929,29 @@ is written for it.
      `mtp_num_hidden_layers: 1` — MTP for the 99B requires a side-loaded
      head or stays off.
 - **The sm_120 kernel findings, each [measured-here] on 2026-08-19:**
-  1. **FlashInfer `FLASHINFER_CUTLASS` MoE autotuning wedges the GPU:**
-     the first `trtllm::fused_moe::gemm1` tuner profile ran **25+ minutes
-     at 100% GPU utilization without completing** (py-spy: engine parked
-     in `stream.synchronize()` inside `autotuner.choose_one`; log frozen
-     at 0/21 profiles). trtllm-gen tactics target datacenter Blackwell
-     (sm_100); this is consumer sm_120. Killing the process recovered the
-     driver cleanly — no reset, no Xid.
+  1. **FlashInfer `FLASHINFER_CUTLASS` MoE autotuning wedges this exact
+     configuration:** the first `trtllm::fused_moe::gemm1` tuner profile ran
+     **25+ minutes at 100% GPU utilization without completing**
+     (py-spy: engine parked in `stream.synchronize()` inside
+     `autotuner.choose_one`; log frozen at 0/21 profiles). The operator name
+     does **not** prove an sm_100-only binary: FlashInfer 0.6.16.post3 has a
+     distinct `gen_cutlass_fused_moe_sm120_module`. The failure is an
+     observed tactic/autotuner bug on this shape, not a justified
+     architecture attribution.
   2. **`VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS="trtllm::fused_moe::gemm1,
      trtllm::fused_moe::gemm2"` bypasses the sweep** — full autotune then
-     completes in **19 s** (84 configs, cached on disk). But the untuned
-     heuristic fallback tactic then **faults with `CUDA misaligned
-     address`** ~40 layers into the profile pass. Same kernel family,
-     second failure mode. FlashInfer MoE on sm_120 is OUT for this
-     vllm/flashinfer version (0.27.1 / 0.6.16.post3) — in both modes.
-     File upstream; re-qualify on version bumps. FlashInfer's fp4_gemm
-     LINEAR tactics are fine (21/21 profiles, sub-second).
-  3. **`moe_backend="cutlass"` (vLLM in-tree `CutlassExpertsFp4`) WORKS**
-     and is the serving default (`benchmarks/serve_99b_dual.sh`).
-  4. **Our latent dtype bug, exposed by the stricter consumer:**
+     completes in **19 s** (84 configs, cached on disk). But that backend's
+     untuned heuristic tactic faults with `CUDA misaligned address` ~40
+     layers into the profile pass. `FLASHINFER_CUTLASS` is therefore OUT for
+     this model/shape on vLLM 0.27.1 + FlashInfer 0.6.16.post3.
+  3. This does **not** mean every FlashInfer NVFP4 backend is broken.
+     `FLASHINFER_CUTEDSL` is source-gated to SM100/SM103 and is not a 5090
+     candidate. `FLASHINFER_B12X` is a separate SM120/SM121 CuTe-DSL kernel
+     with CUDA-graph workspaces; it is installed but unqualified against the
+     plugin's one-expert compact allocation and must be an isolated later A/B.
+  4. **`moe_backend="cutlass"` (vLLM in-tree `CutlassExpertsFp4`) WORKS**
+     and remains the serving baseline (`benchmarks/serve_99b_dual.sh`).
+  5. **Our latent dtype bug, exposed by the stricter consumer:**
      `compact_cuda_routes` widened router ids to int64 via its `long`
      remap; Marlin (88B) and FlashInfer tolerated it, vLLM CUTLASS's
      stable-ABI wrapper type-checks `Int` and threw. Fixed at the source —
@@ -956,16 +960,179 @@ is written for it.
   - Greedy: "The integer after 41 is" → " 42.\n\nTo find the next
     integer after 41, simply"; "Water is composed of hydrogen and" →
     " oxygen in a fixed mass ratio of 1:8…". Logprobs finite.
-  - Doorbell trace: **3,599 dispatches across both cards**, decode M=2
-    reaching layer 46 — prefill (chunked M=256) and decode both flowed
-    through the dual doorbell inside vLLM.
-  - Surgery: 48/48 layers compacted (10.4 GiB CUDA weights);
-    KV sized **14.04 GiB = 341,723 tokens** at gpu_util 0.85 — the
-    capacity payoff of the 1-local/204-remote placement.
+  - Doorbell trace: the surviving file contains **3,599 entries from one
+    poller** (M=256 prefill chunks, M=7 profile traffic, M=2 decode across all
+    48 layers). Both pollers wrote the same path and atomically replaced it,
+    so this artifact is not a merged two-card dispatch count.
+  - Surgery: 48/48 layers compacted (10.4 GiB CUDA weights). Eager-mode KV
+    sized **14.04 GiB = 341,723 tokens** at gpu_util 0.85 with **0 GiB
+    CUDA-graph memory**; graph-mode capacity remains unmeasured.
   - Instrument note: FlashInfer's cold autotune + the trtllm hang is what
     the earlier "40-minute boot" was doing. Autotune results now cached;
     subsequent boots skip it.
-- **NOT yet established:** graph-mode (non-eager) boot, ITL vs the 88B's
-  11.51 ms, per-card achieved GB/s, prefill numbers (Marlin-less chunked
-  dispatch is the interim), long-context stability. Next steps in
-  `docs/superveloce-99b-dual-b70.md`.
+- **NOT yet established:** graph-mode boot, 99B ITL/TTFT/throughput,
+  graph-mode KV capacity, per-device production traces, or long-context
+  stability. Next steps are in `docs/superveloce-99b-dual-b70.md`.
+
+## Bench 17 — 99B graph-mode characterisation campaign (2026-08-19)
+
+- **Not a single bench** — the measurement pass taken *before* choosing a
+  prefill lever, because two of the three levers we had ranked turned out to
+  be artifacts. Instruments: `benchmarks/b70_prefill_cost.py`,
+  `benchmarks/b70_matrix_probe.py`, `experiments/b70_mem_topology_probe.cpp`.
+  Artifacts: `benchmarks/results/b70_gemv_audit/99b_matrix_even.json`,
+  `99b_matrix_swap.json`, `99b_matrix_corpus.json`, `99b_prefill_cost.json`,
+  `99b_prefill_ladder.json`.
+- Arm for every number below: `benchmarks/serve_99b_dual.sh` as written
+  (graph `doorbell` arm, `--moe-backend cutlass`, MML 32768, MNBT 2048,
+  MNS 4, `MAX_BATCH=256`, placement `fractional:2:1/205`), unless stated.
+
+### 1. Prefill is linear and B70-bound
+
+| prompt tokens | TTFT | µs/token |
+|---|---|---|
+| 1,027 | 1.884 s | 1,835 |
+| 4,081 | 7.478 s | 1,833 |
+| 8,173 | 14.992 s | 1,834 |
+| 16,414 | 30.315 s | 1,847 |
+| 30,020 | 55.885 s | 1,862 |
+| 31,290 | 57.3 s | 1,831 |
+
+Linear across a 60x range: **no attention superlinearity up to 31K**. B70
+service is **86-92%** of TTFT. Chunked-dispatch service fits
+`service(M) = a + b*M` to within **0.03%** at M=256, with a = 43-121 µs and
+b = 27.1-34.8 µs/token.
+
+### 2. `B70_MAX_BATCH` is dead — measured, not argued
+
+Fixed cost is **1.34%** of service at M=256, so the whole chunk-count term is
+worth at most that. Modelled 8K B70 service: 13.874 s at C=256 vs 13.712 s at
+C=2048 = **-1.17%**. Retracted as a lever.
+
+### 3. Decode is flat in context, and the gap is the story
+
+ITL at C=1 across 1K -> 30K context: 14.30 / 14.55 / 13.97 / 14.00 / 14.06 /
+14.20 / 14.39 ms. **KV size costs decode nothing.** Clean 4-run probe:
+**14.23 ms** mean (88B production: 11.51 ms). Of that, the 48-layer B70 sweep
+is **12.86-12.99 ms** and the inter-dispatch gap is **207-213 µs**; at M=1
+the two cards are symmetric (**63.8 vs 64.1 µs**).
+
+### 4. Concurrency saturates almost immediately
+
+| ctx | C=1 | C=2 | C=4 |
+|---|---|---|---|
+| 1K TTFT / ITL / agg tok/s | 1.88 s / 14.55 ms / 21.8 | 3.54 s / 17.32 ms / 26.5 | 7.39 s / 22.08 ms / 28.6 |
+| 8K TTFT / ITL / agg tok/s | 14.99 s / 14.06 ms / 4.03 | 26.25 s / 17.66 ms / 4.05 | 41.02 s / 22.84 ms / 4.14 |
+
+At 8K aggregate throughput is **flat** (4.03 -> 4.14): prefill owns the box.
+
+### 5. Transport, measured per card (`b70_mem_topology_probe`)
+
+| card | H2D | D2H | clock under load | power |
+|---|---|---|---|---|
+| `0000:15:00.0` | **6.470 GB/s** | 6.583 | 2,633 MHz | 218.6 W |
+| `0000:11:00.0` | **3.229 GB/s** | 3.291 | 2,550 MHz | 229.0 W |
+
+Ratio **2.004x** — Gen4 x4 vs Gen3 x4. Concurrent both-card H2D aggregates
+**6.440 GB/s**, below the 9.70 sum: the shared uplink contends. sysfs is
+useless for this — both cards report `2.5 GT/s x1` at idle *and* under
+sustained load, and `max_link_speed` also reads Gen1 x1.
+
+### 6. Card vs expert-range: a 2x2 that changed the plan
+
+Swapping `SHOOTING_BRAKE_B70_SELECTORS` moves an expert range to the other
+card. Per-token cost at M=256:
+
+| | on Gen4 | on Gen3 | card penalty |
+|---|---|---|---|
+| experts [1..102] | 27.15 µs | 29.54 µs | 1.088x |
+| experts [103..204] | 33.03 µs | 35.34 µs | 1.070x |
+| **range penalty** | **1.216x** | **1.196x** | |
+
+PCIe generation costs **~8%** (transport 6.9% + clock 3.2%). The ~20% range
+effect looked like the bigger lever. It is not real.
+
+### 7. **Synthetic prompts route anti-correlated to real text**
+
+`SHOOTING_BRAKE_ROUTE_TRACE` (eager only — see §9), 10,139 tokens of this
+repo's docs vs 11,023 tokens of random tokens, 3.9M routes each:
+
+| | dev0 [1..102] | dev1 [103..204] | high/low |
+|---|---|---|---|
+| natural prose | **51.87%** | 48.13% | 0.928 |
+| synthetic random | 44.73% | **55.27%** | 1.236 |
+
+Per-expert correlation between the two workloads: **-0.21**. All 205 experts
+are used in both; natural max/mean is only **1.63x**, top-10 share 7.2%.
+
+Confirmed end-to-end in graph mode at matched token counts:
+
+| | dev0 µs/tok | dev1 µs/tok | imbalance | µs/token TTFT |
+|---|---|---|---|---|
+| natural prose | 31.95 | 31.95 | **1.000x** | 1,787 |
+| synthetic random | 27.3 | 35.3 | 1.29x | 1,847 |
+
+**On real text the even 102/102 split is already balanced to 1.000x.** The
+gating card costs 9.2% less on prose (predicted 8.8%); end-to-end TTFT is
+3.3% better. Modelled alternatives on prose: best single global split shift
+**+0.03%**; a split tuned on synthetic prompts applied to prose is
+**-6.43%**, i.e. actively harmful. Per-layer perfect balance would be
+**+7.80%**, but the provider takes one resident expert list for *all* layers
+(`resident_set_shared_across_layers`), so per-layer assignment is not
+expressible without a provider/ABI change.
+
+**Kill condition met for the asymmetric-split lever.** It was an artifact of
+benchmarking with random tokens. `b70_matrix_probe.py --corpus` now exists so
+no per-card claim is made on synthetic prompts again.
+
+### 8. Device residency costs host RAM 1:1 — the structural wall
+
+`b70_mem_topology_probe --alloc-gib 24`, server down:
+
+| | card `11:00.0` | card `15:00.0` |
+|---|---|---|
+| +24 GiB device USM | **-23.65 GiB host** | **-24.09 GiB host** |
+| after free | +0.43 GiB | -0.02 GiB |
+
+Unchanged by `NEOReadDebugKeys=1` with `UseKmdMigration=0`,
+`EnableDeviceUsmAllocationPool=0`, `ForceLocalMemoryAccessMode=0`,
+`EnableRecoverablePageFaults=0`, `EnableBOChunking=0`. BAR2 is already
+**32 GiB** (ReBAR on), so it is not a small-BAR workaround.
+
+Boot instrumentation matches: MemAvailable goes 50.22 -> 29.38 -> 3.78 GiB in
+two provider-load steps, **47.44 GiB total**, against 2 x 24.34 GiB of
+resident experts. Process RSS is 1.2 GiB and page cache 1.3 GiB, so it is
+neither.
+
+**Consequence:** a host-resident prefill bank (Marlin 44.4 GiB, NVFP4 v2
+48.4 GiB, W4A8 v3 56.5 GiB at the 99B's 204x48 geometry) cannot coexist with
+48.7 GiB of residency shadow on a 59.44 GiB box. The 5090-side streaming
+prefill category is **closed here** until B70 residency shrinks. It is also
+why the box swaps: a fresh engine had 1.07 GiB swapped within minutes, and a
+4.5 h-old server measured 3.8% slower (ITL 14.79 vs 14.23 ms).
+
+### 9. Two instrument facts worth not rediscovering
+
+- **`SHOOTING_BRAKE_ROUTE_TRACE` is not CUDA-graph-safe.** It stages
+  `topk_ids` D2H inside the routed-expert forward; with it set, capture dies
+  with `cudaErrorStreamCaptureUnsupported` before the engine serves. Route
+  traces require `--enforce-eager` and no `EXPECT_ARM`. `serve_99b_dual.sh`
+  now unsets it defensively — a stray export from a calibration run killed a
+  boot exactly this way.
+- The native trace clock is `CLOCK_MONOTONIC` and agrees with Python's
+  `time.monotonic_ns()`, so cells can be attributed to dispatch windows
+  exactly rather than by counting.
+
+### 10. Prefix caching is off, and cannot be turned on
+
+`enable_prefix_caching=False` in the engine config, because the model is
+hybrid: **36 `linear_attention` + 12 `full_attention` layers** (full attention
+every 4th). Recurrent state is not prefix-cacheable, so vLLM disables the
+feature wholesale. Measured: the identical 5,524-token prompt three times
+costs 9.788 / 9.729 / 9.723 s (**0.994x, 0.993x**), a superset of a cached
+half costs 0.999x of cold, and the server reports `Prefix cache hit rate:
+0.0%` throughout.
+
+**Every request pays full prefill, permanently.** At ~1,790 µs/token an 8K
+system prompt costs ~14.5 s on *every* call. This raises the value of prefill
+work and removes the usual "amortise it with caching" escape.

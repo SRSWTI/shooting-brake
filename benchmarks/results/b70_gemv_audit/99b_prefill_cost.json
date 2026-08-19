@@ -1,0 +1,471 @@
+{
+  "kind": "b70_prefill_cost_trace",
+  "per_device": [
+    {
+      "path": "/tmp/sb_99b_trace.device0.json",
+      "entries": 7728,
+      "layers": 48,
+      "classes": [
+        {
+          "M": 1,
+          "n": 96,
+          "p50_us": 75.09,
+          "p90_us": 95.45,
+          "us_per_token": 75.093
+        },
+        {
+          "M": 2,
+          "n": 192,
+          "p50_us": 105.33,
+          "p90_us": 144.42,
+          "us_per_token": 52.667
+        },
+        {
+          "M": 4,
+          "n": 240,
+          "p50_us": 176.01,
+          "p90_us": 240.12,
+          "us_per_token": 44.002
+        },
+        {
+          "M": 7,
+          "n": 48,
+          "p50_us": 285.23,
+          "p90_us": 343.8,
+          "us_per_token": 40.747
+        },
+        {
+          "M": 8,
+          "n": 96,
+          "p50_us": 341.73,
+          "p90_us": 714.68,
+          "us_per_token": 42.717
+        },
+        {
+          "M": 13,
+          "n": 48,
+          "p50_us": 486.84,
+          "p90_us": 655.86,
+          "us_per_token": 37.45
+        },
+        {
+          "M": 22,
+          "n": 48,
+          "p50_us": 758.14,
+          "p90_us": 919.55,
+          "us_per_token": 34.461
+        },
+        {
+          "M": 25,
+          "n": 48,
+          "p50_us": 798.25,
+          "p90_us": 977.04,
+          "us_per_token": 31.93
+        },
+        {
+          "M": 159,
+          "n": 48,
+          "p50_us": 4905.67,
+          "p90_us": 5968.71,
+          "us_per_token": 30.853
+        },
+        {
+          "M": 232,
+          "n": 96,
+          "p50_us": 6245.85,
+          "p90_us": 7385.51,
+          "us_per_token": 26.922
+        },
+        {
+          "M": 245,
+          "n": 96,
+          "p50_us": 6503.4,
+          "p90_us": 7708.98,
+          "us_per_token": 26.544
+        },
+        {
+          "M": 253,
+          "n": 48,
+          "p50_us": 7030.33,
+          "p90_us": 7819.81,
+          "us_per_token": 27.788
+        },
+        {
+          "M": 256,
+          "n": 6624,
+          "p50_us": 7049.04,
+          "p90_us": 8469.28,
+          "us_per_token": 27.535
+        }
+      ],
+      "fit": {
+        "fixed_us_per_dispatch": 120.69,
+        "marginal_us_per_token": 27.0513
+      },
+      "fit_residuals": [
+        {
+          "M": 1,
+          "pred_us": 147.7,
+          "meas_us": 75.09,
+          "err_pct": 96.757
+        },
+        {
+          "M": 2,
+          "pred_us": 174.8,
+          "meas_us": 105.33,
+          "err_pct": 65.951
+        },
+        {
+          "M": 4,
+          "pred_us": 228.9,
+          "meas_us": 176.01,
+          "err_pct": 30.049
+        },
+        {
+          "M": 7,
+          "pred_us": 310.1,
+          "meas_us": 285.23,
+          "err_pct": 8.703
+        },
+        {
+          "M": 8,
+          "pred_us": 337.1,
+          "meas_us": 341.73,
+          "err_pct": -1.354
+        },
+        {
+          "M": 13,
+          "pred_us": 472.4,
+          "meas_us": 486.84,
+          "err_pct": -2.974
+        },
+        {
+          "M": 22,
+          "pred_us": 715.8,
+          "meas_us": 758.14,
+          "err_pct": -5.582
+        },
+        {
+          "M": 25,
+          "pred_us": 797.0,
+          "meas_us": 798.25,
+          "err_pct": -0.16
+        },
+        {
+          "M": 159,
+          "pred_us": 4421.8,
+          "meas_us": 4905.67,
+          "err_pct": -9.863
+        },
+        {
+          "M": 232,
+          "pred_us": 6396.6,
+          "meas_us": 6245.85,
+          "err_pct": 2.413
+        },
+        {
+          "M": 245,
+          "pred_us": 6748.3,
+          "meas_us": 6503.4,
+          "err_pct": 3.765
+        },
+        {
+          "M": 253,
+          "pred_us": 6964.7,
+          "meas_us": 7030.33,
+          "err_pct": -0.934
+        },
+        {
+          "M": 256,
+          "pred_us": 7045.8,
+          "meas_us": 7049.04,
+          "err_pct": -0.046
+        }
+      ]
+    },
+    {
+      "path": "/tmp/sb_99b_trace.device1.json",
+      "entries": 7728,
+      "layers": 48,
+      "classes": [
+        {
+          "M": 1,
+          "n": 96,
+          "p50_us": 63.05,
+          "p90_us": 79.28,
+          "us_per_token": 63.047
+        },
+        {
+          "M": 2,
+          "n": 192,
+          "p50_us": 92.4,
+          "p90_us": 137.15,
+          "us_per_token": 46.2
+        },
+        {
+          "M": 4,
+          "n": 240,
+          "p50_us": 148.56,
+          "p90_us": 220.56,
+          "us_per_token": 37.139
+        },
+        {
+          "M": 7,
+          "n": 48,
+          "p50_us": 328.85,
+          "p90_us": 393.07,
+          "us_per_token": 46.979
+        },
+        {
+          "M": 8,
+          "n": 96,
+          "p50_us": 287.3,
+          "p90_us": 522.18,
+          "us_per_token": 35.913
+        },
+        {
+          "M": 13,
+          "n": 48,
+          "p50_us": 673.93,
+          "p90_us": 797.52,
+          "us_per_token": 51.841
+        },
+        {
+          "M": 22,
+          "n": 48,
+          "p50_us": 946.0,
+          "p90_us": 1252.38,
+          "us_per_token": 43.0
+        },
+        {
+          "M": 25,
+          "n": 48,
+          "p50_us": 1026.31,
+          "p90_us": 1194.33,
+          "us_per_token": 41.052
+        },
+        {
+          "M": 159,
+          "n": 48,
+          "p50_us": 5731.28,
+          "p90_us": 6582.84,
+          "us_per_token": 36.046
+        },
+        {
+          "M": 232,
+          "n": 96,
+          "p50_us": 8175.85,
+          "p90_us": 9385.32,
+          "us_per_token": 35.241
+        },
+        {
+          "M": 245,
+          "n": 96,
+          "p50_us": 8738.63,
+          "p90_us": 9631.36,
+          "us_per_token": 35.668
+        },
+        {
+          "M": 253,
+          "n": 48,
+          "p50_us": 8790.54,
+          "p90_us": 10310.98,
+          "us_per_token": 34.745
+        },
+        {
+          "M": 256,
+          "n": 6624,
+          "p50_us": 8915.35,
+          "p90_us": 10450.72,
+          "us_per_token": 34.826
+        }
+      ],
+      "fit": {
+        "fixed_us_per_dispatch": 92.49,
+        "marginal_us_per_token": 34.8131
+      },
+      "fit_residuals": [
+        {
+          "M": 1,
+          "pred_us": 127.3,
+          "meas_us": 63.05,
+          "err_pct": 101.916
+        },
+        {
+          "M": 2,
+          "pred_us": 162.1,
+          "meas_us": 92.4,
+          "err_pct": 75.455
+        },
+        {
+          "M": 4,
+          "pred_us": 231.7,
+          "meas_us": 148.56,
+          "err_pct": 55.996
+        },
+        {
+          "M": 7,
+          "pred_us": 336.2,
+          "meas_us": 328.85,
+          "err_pct": 2.231
+        },
+        {
+          "M": 8,
+          "pred_us": 371.0,
+          "meas_us": 287.3,
+          "err_pct": 29.133
+        },
+        {
+          "M": 13,
+          "pred_us": 545.1,
+          "meas_us": 673.93,
+          "err_pct": -19.122
+        },
+        {
+          "M": 22,
+          "pred_us": 858.4,
+          "meas_us": 946.0,
+          "err_pct": -9.262
+        },
+        {
+          "M": 25,
+          "pred_us": 962.8,
+          "meas_us": 1026.31,
+          "err_pct": -6.186
+        },
+        {
+          "M": 159,
+          "pred_us": 5627.8,
+          "meas_us": 5731.28,
+          "err_pct": -1.806
+        },
+        {
+          "M": 232,
+          "pred_us": 8169.1,
+          "meas_us": 8175.85,
+          "err_pct": -0.082
+        },
+        {
+          "M": 245,
+          "pred_us": 8621.7,
+          "meas_us": 8738.63,
+          "err_pct": -1.338
+        },
+        {
+          "M": 253,
+          "pred_us": 8900.2,
+          "meas_us": 8790.54,
+          "err_pct": 1.247
+        },
+        {
+          "M": 256,
+          "pred_us": 9004.6,
+          "meas_us": 8915.35,
+          "err_pct": 1.001
+        }
+      ]
+    }
+  ],
+  "worst_card": {
+    "fixed_us_per_dispatch": 120.69,
+    "marginal_us_per_token": 34.8131
+  },
+  "chunk_cap_scan": [
+    {
+      "prompt_tokens": 1024,
+      "chunk_cap": 256,
+      "chunks": 4,
+      "b70_service_s": 1.7343,
+      "fixed_share_pct": 1.336,
+      "delta_vs_first_cap_pct": 0.0
+    },
+    {
+      "prompt_tokens": 1024,
+      "chunk_cap": 512,
+      "chunks": 2,
+      "b70_service_s": 1.7227,
+      "fixed_share_pct": 0.673,
+      "delta_vs_first_cap_pct": -0.668
+    },
+    {
+      "prompt_tokens": 1024,
+      "chunk_cap": 1024,
+      "chunks": 1,
+      "b70_service_s": 1.7169,
+      "fixed_share_pct": 0.337,
+      "delta_vs_first_cap_pct": -1.002
+    },
+    {
+      "prompt_tokens": 1024,
+      "chunk_cap": 2048,
+      "chunks": 1,
+      "b70_service_s": 3.4281,
+      "fixed_share_pct": 0.169,
+      "delta_vs_first_cap_pct": 97.662
+    },
+    {
+      "prompt_tokens": 8192,
+      "chunk_cap": 256,
+      "chunks": 32,
+      "b70_service_s": 13.8744,
+      "fixed_share_pct": 1.336,
+      "delta_vs_first_cap_pct": 0.0
+    },
+    {
+      "prompt_tokens": 8192,
+      "chunk_cap": 512,
+      "chunks": 16,
+      "b70_service_s": 13.7818,
+      "fixed_share_pct": 0.673,
+      "delta_vs_first_cap_pct": -0.668
+    },
+    {
+      "prompt_tokens": 8192,
+      "chunk_cap": 1024,
+      "chunks": 8,
+      "b70_service_s": 13.7354,
+      "fixed_share_pct": 0.337,
+      "delta_vs_first_cap_pct": -1.002
+    },
+    {
+      "prompt_tokens": 8192,
+      "chunk_cap": 2048,
+      "chunks": 4,
+      "b70_service_s": 13.7122,
+      "fixed_share_pct": 0.169,
+      "delta_vs_first_cap_pct": -1.169
+    },
+    {
+      "prompt_tokens": 32768,
+      "chunk_cap": 256,
+      "chunks": 128,
+      "b70_service_s": 55.4978,
+      "fixed_share_pct": 1.336,
+      "delta_vs_first_cap_pct": 0.0
+    },
+    {
+      "prompt_tokens": 32768,
+      "chunk_cap": 512,
+      "chunks": 64,
+      "b70_service_s": 55.127,
+      "fixed_share_pct": 0.673,
+      "delta_vs_first_cap_pct": -0.668
+    },
+    {
+      "prompt_tokens": 32768,
+      "chunk_cap": 1024,
+      "chunks": 32,
+      "b70_service_s": 54.9417,
+      "fixed_share_pct": 0.337,
+      "delta_vs_first_cap_pct": -1.002
+    },
+    {
+      "prompt_tokens": 32768,
+      "chunk_cap": 2048,
+      "chunks": 16,
+      "b70_service_s": 54.849,
+      "fixed_share_pct": 0.169,
+      "delta_vs_first_cap_pct": -1.169
+    }
+  ]
+}

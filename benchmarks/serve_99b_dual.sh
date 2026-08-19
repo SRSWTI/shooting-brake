@@ -27,11 +27,12 @@
 # No `set -u`: sourcing oneAPI setvars.sh references unset vars and would abort.
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 source /opt/intel/oneapi/setvars.sh --force >/dev/null
+export PATH="$PWD/.venv/bin:$PATH"
 export PYTHONPATH="$PWD/src/phase4/src:$PYTHONPATH"
 export VLLM_PLUGINS=shooting_brake_vllm
 export SHOOTING_BRAKE_PHASE4=all-cuda
 export SHOOTING_BRAKE_MODEL=srswti/axe-superveloce-99b-nvfp4
-export SHOOTING_BRAKE_PLACEMENT="fractional:2:0.0048780487804878"
+export SHOOTING_BRAKE_PLACEMENT="${SHOOTING_BRAKE_PLACEMENT:-fractional:2:0.0048780487804878}"
 export SHOOTING_BRAKE_HYBRID=1
 export SHOOTING_BRAKE_B70_DEVICE=1
 export SHOOTING_BRAKE_B70_GRAPH=1
@@ -41,18 +42,29 @@ export SHOOTING_BRAKE_B70_PREFILL_STREAM=0
 export SHOOTING_BRAKE_PREFILL_MARLIN=0
 unset ZE_AFFINITY_MASK
 export SHOOTING_BRAKE_B70_BANK="$PWD/src/phase1/expert_bank_99b.bin"
-export SHOOTING_BRAKE_B70_BANKS="$PWD/src/phase1/expert_bank_99b.bin,$PWD/src/phase1/expert_bank_99b.bin"
-export SHOOTING_BRAKE_B70_SELECTORS="0000:15:00.0,0000:11:00.0"
+export SHOOTING_BRAKE_B70_BANKS="${SHOOTING_BRAKE_B70_BANKS:-$PWD/src/phase1/expert_bank_99b.bin,$PWD/src/phase1/expert_bank_99b.bin}"
+# Device index -> BDF. Order is load-bearing: index 0 is the Gen4 card and
+# takes the larger expert share under an asymmetric split. Overridable so a
+# selector swap can separate a per-card effect from a per-expert-range one.
+export SHOOTING_BRAKE_B70_SELECTORS="${SHOOTING_BRAKE_B70_SELECTORS:-0000:15:00.0,0000:11:00.0}"
 export SHOOTING_BRAKE_B70_POLL_CPUS="${SHOOTING_BRAKE_B70_POLL_CPUS:-5,6}"
 export SHOOTING_BRAKE_B70_LIB="$PWD/src/phase7/libsb_b70_provider.so"
 export SHOOTING_BRAKE_B70_MAX_BATCH="${SHOOTING_BRAKE_B70_MAX_BATCH:-256}"
-unset SHOOTING_BRAKE_B70_PROFILE VLLM_USE_BREAKABLE_CUDAGRAPH
+# ROUTE_TRACE stages topk_ids D2H inside the routed-expert forward, which is
+# not capture-safe: with it set, graph capture dies with
+# cudaErrorStreamCaptureUnsupported before the engine ever serves. This arm is
+# asserted to be `doorbell` (captured graphs), so the trace can never be valid
+# here -- unset it rather than let a stray export from an eager calibration run
+# kill the boot. Use --enforce-eager and no EXPECT_ARM to collect route traces.
+unset SHOOTING_BRAKE_B70_PROFILE SHOOTING_BRAKE_B70_STATS SHOOTING_BRAKE_ROUTE_TRACE
+unset VLLM_USE_BREAKABLE_CUDAGRAPH
+export SHOOTING_BRAKE_EXPECT_ARM=doorbell
+export SHOOTING_BRAKE_B70_TRACE_DUMP="${SHOOTING_BRAKE_B70_TRACE_DUMP:-/tmp/sb_99b_trace.json}"
 # sm_120 W4A4 MoE facts, measured on first boot (2026-08-19, kill-bench 16):
-#   * FlashInfer's trtllm-gen fused-moe tactics HANG this GeForce Blackwell
-#     (one tuner profile ran 25 min at 100% GPU); its untuned heuristic
-#     tactic faults with a misaligned address. Skip those ops in the tuner
-#     AND pin the MoE backend to vLLM's in-tree CUTLASS experts, which
-#     produced the first correct 99B tokens.
+#   * FlashInfer's CUTLASS MoE backend wedges in one tuner tactic on this
+#     model/shape; skipping those ops reaches a heuristic that faults with a
+#     misaligned address. Pin the baseline to vLLM's in-tree CUTLASS experts,
+#     which produced the first correct 99B tokens.
 export VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS="trtllm::fused_moe::gemm1,trtllm::fused_moe::gemm2"
 echo "=== launching 99B dual-B70 $(date '+%H:%M:%S')"
 exec .venv/bin/vllm serve srswti/axe-superveloce-99b-nvfp4 \

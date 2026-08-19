@@ -1,0 +1,97 @@
+{
+  "kind": "b70_prefill_cost_ladder",
+  "url": "http://127.0.0.1:8017",
+  "model": "shooting-brake-99b",
+  "samples": [
+    {
+      "target_tokens": 512,
+      "rep": 0,
+      "prompt_tokens": 1256,
+      "ttft_s": 2.272148,
+      "wall_s": 2.272214,
+      "us_per_prompt_token": 1809.03
+    },
+    {
+      "target_tokens": 512,
+      "rep": 1,
+      "prompt_tokens": 519,
+      "ttft_s": 0.95276,
+      "wall_s": 0.952821,
+      "us_per_prompt_token": 1835.76
+    },
+    {
+      "target_tokens": 1024,
+      "rep": 0,
+      "prompt_tokens": 1026,
+      "ttft_s": 1.870103,
+      "wall_s": 1.870164,
+      "us_per_prompt_token": 1822.71
+    },
+    {
+      "target_tokens": 1024,
+      "rep": 1,
+      "prompt_tokens": 1013,
+      "ttft_s": 1.836279,
+      "wall_s": 1.836341,
+      "us_per_prompt_token": 1812.71
+    },
+    {
+      "target_tokens": 2048,
+      "rep": 0,
+      "prompt_tokens": 2070,
+      "ttft_s": 3.79767,
+      "wall_s": 3.797734,
+      "us_per_prompt_token": 1834.62
+    },
+    {
+      "target_tokens": 2048,
+      "rep": 1,
+      "prompt_tokens": 2045,
+      "ttft_s": 3.735834,
+      "wall_s": 3.735902,
+      "us_per_prompt_token": 1826.81
+    },
+    {
+      "target_tokens": 4096,
+      "rep": 0,
+      "prompt_tokens": 4121,
+      "ttft_s": 7.584772,
+      "wall_s": 7.584836,
+      "us_per_prompt_token": 1840.52
+    },
+    {
+      "target_tokens": 4096,
+      "rep": 1,
+      "prompt_tokens": 4109,
+      "ttft_s": 7.556347,
+      "wall_s": 7.556414,
+      "us_per_prompt_token": 1838.97
+    },
+    {
+      "target_tokens": 8192,
+      "rep": 0,
+      "prompt_tokens": 8181,
+      "ttft_s": 15.043795,
+      "wall_s": 15.043855,
+      "us_per_prompt_token": 1838.87
+    },
+    {
+      "target_tokens": 8192,
+      "rep": 1,
+      "prompt_tokens": 8168,
+      "ttft_s": 15.055646,
+      "wall_s": 15.055711,
+      "us_per_prompt_token": 1843.25
+    }
+  ],
+  "prefix_cache": {
+    "queries_delta": 0.0,
+    "hits_delta": 0.0,
+    "hit_rate_pct": null
+  },
+  "fit": {
+    "intercept_s": -0.0247,
+    "marginal_us_per_token": 1844.226,
+    "marginal_us_per_token_per_layer": 38.4214
+  }
+}

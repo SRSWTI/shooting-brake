@@ -74,6 +74,7 @@ class B70ProviderClient:
         lib.sb_b70_load.argtypes = [
             ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint64,
             ctypes.POINTER(ctypes.c_int32), ctypes.c_size_t, ctypes.c_size_t,
+            ctypes.c_char_p,
         ]
 
         lib.sb_b70_issue.restype = ctypes.c_int
@@ -129,7 +130,7 @@ class B70ProviderClient:
         ]
 
         lib.sb_b70_poll_start.restype = ctypes.c_int
-        lib.sb_b70_poll_start.argtypes = [ctypes.c_void_p]
+        lib.sb_b70_poll_start.argtypes = [ctypes.c_void_p, ctypes.c_int]
 
         lib.sb_b70_poll_stop.restype = None
         lib.sb_b70_poll_stop.argtypes = [ctypes.c_void_p]
@@ -165,8 +166,16 @@ class B70ProviderClient:
         generation: int = 1,
         resident_experts: np.ndarray | None = None,
         max_batch: int = 128,
+        device_selector: str = "",
     ) -> None:
-        """Create the provider, load the expert bank, select residents."""
+        """Create the provider, load the expert bank, select residents.
+
+        ``device_selector`` picks which physical B70 this provider owns:
+        empty keeps the legacy first-enumerated device, a decimal string is
+        a zero-based index, anything else is matched as a PCI BDF. Multi-
+        card configs must pass BDFs — enumeration order once silently put
+        the Gen3 card first and cost 40% for weeks.
+        """
         self._handle = ctypes.c_void_p(self._lib.sb_b70_create())
         if not self._handle:
             raise B70ProviderError("sb_b70_create returned NULL")
@@ -183,6 +192,7 @@ class B70ProviderClient:
         status = self._lib.sb_b70_load(
             self._handle, bank, ctypes.c_uint64(generation),
             ids_ptr, count, ctypes.c_size_t(max_batch),
+            device_selector.encode("utf-8") if device_selector else None,
         )
         if status != 0:
             raise B70ProviderError(f"sb_b70_load failed with status {status}")

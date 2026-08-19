@@ -17,7 +17,7 @@ from typing import Any
 
 import torch
 
-_provider_health_baseline: tuple[int, int] | None = None
+_provider_health_baseline: dict[int, tuple[int, int]] = {}
 
 
 
@@ -207,24 +207,57 @@ def collect_worker_stats(worker: Any) -> dict[str, Any]:
     stats["eager_partition"] = _collect_eager_partition(layers)
 
     # --- pollers ---------------------------------------------------------
-    poller = next(
-        (
-            layer._b70_poller for layer in layers
-            if getattr(layer, "_b70_poller", None) is not None
-        ),
-        None,
-    )
-    if poller is not None:
-        # Profiling metrics are 0 unless SHOOTING_BRAKE_B70_PROFILE=1.
+    # One poller per physical card. Top-level keys aggregate across cards
+    # (back-compat with every reader of stats["poller"]); "per_device"
+    # carries each card separately — per-card service time is exactly the
+    # number the dual-B70 bring-up must watch (a card whose kernel goes
+    # latency-bound shows up here first).
+    from .b70_poller import _pollers as _b70_poller_registry
+
+    if _b70_poller_registry:
+        per_device: dict[str, Any] = {}
+        total_dispatches = 0
+        total_errors = 0
+        total_rows = 0
+        service_us_sum = 0.0
+        kernel_us_sum = 0.0
+        histogram_sum: dict[str, int] = {}
+        for device_index in sorted(_b70_poller_registry):
+            p = _b70_poller_registry[device_index]
+            n = p.dispatch_count
+            # Profiling metrics are 0 unless SHOOTING_BRAKE_B70_PROFILE=1.
+            per_device[str(device_index)] = {
+                "dispatches": n,
+                "errors": p.error_count,
+                "rows": p.row_count,
+                "m_histogram": p.m_histogram,
+                "service_mean_us": p.service_mean_us,
+                "kernel_mean_us": p.kernel_mean_us,
+                "kernel_mean_us_per_row": p.kernel_mean_us_per_row,
+            }
+            total_dispatches += n
+            total_errors += p.error_count
+            total_rows += p.row_count
+            service_us_sum += p.service_mean_us * n
+            kernel_us_sum += p.kernel_mean_us * n
+            for label, count in p.m_histogram.items():
+                histogram_sum[label] = histogram_sum.get(label, 0) + count
         stats["poller"] = {
             "available": True,
-            "dispatches": poller.dispatch_count,
-            "errors": poller.error_count,
-            "rows": poller.row_count,
-            "m_histogram": poller.m_histogram,
-            "service_mean_us": poller.service_mean_us,
-            "kernel_mean_us": poller.kernel_mean_us,
-            "kernel_mean_us_per_row": poller.kernel_mean_us_per_row,
+            "dispatches": total_dispatches,
+            "errors": total_errors,
+            "rows": total_rows,
+            "m_histogram": histogram_sum,
+            "service_mean_us": (
+                service_us_sum / total_dispatches if total_dispatches else 0.0
+            ),
+            "kernel_mean_us": (
+                kernel_us_sum / total_dispatches if total_dispatches else 0.0
+            ),
+            "kernel_mean_us_per_row": (
+                kernel_us_sum / total_rows if total_rows else 0.0
+            ),
+            "per_device": per_device,
         }
     else:
         stats["poller"] = {
@@ -334,42 +367,50 @@ def collect_worker_stats(worker: Any) -> dict[str, Any]:
         "total_gib": total_b / 2**30,
     }
 
-    # B70 VRAM. The second card is bought for capacity, so its occupancy is
-    # the number that decides whether an expert bank fits -- and it was the
-    # only resource here inferred rather than measured, while the 5090's
-    # VRAM, host DRAM and the KV cache were all reported. Read through the
-    # provider's own device handle, so it is guaranteed to describe the card
-    # the bank actually loaded onto rather than whichever Intel GPU a second
-    # lookup happens to enumerate first.
-    from .routed_experts import _b70_provider_singleton
+    # B70 VRAM, one entry per card. Occupancy is the number that decides
+    # whether an expert bank fits -- and it was the only resource here
+    # inferred rather than measured, while the 5090's VRAM, host DRAM and
+    # the KV cache were all reported. Read through each provider's own
+    # device handle, so it is guaranteed to describe the card that bank
+    # actually loaded onto rather than whichever Intel GPU a second lookup
+    # happens to enumerate first.
+    from .routed_experts import _b70_providers
 
-    if _b70_provider_singleton is not None:
-        mem = _b70_provider_singleton.device_memory
-        if mem is not None:
-            free_b70, total_b70 = mem
-            stats["b70_memory"] = {
-                "used_gib": (total_b70 - free_b70) / 2**30,
-                "free_gib": free_b70 / 2**30,
-                "total_gib": total_b70 / 2**30,
-                "resident_per_layer": _b70_provider_singleton.resident_per_layer,
-            }
-    provider = _b70_provider_singleton
-    if provider is None:
+    b70_memory: dict[str, Any] = {}
+    for device_index in sorted(_b70_providers):
+        provider = _b70_providers[device_index]
+        mem = provider.device_memory
+        if mem is None:
+            continue
+        free_b70, total_b70 = mem
+        b70_memory[str(device_index)] = {
+            "used_gib": (total_b70 - free_b70) / 2**30,
+            "free_gib": free_b70 / 2**30,
+            "total_gib": total_b70 / 2**30,
+            "resident_per_layer": provider.resident_per_layer,
+        }
+    if b70_memory:
+        stats["b70_memory"] = b70_memory
+
+    if not _b70_providers:
         stats["synchronous_provider"] = {
             "available": False,
             "reason": "unavailable on this arm",
         }
     else:
-        health = getattr(provider, "health", None)
-        if health is None:
-            stats["synchronous_provider"] = {
-                "available": False,
-                "reason": "native health ABI unavailable",
-            }
-        else:
-            stats["synchronous_provider"] = _provider_health_stats(
-                health, _provider_health_baseline,
-            )
+        provider_stats: dict[str, Any] = {}
+        for device_index in sorted(_b70_providers):
+            health = getattr(_b70_providers[device_index], "health", None)
+            if health is None:
+                provider_stats[str(device_index)] = {
+                    "available": False,
+                    "reason": "native health ABI unavailable",
+                }
+            else:
+                provider_stats[str(device_index)] = _provider_health_stats(
+                    health, _provider_health_baseline.get(device_index),
+                )
+        stats["synchronous_provider"] = provider_stats
 
     # Host DRAM. Untracked until now because the first two tiers do not use
     # it for weights, but the cold tier holds its whole expert bank here and
@@ -431,27 +472,21 @@ def reset_worker_stats(worker: Any) -> None:
 
     # The historical 186.05 us "decode" service figure was contaminated by
     # warmup and correctness because this reset used to omit the native
-    # poller. Reset the process-wide singleton once, not once per layer.
-    poller = next(
-        (
-            layer._b70_poller for layer in layers
-            if getattr(layer, "_b70_poller", None) is not None
-        ),
-        None,
-    )
-    if poller is not None:
+    # poller. Reset each card's poller once, not once per layer.
+    from .b70_poller import _pollers as _b70_poller_registry
+
+    for poller in _b70_poller_registry.values():
         poller.reset()
 
     # Provider health is monotonic. Snapshot rather than resetting it: a
     # before/after subtraction cannot silently relabel a cumulative count as
     # a scoped one, and both absolute values remain available for audit.
-    from .routed_experts import _b70_provider_singleton
-    global _provider_health_baseline
-    if _b70_provider_singleton is None:
-        _provider_health_baseline = None
-    else:
-        health = _b70_provider_singleton.health
-        _provider_health_baseline = (
+    from .routed_experts import _b70_providers
+
+    _provider_health_baseline.clear()
+    for device_index, provider in _b70_providers.items():
+        health = provider.health
+        _provider_health_baseline[device_index] = (
             int(health.generation),
             int(health.dispatches),
         )

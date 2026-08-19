@@ -21,7 +21,11 @@ from shooting_brake_vllm.b70_poller import get_b70_poller
 from shooting_brake_vllm.expert_bank import Int4ExpertBank
 from shooting_brake_vllm.partition import DispatchBufferGeometry
 from shooting_brake_vllm.placement import SplitPolicy, build_placement
-from shooting_brake_vllm.routed_experts import HybridRoutedExperts
+from shooting_brake_vllm.routed_experts import (
+    HybridRoutedExperts,
+    _B70Lane,
+    _build_b70_slot_map,
+)
 from shooting_brake_vllm.stream_signal import alloc_host_mapped_flag
 from int4_aggregation_oracle import _cpu_b70_partial, _error
 
@@ -88,42 +92,47 @@ def main() -> None:
     )
     max_batch = 1
     geometry = DispatchBufferGeometry(max_batch=max_batch, hidden_size=3072, top_k=8)
+    lane = _B70Lane(
+        device_index=0,
+        slot_map=_build_b70_slot_map(placement, 0),
+        pinned_hidden=torch.empty(
+            geometry.hidden_shape, dtype=torch.float16, pin_memory=True,
+        ),
+        pinned_output=torch.empty(
+            geometry.hidden_shape, dtype=torch.float32, pin_memory=True,
+        ),
+        pinned_ids=torch.empty(
+            geometry.route_shape, dtype=torch.int32, pin_memory=True,
+        ),
+        pinned_weights=torch.empty(
+            geometry.route_shape, dtype=torch.float32, pin_memory=True,
+        ),
+        dev_fp32=torch.empty(
+            geometry.hidden_shape, dtype=torch.float32, device="cuda",
+        ),
+        dev_bf16=torch.empty(
+            geometry.hidden_shape, dtype=torch.bfloat16, device="cuda",
+        ),
+    )
+    lane.signal_host, lane.signal_dev = alloc_host_mapped_flag(0)
+    lane.completion_host, lane.completion_dev = alloc_host_mapped_flag(0)
     layer = SimpleNamespace(
         _b70_max_batch=max_batch,
         hidden_size=3072,
         shooting_brake_placement=placement,
         _dispatch_geometry=geometry,
-        _b70_pinned_hidden=torch.empty(
-            geometry.hidden_shape, dtype=torch.float16, pin_memory=True,
-        ),
-        _pinned_b70_ids=torch.empty(
-            geometry.route_shape, dtype=torch.int32, pin_memory=True,
-        ),
-        _pinned_b70_weights=torch.empty(
-            geometry.route_shape, dtype=torch.float32, pin_memory=True,
-        ),
-        _b70_pinned_output=torch.empty(
-            geometry.hidden_shape, dtype=torch.float32, pin_memory=True,
-        ),
-        _dev_b70_fp32=torch.empty(
-            geometry.hidden_shape, dtype=torch.float32, device="cuda",
-        ),
-        _dev_b70_bf16=torch.empty(
-            geometry.hidden_shape, dtype=torch.bfloat16, device="cuda",
-        ),
+        _b70_lanes=(lane,),
     )
-    layer._signal_host, layer._signal_dev = alloc_host_mapped_flag(0)
-    layer._completion_host, layer._completion_dev = alloc_host_mapped_flag(0)
 
     poller = get_b70_poller(placement)
     poller.register_layer(
         layer_idx=args.layer,
-        signal_host=layer._signal_host,
-        completion_host=layer._completion_host,
-        pinned_hidden=layer._b70_pinned_hidden,
-        pinned_ids=layer._pinned_b70_ids,
-        pinned_weights=layer._pinned_b70_weights,
-        pinned_output=layer._b70_pinned_output,
+        signal_host=lane.signal_host,
+        completion_host=lane.completion_host,
+        pinned_hidden=lane.pinned_hidden,
+        pinned_ids=lane.pinned_ids,
+        pinned_weights=lane.pinned_weights,
+        pinned_output=lane.pinned_output,
     )
     poller.start()
 
@@ -152,9 +161,9 @@ def main() -> None:
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         HybridRoutedExperts._b70_issue_graph(
-            layer, x_static, ids_static, weights_static,
+            layer, lane, x_static, ids_static, weights_static,
         )
-        remote_bf16 = HybridRoutedExperts._b70_take_graph(layer, 1)
+        remote_bf16 = HybridRoutedExperts._b70_take_graph(layer, lane, 1)
         torch.add(cuda_static, remote_bf16, out=combined_static)
     torch.cuda.synchronize()
 
@@ -170,11 +179,11 @@ def main() -> None:
             graph.replay()
             torch.cuda.synchronize()
 
-            raw_remote = layer._dev_b70_fp32.detach().cpu().clone()
-            remote_bf16_cpu = layer._dev_b70_bf16.detach().cpu().clone()
+            raw_remote = lane.dev_fp32.detach().cpu().clone()
+            remote_bf16_cpu = lane.dev_bf16.detach().cpu().clone()
             combined = combined_static.detach().cpu().clone()
             expected_chain = torch.add(
-                cuda_static, layer._dev_b70_bf16[:1],
+                cuda_static, lane.dev_bf16[:1],
             ).detach().cpu()
             if not torch.equal(combined, expected_chain):
                 raise RuntimeError(
@@ -259,7 +268,7 @@ def main() -> None:
             graph.replay()
             torch.cuda.synchronize()
 
-            raw = layer._dev_b70_fp32.detach().cpu().clone()
+            raw = lane.dev_fp32.detach().cpu().clone()
             d_own = float((raw - references[name]).abs().max())
             d_other = float((raw - references[other]).abs().max())
             ratio = (d_other / d_own) if d_own else float("inf")
@@ -270,7 +279,7 @@ def main() -> None:
             )
             if not torch.equal(
                 combined_static.detach().cpu(),
-                torch.add(cuda_static, layer._dev_b70_bf16[:1]).detach().cpu(),
+                torch.add(cuda_static, lane.dev_bf16[:1]).detach().cpu(),
             ):
                 stress["combine_exact_failures"] += 1
             if d_own >= d_other:

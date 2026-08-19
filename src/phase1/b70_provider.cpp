@@ -17,6 +17,13 @@
 #include <string>
 #include <utility>
 
+#if defined(__x86_64__)
+#include <immintrin.h>
+#define SB_PROVIDER_SPIN_HINT() _mm_pause()
+#else
+#define SB_PROVIDER_SPIN_HINT() ((void)0)
+#endif
+
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -55,6 +62,10 @@ std::size_t g_expert_bytes = 0;
 // Derives every dependent NVFP4 size from the header. Keeping this function's
 // arithmetic unchanged preserves the existing SBEXP001 reader and upload
 // contract.
+//
+// experts_per_layer is adopted from the bank rather than pinned to 256:
+// the 99B carries 205. kNvfp4ExpertsPerLayer remains only as the ABI upper
+// bound (the resident-set bitmap and the routing width are sized to it).
 bool adopt_nvfp4_bank_geometry(std::size_t layers,
                                std::size_t experts_per_layer,
                                std::size_t hidden,
@@ -62,7 +73,8 @@ bool adopt_nvfp4_bank_geometry(std::size_t layers,
                                std::uint64_t w13, std::uint64_t s13,
                                std::uint64_t w2, std::uint64_t s2) noexcept {
   if (layers == 0 || hidden == 0 || intermediate == 0 ||
-      experts_per_layer != kNvfp4ExpertsPerLayer || hidden % 16 != 0 ||
+      experts_per_layer == 0 ||
+      experts_per_layer > kNvfp4ExpertsPerLayer || hidden % 16 != 0 ||
       intermediate % 16 != 0) {
     return false;
   }
@@ -120,6 +132,35 @@ bool profiling_requested() noexcept {
 
 bool int4_requested() noexcept {
   const char* value = std::getenv("SHOOTING_BRAKE_B70_INT4");
+  return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
+// take() can spin on the completion event before falling back to the
+// blocking wait. OFF by default — it was MEASURED AND IT DOES NOTHING.
+//
+// The synthetic probe said it should win: at the production decode shape a
+// blocking wait means 9.46 us vs 6.37 us spinning, i.e. 3.09 us/dispatch,
+// which at 48 dispatches/step predicted ~0.15 ms/step (~1.2% ITL)
+// [experiments/b13_wait_probe.cpp].
+//
+// End-to-end on the 88B it delivered nothing (2026-08-19, same build, same
+// boot config, 4 ITL runs per arm, Gen4 B70, split:54):
+//
+//     spin OFF : 11.5098 ms ITL      spin ON : 11.5130 ms ITL
+//
+// +0.003 ms, against a run-to-run spread of +-0.06 ms. Noise.
+//
+// The probe over-predicted because it submitted and waited IMMEDIATELY,
+// which maximises the chance of landing in the runtime's sleep path. In
+// production the poller does issue(), bookkeeping, then take(), and by then
+// the wait behaves differently. Lesson: a synthetic probe's timing pattern
+// is part of what it measures.
+//
+// Kept behind a flag rather than deleted, per kill-bench rule 3 — the
+// negative result is the product, and this stops the idea being re-proposed.
+// Set SHOOTING_BRAKE_B70_SPIN_WAIT=1 to re-enable and re-measure.
+bool spin_wait_enabled() noexcept {
+  const char* value = std::getenv("SHOOTING_BRAKE_B70_SPIN_WAIT");
   return value != nullptr && value[0] == '1' && value[1] == '\0';
 }
 
@@ -364,6 +405,7 @@ struct B70Provider::Impl {
   std::optional<sycl::event> kernel_end;
   std::optional<sycl::event> copy_out;
   bool profiling = false;
+  bool spin_wait = true;
 
   std::uint64_t pending_generation = 0;
   std::uint64_t pending_sequence = 0;
@@ -556,7 +598,7 @@ struct B70Provider::Impl {
                     const std::size_t bytes_per_expert, std::uint8_t* destination,
                     const std::size_t layer) {
     const std::size_t resident_count = config.resident_experts.size();
-    const std::size_t source_layer = layer * kNvfp4ExpertsPerLayer;
+    const std::size_t source_layer = layer * g_source_experts_per_layer;
     const std::size_t destination_layer = layer * resident_count;
     for (std::size_t local_expert = 0; local_expert < resident_count;
          ++local_expert) {
@@ -578,7 +620,7 @@ struct B70Provider::Impl {
                       const std::size_t record_offset, float* destination,
                       const std::size_t layer) {
     const std::size_t resident_count = config.resident_experts.size();
-    const std::size_t source_layer = layer * kNvfp4ExpertsPerLayer;
+    const std::size_t source_layer = layer * g_source_experts_per_layer;
     const std::size_t destination_layer = layer * resident_count;
     for (std::size_t local_expert = 0; local_expert < resident_count;
          ++local_expert) {
@@ -709,10 +751,11 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
       for (const std::int32_t canonical_expert : config.resident_experts) {
         if (canonical_expert < 0 ||
             canonical_expert >=
-                static_cast<std::int32_t>(kNvfp4ExpertsPerLayer)) {
+                static_cast<std::int32_t>(g_source_experts_per_layer)) {
           return impl_->reject_load_locked(
               ProviderStatus::invalid_argument,
-              "config.resident_experts contains an ID outside [0, 256)");
+              "config.resident_experts contains an ID outside the bank's "
+              "expert range");
         }
         const std::size_t expert_index =
             static_cast<std::size_t>(canonical_expert);
@@ -725,8 +768,8 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
       }
       resident_experts = config.resident_experts;
       if (resident_experts.empty()) {
-        resident_experts.reserve(kNvfp4ExpertsPerLayer);
-        for (std::size_t expert = 0; expert < kNvfp4ExpertsPerLayer;
+        resident_experts.reserve(g_source_experts_per_layer);
+        for (std::size_t expert = 0; expert < g_source_experts_per_layer;
              ++expert) {
           resident_experts.push_back(static_cast<std::int32_t>(expert));
         }
@@ -972,6 +1015,7 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
           state->capture_async_errors(std::move(errors));
         };
     impl_->profiling = profiling_requested();
+    impl_->spin_wait = spin_wait_enabled();
     sycl::property_list queue_properties =
         impl_->profiling
             ? sycl::property_list{sycl::property::queue::in_order(),
@@ -1393,6 +1437,35 @@ ProviderStatus B70Provider::take(const std::uint64_t generation,
     // One wait. The queue is in-order and issue() already enqueued the
     // H2D copies, the kernel, and the result copy, so waiting on the
     // last of them covers the whole dispatch.
+    //
+    // Spin first, block second. Intel's runtime spins for a short window
+    // inside wait_and_throw() and then SLEEPS the thread, so completion
+    // costs an interrupt wakeup. Measured at the production decode shape on
+    // the Gen4 B70 [experiments/b13_wait_probe.cpp, 3000 iters]:
+    //
+    //   blocking wait_and_throw() : mean 9.46 us  (p50 8.35, p90 17.87)
+    //   spin on event status      : mean 6.37 us  (p50 6.33, p90  6.76)
+    //
+    // 3.09 us/dispatch, and the blocking path is bimodal -- the p90 is where
+    // the sleep shows up. At 48 dispatches/step that is 0.15 ms/step.
+    // take() runs on the dedicated poller thread, which already spins in its
+    // outer loop (b70_capi.cpp), so it must never sleep here.
+    //
+    // The spin is BOUNDED and falls through to the blocking wait: a wedged
+    // device must not burn a core forever, and wait_and_throw() is still the
+    // only thing that surfaces asynchronous exceptions. After a successful
+    // spin it observes an already-complete event and returns immediately.
+    if (impl_->spin_wait) {
+      constexpr int kMaxSpins = 200000;  // ~2 orders of magnitude over p99
+      for (int spins = 0; spins < kMaxSpins; ++spins) {
+        if (impl_->copy_out
+                ->get_info<sycl::info::event::command_execution_status>() ==
+            sycl::info::event_command_status::complete) {
+          break;
+        }
+        SB_PROVIDER_SPIN_HINT();
+      }
+    }
     impl_->copy_out->wait_and_throw();
     const std::string asynchronous_error = impl_->consume_async_error();
     if (!asynchronous_error.empty()) {

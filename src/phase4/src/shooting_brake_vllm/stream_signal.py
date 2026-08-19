@@ -42,15 +42,21 @@ _wait_fn.restype = ctypes.c_int
 
 
 def alloc_host_mapped_flag(initial: int = 0) -> tuple[int, int]:
-    """Allocate a 4-byte host-mapped flag.
+    """Allocate a 4-byte host-mapped flag on its own cache lines.
 
     Returns ``(host_ptr_int, dev_ptr_int)`` — same physical memory,
     accessible from both CPU and GPU.
+
+    The allocation is padded to 256 bytes so no two flags can ever share a
+    cache line, regardless of how the runtime suballocates. Two flags on
+    one line let one side's write-back eat the other side's store; it
+    presents as a random hang after O(100) round trips, not as an obvious
+    bug (Bench 4 paid an afternoon for this).
     """
     host_ptr = ctypes.c_void_p()
     _cudart.cudaHostAlloc(
         ctypes.byref(host_ptr),
-        ctypes.c_size_t(4),
+        ctypes.c_size_t(256),
         ctypes.c_uint(_HOSTALLOC_MAPPED | _HOSTALLOC_PORTABLE),
     )
     dev_ptr = ctypes.c_void_p()

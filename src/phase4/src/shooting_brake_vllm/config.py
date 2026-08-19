@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from .int4_bank_format import (
     MAGIC as INT4_BANK_MAGIC,
@@ -71,6 +71,21 @@ _MODEL_SPECS = (
         default_bank_filename="expert_bank_int4.bin",
         language_model_only=True,
     ),
+    SupportedModel(
+        model="srswti/axe-superveloce-99b-nvfp4",
+        routed_experts_model="srswti/axe-superveloce-99b-nvfp4",
+        routed_expert_format="nvfp4",
+        hidden_size=3072,
+        num_layers=48,
+        num_experts=205,
+        top_k=8,
+        moe_intermediate_size=1024,
+        # The 99B ships as a text-only CausalLM export — no vision wrapper,
+        # unlike the 88B's ConditionalGeneration architecture.
+        architecture="Qwen3_5MoeForCausalLM",
+        default_bank_filename="expert_bank_99b.bin",
+        language_model_only=True,
+    ),
 )
 
 SUPPORTED_MODELS = {spec.model: spec for spec in _MODEL_SPECS}
@@ -87,14 +102,34 @@ QUALIFIED_BANK_EXPERTS_PER_LAYER = 256
 QUALIFIED_FP8_CUDA_ONLY_LAYERS = 8
 
 
+def _repo_id_from_hub_path(model: str) -> str | None:
+    """HF repo id recovered from a hub-cache snapshot path, or ``None``.
+
+    Offline mode (``HF_HUB_OFFLINE=1``) resolves a repo id to its local
+    snapshot directory before vLLM ever sees it, so ``model_config.model``
+    arrives as ``.../models--org--name/snapshots/<sha>``. The registry is
+    keyed by repo id; recover it from the ``models--org--name`` component.
+    """
+    for part in model.split("/"):
+        if part.startswith("models--"):
+            pieces = part.split("--")
+            if len(pieces) >= 3:
+                return f"{pieces[1]}/{'--'.join(pieces[2:])}"
+    return None
+
+
 def supported_model(model: str) -> SupportedModel:
     """Return the first-class dense/routed checkpoint contract."""
-    try:
-        return SUPPORTED_MODELS[model]
-    except KeyError as exc:
+    spec = SUPPORTED_MODELS.get(model)
+    if spec is None:
+        repo_id = _repo_id_from_hub_path(model)
+        if repo_id is not None:
+            spec = SUPPORTED_MODELS.get(repo_id)
+    if spec is None:
         raise QualificationError(
             f"unqualified model: {model!r} (admitted: {list(QUALIFIED_MODELS)})"
-        ) from exc
+        )
+    return spec
 
 
 class QualificationError(RuntimeError):
@@ -170,6 +205,30 @@ def bank_path(model: str | None = None) -> str:
     )
     default = Path(__file__).resolve().parents[3] / "phase1" / filename
     return os.environ.get("SHOOTING_BRAKE_B70_BANK", str(default))
+
+
+def b70_bank_paths(model: str | None = None) -> tuple[str, ...]:
+    """Per-card decode banks, position-aligned with the placement's sorted
+    remote device indices.
+
+    ``SHOOTING_BRAKE_B70_BANKS`` is a comma-separated path list for
+    multi-card configs (position 0 serves the first remote device index).
+    Unset falls back to the single legacy bank from :func:`bank_path`, so
+    every existing single-card recipe keeps working unchanged.
+
+    Each card needs its own bank holding exactly the expert IDs that card
+    owns — the contract check enforces set equality per device, so a
+    monolithic bank cannot be shared between two cards.
+    """
+    raw = os.environ.get("SHOOTING_BRAKE_B70_BANKS")
+    if raw is None:
+        return (bank_path(model),)
+    paths = tuple(item.strip() for item in raw.split(",") if item.strip())
+    if not paths:
+        raise QualificationError(
+            "SHOOTING_BRAKE_B70_BANKS is set but contains no paths"
+        )
+    return paths
 
 
 # Legacy NVFP4 header; int4 uses the canonical variable-header module.
@@ -286,11 +345,20 @@ def validate_int4_layer_ownership(
     cuda_expert_ids: Iterable[int],
     b70_expert_ids: Iterable[int],
     bank_source_expert_ids: Iterable[int],
+    other_remote_expert_ids: Iterable[int] = (),
 ) -> None:
-    """Prove one layer neither drops nor double-counts an int4 route."""
+    """Prove one layer neither drops nor double-counts an int4 route.
+
+    ``b70_expert_ids`` and ``bank_source_expert_ids`` describe ONE remote
+    device and its bank. ``other_remote_expert_ids`` are experts owned by
+    the *other* remote devices: they count toward layer coverage but must
+    stay disjoint from this device's bank — two cards holding the same
+    expert would double-count every route to it.
+    """
     cuda_ids = set(cuda_expert_ids)
     b70_ids = set(b70_expert_ids)
     bank_ids = set(bank_source_expert_ids)
+    other_ids = set(other_remote_expert_ids)
     if b70_ids != bank_ids:
         raise QualificationError(
             f"layer {layer} B70 ownership does not match the int4 bank: "
@@ -305,8 +373,15 @@ def validate_int4_layer_ownership(
             f"{_summarize_expert_ids(overlap)}"
         )
 
+    cross_device = bank_ids & other_ids
+    if cross_device:
+        raise QualificationError(
+            f"layer {layer} remote devices overlap — the same expert is "
+            f"resident on two cards: {_summarize_expert_ids(cross_device)}"
+        )
+
     model_ids = set(range(num_experts))
-    covered = cuda_ids | bank_ids
+    covered = cuda_ids | bank_ids | other_ids
     missing = model_ids - covered
     extra = covered - model_ids
     if missing or extra:
@@ -317,20 +392,19 @@ def validate_int4_layer_ownership(
         )
 
 
-def validate_int4_hybrid_contract(
-    spec: SupportedModel,
-    bank: BankHeader,
-    placement: object,
+def _validate_int4_bank_header(
+    spec: SupportedModel, bank: BankHeader, label: str,
 ) -> None:
-    """Validate the opt-in SBINT401 bank against its exact route owners."""
+    """One bank's format, version, and geometry against the model spec."""
     if bank.format != "gptq-int4-group128":
         raise QualificationError(
-            f"int4 hybrid requires SBINT401, got bank format {bank.format!r}"
+            f"int4 hybrid requires SBINT401, got bank format {bank.format!r} "
+            f"for {label}"
         )
     if bank.version != INT4_BANK_VERSION:
         raise QualificationError(
             f"int4 hybrid requires SBINT401 version {INT4_BANK_VERSION}, "
-            f"got version {bank.version}"
+            f"got version {bank.version} for {label}"
         )
 
     expected = {
@@ -365,45 +439,76 @@ def validate_int4_hybrid_contract(
             f"{name} bank={got} expected={want}"
             for name, (got, want) in wrong.items()
         )
-        raise QualificationError(f"int4 hybrid bank geometry mismatch: {detail}")
-
-    remote_indices = placement.remote_device_indices()
-    if remote_indices != (0,):
         raise QualificationError(
-            "step-1 int4 hybrid requires exactly B70 device 0; placement "
-            f"uses {remote_indices}"
+            f"int4 hybrid bank geometry mismatch for {label}: {detail}"
+        )
+    if not bank.source_expert_ids:
+        raise QualificationError(
+            f"SBINT401 bank for {label} has no source expert IDs"
+        )
+
+
+def validate_int4_hybrid_contract(
+    spec: SupportedModel,
+    banks: Sequence[BankHeader],
+    placement: object,
+) -> None:
+    """Validate the opt-in SBINT401 banks against their exact route owners.
+
+    ``banks`` is position-aligned with ``placement.remote_device_indices()``
+    (the :func:`b70_bank_paths` order). Each card's bank must hold exactly
+    the expert IDs that card owns, on every offloaded layer — a subset is
+    rejected, and so is any expert resident on two cards.
+    """
+    remote_indices = placement.remote_device_indices()
+    if len(banks) != len(remote_indices):
+        raise QualificationError(
+            f"placement uses remote devices {remote_indices} but "
+            f"{len(banks)} bank(s) were configured; set "
+            "SHOOTING_BRAKE_B70_BANKS to one bank per device, in device-"
+            "index order"
         )
     if placement.cpu_count():
         raise QualificationError(
-            "step-1 int4 hybrid does not support CPU-owned experts"
+            "int4 hybrid does not support CPU-owned experts"
         )
+    for index, bank in zip(remote_indices, banks):
+        _validate_int4_bank_header(spec, bank, f"B70 device {index}")
 
-    resident_ids = bank.source_expert_ids
-    if not resident_ids:
-        raise QualificationError("SBINT401 bank has no source expert IDs")
     for layer in range(spec.num_layers):
-        if layer >= bank.layers:
-            raise QualificationError(
-                f"int4 bank covers {bank.layers} layers, but placement "
-                f"offloads layer {layer}"
-            )
-        b70_ids = tuple(
-            expert
-            for expert, owner in enumerate(placement.owners[layer])
-            if owner.device.value == "b70" and owner.device_index == 0
-        )
         cuda_ids = tuple(
             expert
             for expert, owner in enumerate(placement.owners[layer])
             if owner.device.value == "cuda"
         )
-        validate_int4_layer_ownership(
-            layer=layer,
-            num_experts=spec.num_experts,
-            cuda_expert_ids=cuda_ids,
-            b70_expert_ids=b70_ids,
-            bank_source_expert_ids=resident_ids,
-        )
+        b70_ids_by_device = {
+            index: tuple(
+                expert
+                for expert, owner in enumerate(placement.owners[layer])
+                if owner.device.value == "b70" and owner.device_index == index
+            )
+            for index in remote_indices
+        }
+        for index, bank in zip(remote_indices, banks):
+            if layer >= bank.layers:
+                raise QualificationError(
+                    f"int4 bank for B70 device {index} covers {bank.layers} "
+                    f"layers, but placement offloads layer {layer}"
+                )
+            other_ids = tuple(
+                expert
+                for other, ids in b70_ids_by_device.items()
+                if other != index
+                for expert in ids
+            )
+            validate_int4_layer_ownership(
+                layer=layer,
+                num_experts=spec.num_experts,
+                cuda_expert_ids=cuda_ids,
+                b70_expert_ids=b70_ids_by_device[index],
+                bank_source_expert_ids=bank.source_expert_ids,
+                other_remote_expert_ids=other_ids,
+            )
 
 
 def _language_model_only(model_config: object) -> bool:
@@ -490,13 +595,21 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
     # served happily, with the B70 returning experts of the wrong shape for
     # every routed token. Comparing the shape the bank was built for
     # against the model's own geometry is what makes that impossible.
-    bank = read_bank_header(bank_path(model))
-    bank_layers = bank.layers
-    if bank_layers:
+    #
+    # Multi-card configs list one decode bank per card in
+    # SHOOTING_BRAKE_B70_BANKS; every bank must pass the identity check,
+    # and all must agree on layer coverage. The per-card expert-set
+    # equality is validated separately by the int4 hybrid contract.
+    paths = b70_bank_paths(model)
+    banks = tuple(read_bank_header(path) for path in paths)
+    for path, bank in zip(paths, banks):
+        bank_layers = bank.layers
+        if not bank_layers:
+            continue
         if bank.format != spec.routed_expert_format:
             raise QualificationError(
                 f"expert bank format {bank.format!r} does not match routed "
-                f"checkpoint format {spec.routed_expert_format!r}"
+                f"checkpoint format {spec.routed_expert_format!r} ({path})"
             )
         # Every dimension must match exactly. The layer count is the one
         # exception, and only downward: the FP8 tail is deliberately absent
@@ -527,8 +640,17 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
             )
             raise QualificationError(
                 f"expert bank was built for a different model than {model}: "
-                f"{detail}. Point SHOOTING_BRAKE_B70_BANK at this model's bank."
+                f"{detail} ({path}). Point SHOOTING_BRAKE_B70_BANK / "
+                "SHOOTING_BRAKE_B70_BANKS at this model's bank(s)."
             )
+    if len({bank.layers for bank in banks}) != 1:
+        raise QualificationError(
+            "per-card banks disagree on layer coverage: "
+            + ", ".join(
+                f"{path}={bank.layers}" for path, bank in zip(paths, banks)
+            )
+        )
+    bank_layers = banks[0].layers
 
     if getattr(parallel_config, "tensor_parallel_size", None) != 1:
         raise QualificationError("Phase 4 requires tensor parallel size one")
@@ -536,6 +658,46 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
         raise QualificationError("Phase 4 requires pipeline parallel size one")
     if getattr(parallel_config, "enable_eplb", False):
         raise QualificationError("Phase 4 does not admit EPLB")
+
+    # The QualifiedModel's bank view is the UNION across per-card banks:
+    # b70_capable_layers and b70_bank_covers() reason about "is this expert
+    # reachable off-CUDA at all", which is a union question. Per-card set
+    # equality is the hybrid contract's job, not this one's.
+    #
+    # Two multi-card shapes exist:
+    #   * SBINT401: one bank file per card, each a subset with explicit
+    #     source IDs — the union is their disjoint sum.
+    #   * SBEXP001: ONE monolithic full-coverage bank listed once per card
+    #     (per-card subsets are resident lists at provider load, not bank
+    #     files) — the union is simply the bank's full expert range.
+    if bank_layers and len(banks) > 1:
+        with_ids = [bank for bank in banks if bank.source_expert_ids]
+        if with_ids and len(with_ids) != len(banks):
+            raise QualificationError(
+                "multi-card banks mix explicit-source-ID (SBINT401) and "
+                "monolithic (SBEXP001) entries; use one shape"
+            )
+        if with_ids:
+            union_ids = tuple(sorted({
+                expert for bank in banks
+                for expert in bank.source_expert_ids
+            }))
+            union_count = len(union_ids)
+        else:
+            counts = {bank.experts_per_layer for bank in banks}
+            if len(counts) != 1:
+                raise QualificationError(
+                    "monolithic multi-card banks disagree on experts per "
+                    f"layer: {sorted(counts)}"
+                )
+            union_ids = ()
+            union_count = banks[0].experts_per_layer
+    else:
+        union_ids = banks[0].source_expert_ids
+        union_count = (
+            banks[0].experts_per_layer
+            if bank_layers else geometry["num_experts"]
+        )
 
     qualified = QualifiedModel(
         model=model,
@@ -546,10 +708,8 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
         top_k=geometry["num_experts_per_tok"],
         moe_intermediate_size=geometry["moe_intermediate_size"],
         bank_layers=bank_layers,
-        bank_experts_per_layer=(
-            bank.experts_per_layer if bank_layers else geometry["num_experts"]
-        ),
-        bank_source_expert_ids=bank.source_expert_ids,
+        bank_experts_per_layer=union_count,
+        bank_source_expert_ids=union_ids,
         routed_experts_model=spec.routed_experts_model,
         routed_expert_format=spec.routed_expert_format,
     )
@@ -571,6 +731,6 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
             num_experts=qualified.num_experts,
             b70_capable=qualified.b70_capable_layers,
         )
-        validate_int4_hybrid_contract(spec, bank, placement)
+        validate_int4_hybrid_contract(spec, banks, placement)
 
     return qualified

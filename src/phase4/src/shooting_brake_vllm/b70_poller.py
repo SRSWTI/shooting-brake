@@ -13,9 +13,13 @@ the GIL and starves the engine thread outright.  The loop therefore runs
 on a native thread inside ``libsb_b70_provider.so``
 (``sb_b70_poll_*``); this module is only the handle that owns it.
 
-There is exactly one physical B70 and one SYCL queue, so a single poller
-serves every NVFP4 layer.  Layers register as their real index becomes
-known, which is their first forward.
+One poller — one native thread, one SYCL queue — serves every NVFP4 layer
+of ONE physical B70.  With two cards there are two pollers, two threads:
+a single thread sweeping both cards would serialize the per-dispatch host
+leg (~2 × 49 µs > today's 82.5 µs single-card service) and erase the
+parallel-dispatch win, so per-card threads are a correctness requirement,
+not a tuning choice.  Layers register as their real index becomes known,
+which is their first forward.
 """
 
 from __future__ import annotations
@@ -47,9 +51,12 @@ class B70Poller:
     callers must check.  Exact failed-route recovery is Phase 9.
     """
 
-    def __init__(self, provider: Any, generation: int = 1) -> None:
+    def __init__(
+        self, provider: Any, generation: int = 1, pin_cpu: int = -1,
+    ) -> None:
         self._provider = provider
         self._lib = provider.lib
+        self._pin_cpu = pin_cpu
         self._handle = ctypes.c_void_p(
             self._lib.sb_b70_poll_create(provider.handle, generation)
         )
@@ -127,7 +134,7 @@ class B70Poller:
     def start(self) -> None:
         if self._started:
             return
-        if self._lib.sb_b70_poll_start(self._handle) != 0:
+        if self._lib.sb_b70_poll_start(self._handle, self._pin_cpu) != 0:
             raise RuntimeError("sb_b70_poll_start failed")
         self._started = True
         if self._trace_dump_path and self._trace_thread is None:
@@ -303,25 +310,52 @@ class B70Poller:
             pass
 
 
-# --- Process-wide singleton -------------------------------------------
+# --- Process-wide registry, one poller per physical card ----------------
 #
-# One physical B70, one SYCL queue: a single poller serves every layer.
+# Keyed by the placement's remote device index. A single-card config is a
+# registry of length one — the legacy behaviour falls out as the special
+# case rather than a branch.
 
-_poller_singleton: B70Poller | None = None
+_pollers: dict[int, B70Poller] = {}
 
 
-def get_b70_poller(placement: Any) -> B70Poller:
-    """Return the shared poller, creating it on first use.
+def _pin_cpu_for(position: int) -> int:
+    """CPU to pin the poller at remote-device *position* to, or -1.
+
+    ``SHOOTING_BRAKE_B70_POLL_CPUS`` is a comma-separated core list aligned
+    with the placement's sorted remote device indices, e.g. ``"6,7"`` pins
+    device position 0 to core 6 and position 1 to core 7.  Unset or short
+    lists leave the remainder unpinned — the scheduler already gives a
+    lone spinning thread its own core; pinning matters once two pollers
+    could land on one of this host's 8 CPUs.
+    """
+    raw = os.environ.get("SHOOTING_BRAKE_B70_POLL_CPUS", "")
+    if not raw:
+        return -1
+    cpus = [item.strip() for item in raw.split(",")]
+    if position >= len(cpus) or not cpus[position]:
+        return -1
+    return int(cpus[position])
+
+
+def get_b70_poller(placement: Any, device_index: int = 0) -> B70Poller:
+    """Return the poller for one physical B70, creating it on first use.
 
     The thread is NOT started here — the caller starts it once the first
-    layer has registered.
+    layer has registered.  Each poller wraps exactly one provider (one
+    card, one SYCL queue); nothing mutable is shared between cards.
     """
-    global _poller_singleton
-    if _poller_singleton is None:
+    poller = _pollers.get(device_index)
+    if poller is None:
         from .routed_experts import _get_b70_provider
 
-        _poller_singleton = B70Poller(_get_b70_provider(placement))
-    return _poller_singleton
+        position = placement.remote_device_indices().index(device_index)
+        poller = B70Poller(
+            _get_b70_provider(placement, device_index),
+            pin_cpu=_pin_cpu_for(position),
+        )
+        _pollers[device_index] = poller
+    return poller
 
 
 __all__ = ["B70Poller", "get_b70_poller"]

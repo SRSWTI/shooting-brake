@@ -95,7 +95,8 @@ def main():
     lib.sb_b70_create.restype = ctypes.c_void_p
     lib.sb_b70_load.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
                                 ctypes.c_uint64, ctypes.c_void_p,
-                                ctypes.c_size_t, ctypes.c_size_t]
+                                ctypes.c_size_t, ctypes.c_size_t,
+                                ctypes.c_char_p]
     lib.sb_b70_issue.argtypes = [ctypes.c_void_p, ctypes.c_uint64,
                                  ctypes.c_uint64, ctypes.c_size_t,
                                  ctypes.c_void_p, ctypes.c_void_p,
@@ -108,7 +109,8 @@ def main():
 
     p = lib.sb_b70_create()
     t0 = time.perf_counter()
-    rc = lib.sb_b70_load(p, str(BANK).encode(), GENERATION, None, 0, MAX_BATCH)
+    rc = lib.sb_b70_load(p, str(BANK).encode(), GENERATION, None, 0,
+                         MAX_BATCH, None)
     assert rc == 0, f"load rc={rc}"
     resident = lib.sb_b70_num_resident(p)
     print(f"pilot bank loaded in {time.perf_counter()-t0:.1f}s, "

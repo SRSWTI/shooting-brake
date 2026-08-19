@@ -299,7 +299,8 @@ sb_b70_provider_t* sb_b70_create(void) {
 
 int sb_b70_load(sb_b70_provider_t* handle, const char* bank_path,
                 std::uint64_t generation, const std::int32_t*,
-                std::size_t resident_count, std::size_t max_batch) {
+                std::size_t resident_count, std::size_t max_batch,
+                const char* /*device_selector*/) {
   if (!handle) return -1;
   return reinterpret_cast<DummyProvider*>(handle)->load(
       bank_path, generation, resident_count, max_batch);
@@ -378,7 +379,7 @@ int sb_b70_poll_register(sb_b70_poller_t* handle, std::size_t layer,
   return 0;
 }
 
-int sb_b70_poll_start(sb_b70_poller_t* handle) {
+int sb_b70_poll_start(sb_b70_poller_t* handle, int /*pin_cpu*/) {
   return handle ? reinterpret_cast<DummyPoller*>(handle)->start() : -1;
 }
 void sb_b70_poll_stop(sb_b70_poller_t* handle) {

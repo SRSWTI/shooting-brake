@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -39,6 +40,39 @@ from .placement import Device, Placement, build_for_qualified
 from .provider import ShootingBrakeExpertProviderClient
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _B70Lane:
+    """One card's complete doorbell lane for one layer.
+
+    Everything a dispatch touches lives on the lane — per-device slot map,
+    pinned staging, device-side result buffers, signal/completion flags,
+    poller handle — so two cards share nothing mutable. The 5090 is the
+    only hub; there is no lane↔lane edge by design.
+
+    ``slot_map``/``pinned_hidden``/``pinned_output`` exist whenever the
+    hybrid path is armed (the eager reference paths need them); the rest is
+    populated only in Tier 3 graph mode. Flags are one per lane per layer,
+    each on its own host-mapped page — Bench 4 learned the hard way that
+    two flags sharing a cache line present as a random hang after O(100)
+    round trips, not as an obvious bug.
+    """
+
+    device_index: int
+    slot_map: np.ndarray
+    pinned_hidden: torch.Tensor
+    pinned_output: torch.Tensor
+    slot_map_cuda: torch.Tensor | None = None
+    pinned_ids: torch.Tensor | None = None
+    pinned_weights: torch.Tensor | None = None
+    dev_fp32: torch.Tensor | None = None
+    dev_bf16: torch.Tensor | None = None
+    signal_host: int = 0
+    signal_dev: int = 0
+    completion_host: int = 0
+    completion_dev: int = 0
+    poller: Any = None
 
 
 def _placement_policy_name() -> str:
@@ -269,26 +303,10 @@ def b70_stream_threshold() -> int:
         )
     )
 
-def _build_b70_slot_map(placement: Placement) -> np.ndarray:
-    """Return the checked global→compact map for B70 device zero.
-
-    Step 1 deliberately uses one B70.  Placement already represents multiple
-    remote devices, but dispatch does not until the asynchronous multi-device
-    step.  Refuse such a placement here instead of collapsing device-local
-    slots from two cards into one plausible-looking map.
-    """
-    indices = placement.remote_device_indices()
-    if indices not in ((), (0,)):
-        raise RuntimeError(
-            "B70 dispatch currently supports exactly device 0; placement "
-            f"assigns remote device indices {indices}"
-        )
-
-    slot_map = np.full(placement.num_experts, -1, dtype=np.int32)
+def _validate_shared_resident_set(placement: Placement) -> int:
+    """Return the reference layer after proving every active layer offloads
+    the same expert IDs — one bank per card spans all its layers."""
     active = placement.b70_active_layers()
-    if not active:
-        return slot_map
-
     reference_layer = active[0]
     reference_ids = placement.b70_expert_ids(reference_layer)
     for layer in active[1:]:
@@ -300,39 +318,119 @@ def _build_b70_slot_map(placement: Placement) -> np.ndarray:
                 f"{reference_ids[:4]}...{reference_ids[-4:]}, layer {layer} "
                 f"has {ids[:4]}...{ids[-4:]}"
             )
+    return reference_layer
+
+
+def _build_b70_slot_map(
+    placement: Placement, device_index: int = 0,
+) -> np.ndarray:
+    """Return the checked global→compact map for ONE B70 device.
+
+    Each card has its own dense slot space (placement assigns per-target
+    slots dense from zero), so each card gets its own map. An expert owned
+    by a *different* card is -1 here exactly like a CUDA-owned one — the
+    kernel's skip ABI is the same either way, which is what lets one gather
+    per card bucket the routes with no partition pass.
+    """
+    slot_map = np.full(placement.num_experts, -1, dtype=np.int32)
+    if not placement.b70_active_layers():
+        return slot_map
+    reference_layer = _validate_shared_resident_set(placement)
 
     for expert_id, owner in enumerate(placement.owners[reference_layer]):
-        if owner.device is Device.B70:
-            if owner.device_index != 0:
-                raise RuntimeError(
-                    f"expert {expert_id} targets unsupported B70 device "
-                    f"{owner.device_index}"
-                )
+        if owner.device is Device.B70 and owner.device_index == device_index:
             slot_map[expert_id] = owner.slot
 
     compact = slot_map[slot_map >= 0]
     if not np.array_equal(
         np.sort(compact), np.arange(len(compact), dtype=np.int32),
     ):
-        raise RuntimeError("B70 compact slots are not dense from zero")
+        raise RuntimeError(
+            f"B70 device {device_index} compact slots are not dense from zero"
+        )
     return slot_map
 
 
-_b70_provider_singleton: Any = None
+def _build_b70_union_slot_map(placement: Placement) -> np.ndarray:
+    """Global→slot map into the UNION of all cards' resident sets.
+
+    This is the id space of the monolithic host-side artifacts — the Marlin
+    prefill bank and the DRAM streaming arena index — which are built from
+    the sorted union of offloaded experts and never split per card. For a
+    single-card placement it coincides with that card's dispatch map; with
+    two cards it is a THIRD id space, valid for prefill only. Never hand it
+    to a provider.
+    """
+    slot_map = np.full(placement.num_experts, -1, dtype=np.int32)
+    if not placement.b70_active_layers():
+        return slot_map
+    reference_layer = _validate_shared_resident_set(placement)
+    union_ids = placement.b70_expert_ids(reference_layer)
+    for slot, expert_id in enumerate(union_ids):
+        slot_map[expert_id] = slot
+    return slot_map
 
 
-def _get_b70_provider(placement: Placement) -> Any:
-    """Lazily create and cache the in-process B70 provider singleton."""
-    global _b70_provider_singleton
-    if _b70_provider_singleton is not None:
-        return _b70_provider_singleton
+_b70_providers: dict[int, Any] = {}
+
+
+def _b70_device_selector(placement: Placement, device_index: int) -> str:
+    """Resolve which physical card one provider owns.
+
+    ``SHOOTING_BRAKE_B70_SELECTORS`` is a comma-separated list aligned with
+    the placement's sorted remote device indices. Production configs must
+    use PCI BDFs (``0000:15:00.0``) — Level Zero enumeration order put the
+    Gen3 card at index 0 and silently cost 40% for weeks. A single-card
+    placement may leave it unset and keep the legacy first-device pick.
+    """
+    indices = placement.remote_device_indices()
+    position = indices.index(device_index)
+    raw = os.environ.get("SHOOTING_BRAKE_B70_SELECTORS", "")
+    if not raw:
+        if len(indices) > 1:
+            raise RuntimeError(
+                "a multi-card placement requires SHOOTING_BRAKE_B70_SELECTORS "
+                "(comma-separated PCI BDFs, one per remote device index in "
+                f"order); placement uses devices {indices}"
+            )
+        return ""
+    selectors = [item.strip() for item in raw.split(",")]
+    if position >= len(selectors) or not selectors[position]:
+        raise RuntimeError(
+            f"SHOOTING_BRAKE_B70_SELECTORS has no entry for remote device "
+            f"{device_index} (position {position}): {raw!r}"
+        )
+    return selectors[position]
+
+
+def _get_b70_provider(placement: Placement, device_index: int = 0) -> Any:
+    """Lazily create and cache the provider for one physical B70.
+
+    One provider per card — own SYCL context, own in-order queue, own bank
+    mmap. The registry replaces the old process singleton; a single-card
+    config is a registry of length one, so the legacy behaviour falls out
+    as the special case rather than a branch.
+    """
+    provider = _b70_providers.get(device_index)
+    if provider is not None:
+        return provider
 
     from .b70_binding import B70ProviderClient
+    from .config import b70_bank_paths
 
     lib_path = os.environ.get(
         "SHOOTING_BRAKE_B70_LIB", "src/phase7/libsb_b70_provider.so"
     )
-    bank_path = _b70_bank_path()
+    indices = placement.remote_device_indices()
+    position = indices.index(device_index)
+    bank_paths = b70_bank_paths()
+    if len(bank_paths) != len(indices):
+        raise RuntimeError(
+            f"placement uses remote devices {indices} but "
+            f"{len(bank_paths)} bank(s) were configured; set "
+            "SHOOTING_BRAKE_B70_BANKS to one decode bank per device"
+        )
+    bank_path = bank_paths[position]
     # Every B70-active layer offloads the same expert ids — one resident
     # set covers the whole bank — but layer 0 is not necessarily active
     # (a subset policy may leave it entirely on CUDA), so read the set
@@ -341,21 +439,24 @@ def _get_b70_provider(placement: Placement) -> Any:
     resident = sorted(
         e for e in range(placement.num_experts)
         if placement.owners[reference_layer][e].device is Device.B70
+        and placement.owners[reference_layer][e].device_index == device_index
     )
     resident_np = np.array(resident, dtype=np.int32)
     max_batch = int(os.environ.get("SHOOTING_BRAKE_B70_MAX_BATCH", "128"))
+    selector = _b70_device_selector(placement, device_index)
 
     logger.info(
-        "Shooting Brake Phase-7: initializing B70 provider "
-        "(%d resident experts/layer)...", len(resident)
+        "Shooting Brake Phase-7: initializing B70 provider for device %d "
+        "(selector=%r, %d resident experts/layer, bank=%s)...",
+        device_index, selector, len(resident), bank_path,
     )
     provider = B70ProviderClient(lib_path)
     provider.load(bank_path, generation=1, resident_experts=resident_np,
-                  max_batch=max_batch)
-    _b70_provider_singleton = provider
+                  max_batch=max_batch, device_selector=selector)
+    _b70_providers[device_index] = provider
     logger.info(
-        "Shooting Brake Phase-7: B70 provider ready "
-        "(resident_per_layer=%d)", provider.resident_per_layer
+        "Shooting Brake Phase-7: B70 provider ready for device %d "
+        "(resident_per_layer=%d)", device_index, provider.resident_per_layer
     )
     return provider
 
@@ -906,7 +1007,12 @@ class HybridRoutedExperts(RoutedExperts):
             )
         self.shooting_brake_qualified_model = qualified_model
         self._device_map_cpu = build_device_map(self.shooting_brake_placement)
-        self._b70_slot_map = _build_b70_slot_map(self.shooting_brake_placement)
+        # Union map: the id space of the monolithic host-side artifacts
+        # (Marlin prefill bank, DRAM streaming arena). Dispatch never uses
+        # it — each card's lane carries its own per-device map below.
+        self._b70_slot_map = _build_b70_union_slot_map(
+            self.shooting_brake_placement
+        )
         # Phase 8a: pinned host buffers for async B70 overlap.
         # Pre-allocated once and reused every step to avoid per-step
         # allocation on the hot path.  Pinned memory enables DMA D2H/H2D.
@@ -918,16 +1024,30 @@ class HybridRoutedExperts(RoutedExperts):
             hidden_size=qualified_model.hidden_size,
             top_k=qualified_model.top_k,
         )
-        # Both sides use this one model-derived shape. For the 88B step-1
-        # model it is [max_batch, 3072]; a stale 2048 would now fail the
-        # registration check instead of making every native dispatch fail.
-        self._b70_pinned_hidden: torch.Tensor = torch.empty(
-            *self._dispatch_geometry.hidden_shape, dtype=torch.float16,
-            pin_memory=True, device="cpu",
-        )
-        self._b70_pinned_output: torch.Tensor = torch.empty(
-            *self._dispatch_geometry.hidden_shape, dtype=torch.float32,
-            pin_memory=True, device="cpu",
+        # One complete doorbell lane per physical card: per-device slot map
+        # plus this layer's pinned staging (D2H/H2D DMA targets). Both sides
+        # use the one model-derived shape above. For the 88B step-1 model it
+        # is [max_batch, 3072]; a stale 2048 would now fail the registration
+        # check instead of making every native dispatch fail. Graph-mode
+        # buffers (route staging, device results, flags) are filled in
+        # further down only when Tier 3 is armed.
+        self._b70_lanes: tuple[_B70Lane, ...] = tuple(
+            _B70Lane(
+                device_index=index,
+                slot_map=_build_b70_slot_map(
+                    self.shooting_brake_placement, index,
+                ),
+                pinned_hidden=torch.empty(
+                    *self._dispatch_geometry.hidden_shape,
+                    dtype=torch.float16, pin_memory=True, device="cpu",
+                ),
+                pinned_output=torch.empty(
+                    *self._dispatch_geometry.hidden_shape,
+                    dtype=torch.float32, pin_memory=True, device="cpu",
+                ),
+            )
+            for index in
+            self.shooting_brake_placement.remote_device_indices()
         )
         # Phase 8.5: VRAM surgery state. When enabled, B70-owned expert
         # weights are removed from CUDA VRAM on the first forward call.
@@ -1036,34 +1156,42 @@ class HybridRoutedExperts(RoutedExperts):
         # It must exist before vLLM's KV-profile dummy forward.
         self._initialize_b70_slot_map_cuda()
         if self._b70_graph_mode:
-            # Pinned buffers for routing data (D2H targets).
-            self._pinned_b70_ids = torch.empty(
-                *self._dispatch_geometry.route_shape, dtype=torch.int32,
-                pin_memory=True, device="cpu",
-            )
-            self._pinned_b70_weights = torch.empty(
-                *self._dispatch_geometry.route_shape, dtype=torch.float32,
-                pin_memory=True, device="cpu",
-            )
-            # Device-side result buffers (pre-allocated, no torch.empty in forward).
-            self._dev_b70_fp32 = torch.empty(
-                self._b70_max_batch, self.hidden_size,
-                dtype=torch.float32, device="cuda",
-            )
-            self._dev_b70_bf16 = torch.empty(
-                self._b70_max_batch, self.hidden_size,
-                dtype=torch.bfloat16, device="cuda",
-            )
-            # Signal/completion flags (host-mapped, accessible from both sides).
             from .stream_signal import alloc_host_mapped_flag
-            self._signal_host, self._signal_dev = alloc_host_mapped_flag(0)
-            self._completion_host, self._completion_dev = alloc_host_mapped_flag(0)
-            # One shared poller serves every NVFP4 layer (single physical
-            # B70).  Registration is deferred to the first forward, where
+            for lane in self._b70_lanes:
+                # Pinned buffers for routing data (D2H targets).
+                lane.pinned_ids = torch.empty(
+                    *self._dispatch_geometry.route_shape, dtype=torch.int32,
+                    pin_memory=True, device="cpu",
+                )
+                lane.pinned_weights = torch.empty(
+                    *self._dispatch_geometry.route_shape,
+                    dtype=torch.float32, pin_memory=True, device="cpu",
+                )
+                # Device-side result buffers (pre-allocated, no torch.empty
+                # in forward).
+                lane.dev_fp32 = torch.empty(
+                    self._b70_max_batch, self.hidden_size,
+                    dtype=torch.float32, device="cuda",
+                )
+                lane.dev_bf16 = torch.empty(
+                    self._b70_max_batch, self.hidden_size,
+                    dtype=torch.bfloat16, device="cuda",
+                )
+                # Signal/completion flags (host-mapped, visible to both
+                # sides). Per lane per layer; alloc_host_mapped_flag hands
+                # out separate allocations, so no two flags share a cache
+                # line (see _B70Lane docstring for why that is load-bearing).
+                lane.signal_host, lane.signal_dev = alloc_host_mapped_flag(0)
+                lane.completion_host, lane.completion_dev = (
+                    alloc_host_mapped_flag(0)
+                )
+            # One poller per physical card serves every NVFP4 layer.
+            # Registration is deferred to the first forward, where
             # `_ensure_layer_device_map` resolves this layer's real index.
             logger.info(
                 "Shooting Brake Tier 3: graph-compatible B70 dispatch "
-                "enabled for layer %s", self.layer_name,
+                "enabled for layer %s (%d lane(s))",
+                self.layer_name, len(self._b70_lanes),
             )
         # All-out mode: the CPU DDR5 cold tier. Structurally a second copy
         # of the Tier 3 machinery above (flags, pinned staging, native
@@ -1169,12 +1297,22 @@ class HybridRoutedExperts(RoutedExperts):
     def _initialize_b70_slot_map_cuda(
         self, device: str | torch.device = "cuda",
     ) -> None:
-        """Materialize the global-to-B70 slot map before any forward."""
+        """Materialize the global-to-B70 slot maps before any forward.
+
+        ``_b70_slot_map_cuda`` is the union (prefill/marlin) map; each
+        lane additionally gets its own per-device dispatch map. Both
+        synchronous prefill and graph decode gather through these, so they
+        must exist before vLLM's KV-profile dummy forward.
+        """
         self._b70_slot_map_cuda: torch.Tensor | None = None
         if self._hybrid_active:
             self._b70_slot_map_cuda = torch.tensor(
                 self._b70_slot_map, device=device, dtype=torch.int32,
             )
+            for lane in getattr(self, "_b70_lanes", ()):
+                lane.slot_map_cuda = torch.tensor(
+                    lane.slot_map, device=device, dtype=torch.int32,
+                )
 
     @property
     def layer_index(self) -> int:
@@ -1954,7 +2092,7 @@ class HybridRoutedExperts(RoutedExperts):
         )
 
     def _register_b70_poller(self, layer_idx: int) -> None:
-        """Bind this layer's flags and pinned buffers to the shared poller.
+        """Bind this layer's lanes to their per-card pollers.
 
         A layer that owns no B70 experts becomes pure CUDA passthrough.
         That covers the FP8 layers 32-39, which the bank does not span,
@@ -1990,28 +2128,35 @@ class HybridRoutedExperts(RoutedExperts):
             )
             return
 
-        validate_dispatch_buffer_shapes(
-            self._dispatch_geometry,
-            pinned_hidden=self._b70_pinned_hidden,
-            pinned_ids=self._pinned_b70_ids,
-            pinned_weights=self._pinned_b70_weights,
-            pinned_output=self._b70_pinned_output,
-        )
-        poller = get_b70_poller(self.shooting_brake_placement)
-        poller.register_layer(
-            layer_idx=layer_idx,
-            signal_host=self._signal_host,
-            completion_host=self._completion_host,
-            pinned_hidden=self._b70_pinned_hidden,
-            pinned_ids=self._pinned_b70_ids,
-            pinned_weights=self._pinned_b70_weights,
-            pinned_output=self._b70_pinned_output,
-        )
-        poller.start()
-        self._b70_poller = poller
+        for lane in self._b70_lanes:
+            validate_dispatch_buffer_shapes(
+                self._dispatch_geometry,
+                pinned_hidden=lane.pinned_hidden,
+                pinned_ids=lane.pinned_ids,
+                pinned_weights=lane.pinned_weights,
+                pinned_output=lane.pinned_output,
+            )
+            poller = get_b70_poller(
+                self.shooting_brake_placement, lane.device_index,
+            )
+            poller.register_layer(
+                layer_idx=layer_idx,
+                signal_host=lane.signal_host,
+                completion_host=lane.completion_host,
+                pinned_hidden=lane.pinned_hidden,
+                pinned_ids=lane.pinned_ids,
+                pinned_weights=lane.pinned_weights,
+                pinned_output=lane.pinned_output,
+            )
+            poller.start()
+            lane.poller = poller
+        # First lane kept as the flat attribute for telemetry readers that
+        # predate lanes; telemetry itself iterates `_b70_pollers`.
+        self._b70_pollers = tuple(lane.poller for lane in self._b70_lanes)
+        self._b70_poller = self._b70_pollers[0]
         logger.info(
-            "Shooting Brake Tier 3: layer %d registered with B70 poller",
-            layer_idx,
+            "Shooting Brake Tier 3: layer %d registered with %d B70 "
+            "poller(s)", layer_idx, len(self._b70_pollers),
         )
 
     def _first_forward_setup(self, topk_ids: torch.Tensor) -> None:
@@ -2197,12 +2342,21 @@ class HybridRoutedExperts(RoutedExperts):
             # Tier 3: pure CUDA stream ops — no partition, validation,
             # stats, or any host-side sync.  Every op below is captured
             # by torch.cuda.graph() without modification.
+            #
+            # Multi-card: one gather per lane buckets the routes with no
+            # partition pass — an expert on the other card is -1 in this
+            # lane's map exactly like a CUDA-owned one, and the kernel's
+            # skip ABI does the rest.
             if self._b70_slot_map_cuda is None:
                 raise RuntimeError(
                     "B70 CUDA slot map was not initialized before graph capture"
                 )
-            b70_ids = self._b70_slot_map_cuda[topk_ids]
-            b70_mask = b70_ids >= 0
+            lane_ids = [
+                lane.slot_map_cuda[topk_ids] for lane in self._b70_lanes
+            ]
+            b70_mask = lane_ids[0] >= 0
+            for ids in lane_ids[1:]:
+                b70_mask = b70_mask | (ids >= 0)
             if self._cpu_active:
                 cpu_ids = self._cpu_id_map_cuda[topk_ids]
                 cpu_mask = cpu_ids >= 0
@@ -2231,18 +2385,22 @@ class HybridRoutedExperts(RoutedExperts):
                 self._route_counter[1] += b70_mask.numel()
                 if self._cpu_active:
                     self._route_counter[2] += cpu_mask.sum()
-            # Issue both remote tiers before the CUDA work so both overlap
-            # with it. The CPU tier is the slower of the two (~195us vs
-            # ~40us), so it must start first to have any chance of hiding
-            # under the CUDA expert compute.
+            # Issue every remote tier before the CUDA work so all of them
+            # overlap with it. The CPU tier is the slowest (~195us vs
+            # ~40us), so it starts first; then every card's doorbell rings
+            # before any wait — the cards read their banks in parallel and
+            # the stream resumes after the slower one.
             if self._cpu_active:
                 self._cpu_issue_graph(x, cpu_ids, topk_weights)
-            self._b70_issue_graph(x, b70_ids, topk_weights)
+            for lane, ids in zip(self._b70_lanes, lane_ids):
+                self._b70_issue_graph(lane, x, ids, topk_weights)
             y_cuda = super().forward_modular(
                 x, cuda_weights, cuda_topk_ids,
                 shared_experts, shared_experts_input,
             )
-            y_b70 = self._b70_take_graph(x.shape[0])
+            y_b70 = self._b70_take_graph(self._b70_lanes[0], x.shape[0])
+            for lane in self._b70_lanes[1:]:
+                y_b70 = y_b70 + self._b70_take_graph(lane, x.shape[0])
             if self._cpu_active:
                 return y_cuda + y_b70 + self._cpu_take_graph(x.shape[0])
             return y_cuda + y_b70
@@ -2333,23 +2491,35 @@ class HybridRoutedExperts(RoutedExperts):
             )
 
             if self._b70_graph_mode:
-                # Tier 3: graph-compatible B70 dispatch (pure CUDA stream ops).
-                self._b70_issue_graph(x, topk_ids, topk_weights)
+                # Unreachable in practice — the Tier 3 branch above returns
+                # first — kept only so both graph call sites agree with the
+                # lane-based signatures.
+                lane_ids = [
+                    lane.slot_map_cuda[topk_ids] for lane in self._b70_lanes
+                ]
+                for lane, ids in zip(self._b70_lanes, lane_ids):
+                    self._b70_issue_graph(lane, x, ids, topk_weights)
                 y_cuda = super().forward_modular(
                     x, cuda_weights, cuda_topk_ids,
                     shared_experts, shared_experts_input,
                 )
-                y_b70 = self._b70_take_graph(x.shape[0])
+                y_b70 = self._b70_take_graph(
+                    self._b70_lanes[0], x.shape[0],
+                )
+                for lane in self._b70_lanes[1:]:
+                    y_b70 = y_b70 + self._b70_take_graph(lane, x.shape[0])
             elif self._b70_device_cached and self._b70_async_cached:
-                # Phase 8a: async overlap — B70 kernel runs during CUDA.
-                seq, b70_M = self._b70_issue(
+                # Phase 8a: async overlap — every card's kernel runs during
+                # the CUDA partial. All issues precede any take, so the
+                # cards read their banks in parallel even on this eager arm.
+                issued = self._b70_issue(
                     x, topk_ids, topk_weights, part, layer_idx,
                 )
                 y_cuda = super().forward_modular(
                     x, cuda_weights, cuda_topk_ids,
                     shared_experts, shared_experts_input,
                 )
-                y_b70 = self._b70_take(seq, b70_M, x.device, x.dtype)
+                y_b70 = self._b70_take(issued, x.device, x.dtype)
             elif self._b70_device_cached:
                 # Phase 7: synchronous B70 (correctness reference).
                 y_cuda = super().forward_modular(
@@ -2516,31 +2686,37 @@ class HybridRoutedExperts(RoutedExperts):
     ) -> torch.Tensor:
         """Compute the B70-device partial for B70-owned routes.
 
-        Translates global expert IDs to B70 compact slots, converts the
-        activation BF16 → FP16 for the B70 kernel, dispatches via the
-        in-process QuixiCore provider, and returns the weighted partial
-        as a BF16 CUDA tensor ready for addition.
+        Translates global expert IDs to each card's compact slots, converts
+        the activation BF16 → FP16 for the B70 kernel, dispatches every
+        card via its own in-process provider, and returns the summed
+        weighted partial as a BF16 CUDA tensor ready for addition. Route
+        ownership is disjoint across cards, so the per-card partials add
+        exactly like the CUDA/B70 pair does.
         """
-        provider = _get_b70_provider(self.shooting_brake_placement)
-
-        # Compact ID translation: global expert → B70 slot, CUDA routes → -1
+        # Compact ID translation: global expert → per-card slot, others → -1
         ids_np = topk_ids.detach().cpu().numpy()
         wts_np = topk_weights.detach().cpu().numpy()
-        b70_ids = self._b70_slot_map[ids_np]          # [M, topk]
-        b70_weights = wts_np * (b70_ids >= 0).astype(np.float32)
 
         # Activation: BF16 CUDA → FP16 CPU for the B70 NVFP4 kernel
         hidden_fp16 = x.detach().to(torch.float16).cpu().numpy()
 
-        output_np = provider.dispatch(
-            layer=layer_idx,
-            hidden_fp16=hidden_fp16,
-            ids=b70_ids,
-            weights=b70_weights,
-        )
+        total: np.ndarray | None = None
+        for lane in self._b70_lanes:
+            provider = _get_b70_provider(
+                self.shooting_brake_placement, lane.device_index,
+            )
+            b70_ids = lane.slot_map[ids_np]           # [M, topk]
+            b70_weights = wts_np * (b70_ids >= 0).astype(np.float32)
+            output_np = provider.dispatch(
+                layer=layer_idx,
+                hidden_fp16=hidden_fp16,
+                ids=b70_ids,
+                weights=b70_weights,
+            )
+            total = output_np if total is None else total + output_np
 
         # Result: FP32 CPU → BF16 CUDA
-        return torch.from_numpy(output_np).to(x.device).to(x.dtype)
+        return torch.from_numpy(total).to(x.device).to(x.dtype)
 
     def _b70_issue(
         self,
@@ -2549,73 +2725,90 @@ class HybridRoutedExperts(RoutedExperts):
         topk_weights: torch.Tensor,
         part: RoutePartition,
         layer_idx: int,
-    ) -> tuple[int, int]:
-        """Issue B70 dispatch — kernel starts asynchronously. Returns (seq, M).
+    ) -> tuple[tuple[tuple[Any, int], ...], int]:
+        """Issue every card's dispatch — kernels start asynchronously.
+
+        Returns ``((lane, sequence), ...), M`` for :meth:`_b70_take`.
 
         First half of the Phase-8a async overlap:
-        1.  D2H the activation (BF16 CUDA → FP16 pinned host, DMA copy).
-        2.  D2H routing data and translate global IDs → B70 compact slots.
-        3.  Submit to the B70 provider (SYCL queue enqueues kernel, returns).
+        1.  D2H the activation (BF16 CUDA → FP16 pinned host, DMA copy),
+            once per lane — lanes share nothing, including staging.
+        2.  D2H routing data and translate global IDs → per-card slots.
+        3.  Submit to every provider (each SYCL queue enqueues its kernel
+            and returns) — all issues precede any take, so the cards read
+            their banks in parallel.
 
         After this returns, the caller should do CUDA work (the routed-
         expert forward) and then call :meth:`_b70_take` to collect.
         """
-        provider = _get_b70_provider(self.shooting_brake_placement)
         M = x.shape[0]
 
         # D2H activation: BF16 CUDA → FP16 pinned [M, model hidden] buffer.
         # The width is `_dispatch_geometry.hidden_size` (3072 for step 1).
         x_fp16 = x.detach().to(torch.float16)
-        pinned_hidden = self._b70_pinned_hidden[:M]
-        pinned_hidden.copy_(x_fp16, non_blocking=True)
+        for lane in self._b70_lanes:
+            lane.pinned_hidden[:M].copy_(x_fp16, non_blocking=True)
         torch.cuda.current_stream().synchronize()
 
         # D2H routing data (tiny: M × model top-k × 4 B).
         ids_np = topk_ids.detach().cpu().numpy()
         wts_np = topk_weights.detach().cpu().numpy()
 
-        # Translate global expert IDs → B70 compact slots, zero CUDA routes.
-        b70_ids = self._b70_slot_map[ids_np]
-        b70_weights = wts_np * (b70_ids >= 0).astype(np.float32)
-
-        # Submit — SYCL kernel starts on B70, returns immediately.
-        seq = provider.issue(
-            layer=layer_idx,
-            hidden_fp16=pinned_hidden.numpy(),
-            ids=b70_ids,
-            weights=b70_weights,
-        )
-        return seq, M
+        issued = []
+        for lane in self._b70_lanes:
+            provider = _get_b70_provider(
+                self.shooting_brake_placement, lane.device_index,
+            )
+            # Translate global IDs → this card's slots, zero foreign routes.
+            b70_ids = lane.slot_map[ids_np]
+            b70_weights = wts_np * (b70_ids >= 0).astype(np.float32)
+            # Submit — SYCL kernel starts on this B70, returns immediately.
+            seq = provider.issue(
+                layer=layer_idx,
+                hidden_fp16=lane.pinned_hidden[:M].numpy(),
+                ids=b70_ids,
+                weights=b70_weights,
+            )
+            issued.append((lane, seq))
+        return tuple(issued), M
 
     def _b70_take(
         self,
-        sequence: int,
-        M: int,
+        issued: tuple[tuple[tuple[Any, int], ...], int],
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Collect B70 result. Blocks only if the kernel is still running.
+        """Collect every card's result. Blocks only on still-running kernels.
 
         Second half of the Phase-8a async overlap.  By the time this is
-        called (after CUDA forward_modular), the B70 kernel has typically
+        called (after CUDA forward_modular), the kernels have typically
         already finished — ``sb_b70_take`` returns immediately.
 
-        Writes into the pre-allocated pinned output buffer, then does a
-        non-blocking H2D copy (pinned source enables DMA) + dtype cast.
+        Writes into each lane's pre-allocated pinned output buffer, then
+        does non-blocking H2D copies (pinned source enables DMA) + dtype
+        cast, summing the disjoint per-card partials on device.
         """
-        provider = _get_b70_provider(self.shooting_brake_placement)
-        pinned_output = self._b70_pinned_output[:M]
-        provider.take(sequence, M, output=pinned_output.numpy())
-        # H2D from pinned (DMA) + cast FP32 → model dtype on GPU.
-        return pinned_output.to(device, non_blocking=True).to(dtype)
+        lanes_and_seqs, M = issued
+        total: torch.Tensor | None = None
+        for lane, sequence in lanes_and_seqs:
+            provider = _get_b70_provider(
+                self.shooting_brake_placement, lane.device_index,
+            )
+            pinned_output = lane.pinned_output[:M]
+            provider.take(sequence, M, output=pinned_output.numpy())
+            # H2D from pinned (DMA) + cast FP32 → model dtype on GPU.
+            partial = pinned_output.to(device, non_blocking=True).to(dtype)
+            total = partial if total is None else total + partial
+        return total
 
     def _b70_issue_graph(
         self,
+        lane: _B70Lane,
         x: torch.Tensor,
         b70_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> None:
-        """Graph-compatible B70 issue — pure CUDA stream operations.
+        """Graph-compatible B70 issue for one lane — pure CUDA stream ops.
 
         Replaces the eager-mode ``_b70_issue``, which uses ``.cpu()``,
         numpy, and ctypes and so cannot be captured.  Every operation
@@ -2628,37 +2821,39 @@ class HybridRoutedExperts(RoutedExperts):
           4. cuStreamWriteValue32 signal flag = M (Driver API)
 
         Args:
+            lane: The card whose doorbell rings — its staging, its flag.
             x: [M, hidden] activation on CUDA.
-            b70_ids: [M, topk] compact B70 slots, -1 for CUDA-owned
-                routes.  Gathered by the caller, which already needs the
-                mask to zero CUDA weights.
+            b70_ids: [M, topk] THIS lane's compact slots, -1 for routes
+                owned elsewhere (CUDA or another card).  Gathered by the
+                caller, which already needs the mask to zero CUDA weights.
             topk_weights: [M, topk] routing weights, unmodified.
         """
         from .stream_signal import write_flag
         M = x.shape[0]
 
         # 1-2. Activation: BF16 -> FP16, D2H to pinned.
-        self._b70_pinned_hidden[:M].copy_(
+        lane.pinned_hidden[:M].copy_(
             x.to(torch.float16), non_blocking=True,
         )
 
-        # 3. Routing data.  CUDA-owned routes carry slot -1 and are
+        # 3. Routing data.  Routes owned elsewhere carry slot -1 and are
         # skipped by the kernel, so their weights are irrelevant; the
         # weights go over as-is.
-        self._pinned_b70_ids[:M].copy_(b70_ids, non_blocking=True)
-        self._pinned_b70_weights[:M].copy_(topk_weights, non_blocking=True)
+        lane.pinned_ids[:M].copy_(b70_ids, non_blocking=True)
+        lane.pinned_weights[:M].copy_(topk_weights, non_blocking=True)
 
         # 4. Signal the poller.  The flag VALUE is M, so the poller
         # dispatches exactly this batch instead of the whole buffer.
         # M is a constant at capture time (one graph per batch size),
         # so it is baked into the replayed write — no extra transfer.
-        write_flag(self._signal_dev, M)
+        write_flag(lane.signal_dev, M)
 
     def _b70_take_graph(
         self,
+        lane: _B70Lane,
         M: int,
     ) -> torch.Tensor:
-        """Graph-compatible B70 take — pure CUDA stream operations.
+        """Graph-compatible B70 take for one lane — pure CUDA stream ops.
 
         Replaces the eager-mode ``_b70_take`` which uses ctypes and
         .to(device).  Every operation here is captured by the graph:
@@ -2667,22 +2862,26 @@ class HybridRoutedExperts(RoutedExperts):
           2. H2D copy FP32 result to device (cudaMemcpyAsync)
           3. dtype cast FP32→BF16 (CUDA)
           4. cuStreamWriteValue32 reset completion (Driver API)
+
+        With two lanes the caller waits them in sequence; the cards still
+        execute in parallel — the stream just resumes after the slower
+        one. The second wait costs ~1.19 µs [measured, kill-bench 13].
         """
         from .stream_signal import wait_flag, write_flag
 
-        # 1. Wait for B70 thread to finish.
-        wait_flag(self._completion_dev, 1)
+        # 1. Wait for this card's poller to finish.
+        wait_flag(lane.completion_dev, 1)
 
         # 2-3. H2D copy + dtype cast.
-        self._dev_b70_fp32[:M].copy_(
-            self._b70_pinned_output[:M], non_blocking=True,
+        lane.dev_fp32[:M].copy_(
+            lane.pinned_output[:M], non_blocking=True,
         )
-        self._dev_b70_bf16[:M].copy_(self._dev_b70_fp32[:M])
+        lane.dev_bf16[:M].copy_(lane.dev_fp32[:M])
 
         # 4. Reset completion for next replay.
-        write_flag(self._completion_dev, 0)
+        write_flag(lane.completion_dev, 0)
 
-        return self._dev_b70_bf16[:M]
+        return lane.dev_bf16[:M]
 
     def _cpu_issue_graph(
         self,
@@ -2799,7 +2998,8 @@ class HybridRoutedExperts(RoutedExperts):
                 else None
             )
             y = y + self._b70_prefill_partial(
-                layer_idx, x, b70_ids, topk_weights, b70_global_ids,
+                layer_idx, x, topk_ids, b70_ids, topk_weights,
+                b70_global_ids,
             )
         return y
 
@@ -2807,6 +3007,7 @@ class HybridRoutedExperts(RoutedExperts):
         self,
         layer_idx: int,
         x: torch.Tensor,
+        topk_ids: torch.Tensor,
         b70_ids: torch.Tensor,
         topk_weights: torch.Tensor,
         b70_global_ids: torch.Tensor | None = None,
@@ -2886,25 +3087,38 @@ class HybridRoutedExperts(RoutedExperts):
                 layer_idx, x, b70_global_ids, topk_weights,
             )
 
-        return self._b70_prefill_partial_dispatch(x, b70_ids, topk_weights)
+        return self._b70_prefill_partial_dispatch(x, topk_ids, topk_weights)
 
     def _b70_prefill_partial_dispatch(
         self,
         x: torch.Tensor,
-        b70_ids: torch.Tensor,
+        topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> torch.Tensor:
         """The original chunked B70 dispatch, factored out so the Marlin
-        verify arm can call it on identical inputs."""
+        verify arm can call it on identical inputs.
+
+        Takes GLOBAL router ids and gathers each card's slots itself — the
+        union map's slots mean nothing to a provider, and with two cards
+        each chunk must ring both doorbells before waiting on either.
+        """
         M = x.shape[0]
         cap = self._b70_max_batch
         out = torch.empty(M, self.hidden_size, dtype=x.dtype, device=x.device)
+        lane_ids = [lane.slot_map_cuda[topk_ids] for lane in self._b70_lanes]
         for start in range(0, M, cap):
             end = min(start + cap, M)
-            self._b70_issue_graph(
-                x[start:end], b70_ids[start:end], topk_weights[start:end],
-            )
-            out[start:end] = self._b70_take_graph(end - start)
+            for lane, ids in zip(self._b70_lanes, lane_ids):
+                self._b70_issue_graph(
+                    lane, x[start:end], ids[start:end],
+                    topk_weights[start:end],
+                )
+            # Each chunk's result is copied out before the next dispatch,
+            # because take returns a view the next chunk overwrites.
+            chunk = self._b70_take_graph(self._b70_lanes[0], end - start)
+            for lane in self._b70_lanes[1:]:
+                chunk = chunk + self._b70_take_graph(lane, end - start)
+            out[start:end] = chunk
         return out
 
     def _cpu_prefill_partial(

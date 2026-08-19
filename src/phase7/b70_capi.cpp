@@ -13,6 +13,9 @@
 #include <thread>
 #include <vector>
 
+#include <pthread.h>
+#include <sched.h>
+
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #define SB_SPIN_HINT() _mm_pause()
@@ -85,15 +88,32 @@ class B70Poller {
     layer_count_.store(layers_.size(), std::memory_order_release);
   }
 
-  int start() {
+  int start(int pin_cpu = -1) {
     if (running_.exchange(true)) return 0;  // already running
     try {
-      thread_ = std::thread([this] { loop(); });
+      thread_ = std::thread([this, pin_cpu] {
+        if (pin_cpu >= 0) pin_to_cpu(pin_cpu);
+        loop();
+      });
     } catch (...) {
       running_ = false;
       return -1;
     }
     return 0;
+  }
+
+  // Best-effort affinity: a failed pin degrades to the scheduler's choice,
+  // which is today's behaviour. It must never fail the start — an unpinned
+  // poller serves correctly, just with cross-core migration jitter.
+  static void pin_to_cpu(int cpu) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0) {
+      std::fprintf(stderr,
+                   "[sb_b70] poller CPU pin to %d failed; running unpinned\n",
+                   cpu);
+    }
   }
 
   void stop() {
@@ -299,7 +319,7 @@ sb_b70_provider_t* sb_b70_create(void) {
 int sb_b70_load(sb_b70_provider_t* provider, const char* bank_path,
                 uint64_t generation,
                 const int32_t* resident_experts, size_t resident_count,
-                size_t max_batch) {
+                size_t max_batch, const char* device_selector) {
   if (!provider || !bank_path) return -1;
   auto* p = reinterpret_cast<B70Provider*>(provider);
 
@@ -310,6 +330,9 @@ int sb_b70_load(sb_b70_provider_t* provider, const char* bank_path,
   if (resident_experts && resident_count > 0) {
     config.resident_experts.assign(resident_experts,
                                    resident_experts + resident_count);
+  }
+  if (device_selector) {
+    config.device_selector = device_selector;
   }
 
   return status_to_int(p->load(bank_path, config));
@@ -457,9 +480,9 @@ int sb_b70_poll_register(sb_b70_poller_t* poller, size_t layer,
   return 0;
 }
 
-int sb_b70_poll_start(sb_b70_poller_t* poller) {
+int sb_b70_poll_start(sb_b70_poller_t* poller, int pin_cpu) {
   if (!poller) return -1;
-  return reinterpret_cast<B70Poller*>(poller)->start();
+  return reinterpret_cast<B70Poller*>(poller)->start(pin_cpu);
 }
 
 void sb_b70_poll_stop(sb_b70_poller_t* poller) {

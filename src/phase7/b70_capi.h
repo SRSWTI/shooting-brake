@@ -55,12 +55,20 @@ sb_b70_provider_t* sb_b70_create(void);
  *                          the bank-defined resident set.
  * @param resident_count Length of resident_experts.
  * @param max_batch      Maximum tokens per dispatch (M).
+ * @param device_selector  Which B70 this provider owns. NULL or "" keeps the
+ *                         legacy first-enumerated device. A decimal string
+ *                         selects the zero-based B70 index; anything else is
+ *                         matched as a PCI BDF (e.g. "0000:15:00.0").
+ *                         Production multi-card configs must pass BDFs —
+ *                         Level Zero enumeration order is not stable across
+ *                         boots and once cost 40% by silently picking the
+ *                         Gen3 card.
  * @return 0 on success, <0 on error.
  */
 int sb_b70_load(sb_b70_provider_t* provider, const char* bank_path,
                 uint64_t generation,
                 const int32_t* resident_experts, size_t resident_count,
-                size_t max_batch);
+                size_t max_batch, const char* device_selector);
 
 /**
  * Submit one MoE dispatch (non-blocking until sb_b70_take).
@@ -180,8 +188,17 @@ int sb_b70_poll_register(sb_b70_poller_t* poller, size_t layer,
                          const float* weights, float* output,
                          size_t topk);
 
-/** Start the polling thread. Returns 0 on success, <0 on error. */
-int sb_b70_poll_start(sb_b70_poller_t* poller);
+/**
+ * Start the polling thread.
+ *
+ * @param pin_cpu  CPU to pin the thread to, or -1 for no pinning. With two
+ *                 cards each poller MUST own its own core: two pollers
+ *                 sharing one calling thread (or one core, on this 8-CPU
+ *                 host) serialize the per-dispatch host leg and erase the
+ *                 parallel-dispatch win entirely.
+ * @return 0 on success, <0 on error.
+ */
+int sb_b70_poll_start(sb_b70_poller_t* poller, int pin_cpu);
 
 /** Stop the polling thread and join it. */
 void sb_b70_poll_stop(sb_b70_poller_t* poller);

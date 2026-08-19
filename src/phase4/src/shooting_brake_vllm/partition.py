@@ -170,11 +170,19 @@ def compact_cuda_routes(
         )
     if global_to_local.ndim != 1:
         raise PartitionError("CUDA global-to-local map must be one-dimensional")
-    safe_global_ids = topk_ids.clamp(min=0)
-    local_ids = global_to_local[safe_global_ids]
+    safe_global_ids = topk_ids.long().clamp(min=0)
+    local_ids = global_to_local.to(topk_ids.device)[safe_global_ids]
     cuda_mask = (local_ids >= 0) & (topk_ids >= 0)
     cuda_weights = topk_weights * cuda_mask.to(topk_weights.dtype)
-    return local_ids.clamp(min=0), cuda_weights, cuda_mask
+    # Preserve the router's id dtype: the map is int64 for indexing, but
+    # downstream kernels (vLLM CUTLASS fp4 experts) require the ids in the
+    # exact dtype the router produced — silently widening int32 -> int64
+    # here cost a boot ("expected scalar type Int but found Long").
+    return (
+        local_ids.clamp(min=0).to(topk_ids.dtype),
+        cuda_weights,
+        cuda_mask,
+    )
 
 
 _DEVICE_CODE = {Device.CUDA: 0, Device.B70: 1, Device.CPU: 2}

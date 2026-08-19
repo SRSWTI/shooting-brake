@@ -1,0 +1,87 @@
+{
+  "config": {
+    "format": "nvfp4",
+    "bank0": "src/phase1/expert_bank_99b.bin",
+    "bank1": "src/phase1/expert_bank_99b.bin",
+    "bdf0": "0000:15:00.0",
+    "bdf1": "0000:11:00.0",
+    "experts_per_card": [
+      103,
+      102
+    ],
+    "pin_cpus": [
+      5,
+      6
+    ],
+    "cycles": 200,
+    "latency_reps": 300
+  },
+  "correctness": {
+    "step0_A": {
+      "fixture": "A",
+      "peak_rel_dev0": 5.57375696858965e-07,
+      "peak_rel_dev1": 5.666595407920124e-07,
+      "peak_rel_sum": 6.164719477865004e-07
+    },
+    "step1_B": {
+      "fixture": "B",
+      "peak_rel_dev0": 7.472481342044364e-07,
+      "peak_rel_dev1": 5.444701742349812e-07,
+      "peak_rel_sum": 5.915561111675907e-07
+    },
+    "step2_A": {
+      "fixture": "A",
+      "peak_rel_dev0": 5.447080673848976e-07,
+      "peak_rel_dev1": 5.666595407920124e-07,
+      "peak_rel_sum": 6.164719477865004e-07
+    },
+    "step3_C": {
+      "fixture": "C",
+      "peak_rel_dev0": 7.452088909140667e-07,
+      "peak_rel_dev1": 0.0,
+      "peak_rel_sum": 7.452088909140667e-07,
+      "dev1_exactly_zero": true
+    },
+    "step4_D": {
+      "fixture": "D",
+      "peak_rel_dev0": 0.0,
+      "peak_rel_dev1": 6.612284884739939e-07,
+      "peak_rel_sum": 6.612284884739939e-07,
+      "dev0_exactly_zero": true
+    }
+  },
+  "stress": {
+    "cycles": 200,
+    "worst_peak_rel_sum": 6.24082712573988e-07,
+    "errors_dev0": 0,
+    "errors_dev1": 0,
+    "service_mean_us_dev0": 145.04244500000001,
+    "service_mean_us_dev1": 73.46352
+  },
+  "latency": {
+    "dual": {
+      "mean_us": 78.55784686398692,
+      "p50_us": 73.74299457296729,
+      "p90_us": 81.91899250959978,
+      "p99_us": 103.24310744181254
+    },
+    "solo_dev0": {
+      "mean_us": 61.265827098395675,
+      "p50_us": 60.37300045136362,
+      "p90_us": 60.577002295758575,
+      "p99_us": 84.96370137436315
+    },
+    "solo_dev1": {
+      "mean_us": 64.62809649140884,
+      "p50_us": 62.43200914468616,
+      "p90_us": 72.61400751303881,
+      "p99_us": 85.04350334987976
+    },
+    "serialization": {
+      "dual_over_max_solo": 1.2155370671396735,
+      "dual_over_sum_solo": 0.624000306162107
+    }
+  },
+  "verdict": "PASS",
+  "failures": []
+}

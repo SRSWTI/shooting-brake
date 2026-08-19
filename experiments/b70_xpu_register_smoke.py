@@ -38,7 +38,8 @@ def main():
     lib.sb_b70_create.restype = ctypes.c_void_p
     lib.sb_b70_load.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
                                 ctypes.c_uint64, ctypes.c_void_p,
-                                ctypes.c_size_t, ctypes.c_size_t]
+                                ctypes.c_size_t, ctypes.c_size_t,
+                                ctypes.c_char_p]
     lib.sb_b70_poll_create.restype = ctypes.c_void_p
     lib.sb_b70_poll_create.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
     lib.sb_b70_poll_register.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
@@ -61,7 +62,7 @@ def main():
     assert provider, "provider create failed"
     t0 = time.perf_counter()
     rc = lib.sb_b70_load(provider, str(BANK).encode(), GENERATION, None, 0,
-                         MAX_BATCH)
+                         MAX_BATCH, None)
     if rc != 0:
         class Health(ctypes.Structure):
             _fields_ = [("generation", ctypes.c_uint64),
@@ -100,7 +101,7 @@ def main():
         hidden.data_ptr(), ids.data_ptr(), weights.data_ptr(),
         output.data_ptr(), TOPK)
     assert rc == 0, f"poll_register rc={rc}"
-    assert lib.sb_b70_poll_start(poller) == 0
+    assert lib.sb_b70_poll_start(poller, -1) == 0
 
     # Deterministic dispatch, seeded input. Defaults to the historical
     # M=4 x 6-valid-route shape; SB_SMOKE_M / SB_SMOKE_ROUTES override so the

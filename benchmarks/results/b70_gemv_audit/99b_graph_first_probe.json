@@ -1,0 +1,116 @@
+{
+  "recorded_at": "2026-08-19",
+  "model": "srswti/axe-superveloce-99b-nvfp4",
+  "served_model": "shooting-brake-99b",
+  "endpoint": "http://127.0.0.1:8017",
+  "software": {
+    "vllm": "0.27.1",
+    "torch": "2.13.0+cu130",
+    "flashinfer": "0.6.16.post3",
+    "cuda": "13.0",
+    "moe_backend": "VLLM_CUTLASS"
+  },
+  "arm": {
+    "expected": "doorbell",
+    "enforce_eager": false,
+    "breakable_cudagraph": false,
+    "cudagraph_mode": "FULL_AND_PIECEWISE",
+    "b70_stats": false,
+    "b70_trace": true,
+    "placement": "fractional:2:0.0048780487804878",
+    "remote_experts_per_card": [102, 102]
+  },
+  "boot": {
+    "model_load_s": 6.304048,
+    "torch_compile_s": 0.48,
+    "initial_profile_warmup_s": 61.62,
+    "engine_init_s": 76.62,
+    "piecewise_capture_descriptors": 4,
+    "piecewise_largest_batch": 8,
+    "full_decode_capture_descriptors": 3,
+    "full_decode_largest_batch": 4,
+    "capture_s": 2.0,
+    "cudagraph_pool_estimated_gib": 0.96,
+    "cudagraph_pool_actual_gib": 0.33,
+    "kv_cache_gib": 14.76,
+    "kv_cache_tokens": 529461,
+    "max_concurrency_at_32768": 16.16
+  },
+  "correctness": {
+    "prompt": "The integer after 41 is",
+    "completion": " 42.\n\nTo find the next integer after 41, simply",
+    "completion_tokens": 16,
+    "logprobs_present": true,
+    "logprobs_finite": true
+  },
+  "itl_probe": {
+    "shape": "short prompt, 256 output tokens, streaming, C=1",
+    "runs": [
+      {"ttft_s": 0.356, "itl_ms": 14.40, "chunks": 257},
+      {"ttft_s": 0.316, "itl_ms": 14.50, "chunks": 257},
+      {"ttft_s": 0.272, "itl_ms": 14.82, "chunks": 257},
+      {"ttft_s": 0.274, "itl_ms": 15.06, "chunks": 257}
+    ],
+    "itl_ms_mean_excluding_first": 14.790904302079374,
+    "ttft_s_mean_excluding_first": 0.28733792566345073,
+    "comparison_88b_production_itl_ms": 11.51,
+    "delta_ms": 3.280904302079374,
+    "delta_percent": 28.5048158304029,
+    "b70_clock_samples_per_card": 3198,
+    "b70_active_min_mhz": 400,
+    "b70_active_max_mhz": 2800,
+    "b70_active_median_mhz": 2800,
+    "b70_idle_fraction": 0.016
+  },
+  "per_device_m1_trace": {
+    "device0": {
+      "pci_bdf": "0000:15:00.0",
+      "dispatches": 50880,
+      "service_mean_us": 69.07275520833333,
+      "service_p50_us": 66.562,
+      "service_p90_us": 84.593,
+      "gap_p50_us": 209.728,
+      "gap_p90_us": 245.27,
+      "complete_48_layer_sweeps": 1060,
+      "sweep_p50_ms": 13.185212,
+      "sweep_p90_ms": 13.590073
+    },
+    "device1": {
+      "pci_bdf": "0000:11:00.0",
+      "dispatches": 50880,
+      "service_mean_us": 63.44024752358491,
+      "service_p50_us": 62.462,
+      "service_p90_us": 80.263,
+      "gap_p50_us": 212.118,
+      "gap_p90_us": 256.36,
+      "complete_48_layer_sweeps": 1060,
+      "sweep_p50_ms": 13.151021,
+      "sweep_p90_ms": 13.566843
+    }
+  },
+  "dma_buf_model_query": {
+    "prompt_tokens": 156,
+    "completion_tokens": 800,
+    "ttft_s": 0.364451467001345,
+    "stream_event_itl_ms": 14.718749406755533,
+    "stream_events": 800,
+    "wall_s": 12.125514104001923,
+    "b70_clock_samples_per_card": 2386,
+    "b70_active_min_mhz": 400,
+    "b70_active_max_mhz": 2800,
+    "b70_active_median_mhz": 2800,
+    "b70_idle_fraction": 0.022,
+    "answer_summary": "No userspace or ordinary driver bypass: BAR1 is an aperture, not allocatable RAM; legitimate cross-vendor DMA needs cooperating dma-buf exporter/importer, IOMMU mappings, and device drivers/firmware.",
+    "answer_corrections": [
+      "RTX 5090 uses GDDR7, not the answer's GDDR6 claim.",
+      "The answer's example BAR1 size is not evidence for this host.",
+      "The per-requester-ID page-permission claim is too specific without NVIDIA documentation."
+    ]
+  },
+  "verdict": {
+    "graph_correctness": "PASS",
+    "dual_lane_trace": "PASS",
+    "performance": "BLOCKED: 28.5% slower ITL than the 88B production reference",
+    "attribution": "B70 service is healthy; the 209-212 us inter-dispatch gap dominates the 13.15-13.19 ms 48-layer remote sweep. Investigate the CUDA-side inter-layer gap before dma-buf/ReBAR work."
+  }
+}

@@ -24,6 +24,25 @@
 #                  not an architectural one. Raise SB_MML if you would rather
 #                  have one very long sequence than several long ones.
 #   max-num-seqs   4, matching the 99B recipe.
+#   max-num-batched-tokens
+#                  512, NOT 2048, and NOT 256. Measured 2026-08-20
+#                  (kill-bench 21) on matched prompt slices, MNBT the only
+#                  variable. A decoding request waits one whole prefill
+#                  chunk behind another request's prefill, and the stall is
+#                  just arithmetic: MNBT x the per-token prefill rate.
+#                  At 2048 x ~1670 us that is 3.42 s predicted, 3.44-3.49 s
+#                  measured as ITL p99 at concurrency >= 2. Dropping to 512
+#                  cuts that p99 by ~74% (872/895 ms vs 855 predicted) and
+#                  costs NOTHING measurable: ITL p50 within 0.8%, TTFT
+#                  within 0.2% or better, aggregate within 1.3%, and the
+#                  smaller activation buffers hand back ~0.33 GiB of KV.
+#                  256 does NOT continue the trend. It halves p99 again
+#                  (437/449 ms) but a 47K prompt becomes 184 chunks, so the
+#                  scheduler interleaves most decode tokens INTO the prefill
+#                  window and ITL p50 at 32768x2 regresses 16.1 -> 204.9 ms,
+#                  12.7x. Small chunks do not remove the stall, they spread
+#                  it across every token. 512 is the knee: whole tail win,
+#                  zero median cost.
 #   gpu-util       0.85, NOT 0.90. This box drives a display: GNOME Shell and
 #                  friends need VRAM on the same 5090, so total card usage is
 #                  capped at ~29 GiB of the 31.84 GiB available rather than
@@ -95,7 +114,7 @@ exec .venv/bin/vllm serve srswti/axe-superveloce-jota-118b-r15-nvfp4 \
   --trust-remote-code \
   --moe-backend "${SB_MOE_BACKEND:-cutlass}" \
   --max-model-len "${SB_MML:-131072}" \
-  --max-num-batched-tokens "${SB_MNBT:-2048}" \
+  --max-num-batched-tokens "${SB_MNBT:-512}" \
   --gpu-memory-utilization "${SB_GPU_UTIL:-0.85}" \
   --max-num-seqs "${SB_MNS:-4}" \
   --reasoning-parser poolside_v1 \

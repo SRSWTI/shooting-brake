@@ -79,12 +79,22 @@ export SHOOTING_BRAKE_B70_TRACE_DUMP="${SHOOTING_BRAKE_B70_TRACE_DUMP:-/tmp/sb_r
 # faults with a misaligned address. Pin to vLLM's in-tree CUTLASS experts.
 export VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS="trtllm::fused_moe::gemm1,trtllm::fused_moe::gemm2"
 echo "=== launching jota-r20 dual-B70 $(date '+%H:%M:%S')"
+# max-num-batched-tokens 512 is [INFERENCE], not measured on r20. The
+# mechanism is arithmetic and model-independent -- a decoding request waits
+# one prefill chunk, MNBT x per-token prefill rate -- and r20's rate
+# (1607 us/tok, Bench 19) is within 4% of r15's, where 512 was measured to
+# cut ITL p99 ~74% at zero median cost (Bench 21). Shipping the known 3.4 s
+# tail would be worse than shipping this. Re-measure when r20 is next up.
+#
+# Local expert count is ALSO unswept here: `fractional:2:0.2634` is the
+# 99B's optimum rescaled, and Bench 20 showed r15's decode saturates at
+# L~40, so this is very likely leaving KV on the table.
 exec .venv/bin/vllm serve srswti/axe-superveloce-jota-118b-r20-nvfp4 \
   --served-model-name shooting-brake-jota-r20 \
   --host 127.0.0.1 --port 8017 \
   --trust-remote-code \
   --moe-backend "${SB_MOE_BACKEND:-cutlass}" \
   --max-model-len "${SB_MML:-32768}" \
-  --max-num-batched-tokens "${SB_MNBT:-2048}" \
+  --max-num-batched-tokens "${SB_MNBT:-512}" \
   --gpu-memory-utilization "${SB_GPU_UTIL:-0.85}" \
   --max-num-seqs "${SB_MNS:-4}" ${SB_EXTRA_ARGS}

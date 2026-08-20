@@ -1672,3 +1672,82 @@ slice and flush the cache between points.
 **Not established:** r20 was NOT swept. It has 205 experts and its own KV
 cost; its `fractional:2:0.2634` (54 local) is still inherited arithmetic and
 should not be assumed optimal from this. Nothing here measures quality.
+
+## Bench 21 — r15 serving surface, and the chunk-stall tail (2026-08-20)
+
+Ten cells, context x concurrency x 128 output, real prose corpus, per-card
+trace attribution on one clock. `benchmarks/results/.../r15_L48_matrix.json`.
+**Zero failed requests across the matrix, including 131072 context.**
+
+| ctx | C | ptok | TTFT p50 | us/tok | ITL p50 | ITL p99 | tok/s/req | agg |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | 1 | 928 | 1.564 | 1685 | 10.95 | 11.40 | 91.3 | 43.3 |
+| 1024 | 2 | 1061 | 3.364 | 3172 | 13.25 | 13.72 | 75.5 | 49.1 |
+| 1024 | 4 | 1149 | 7.443 | 6481 | 18.39 | 30.58 | 54.4 | 51.2 |
+| 8192 | 1 | 7122 | 11.803 | 1657 | 11.12 | 11.52 | 90.0 | 9.7 |
+| 8192 | 2 | 8770 | 24.601 | 2805 | 13.76 | 388.24 | 72.7 | 8.2 |
+| 8192 | 4 | 13604 | 45.827 | 3369 | 20.03 | 3458.55 | 49.9 | 5.5 |
+| 32768 | 1 | 19907 | 33.441 | 1680 | 11.56 | 24.77 | 86.5 | 3.6 |
+| 32768 | 2 | 21529 | 56.906 | 2643 | 14.60 | 3460.77 | 68.5 | 3.4 |
+| 32768 | 4 | 37159 | 154.589 | 4160 | 22.80 | 3549.29 | 43.9 | 2.0 |
+| 131072 | 1 | 125756 | 220.589 | 1754 | 14.86 | 26.36 | 67.3 | 0.6 |
+
+1. **Prefill is linear over a 135x token range.** 1685/1657/1680/1754 us/tok
+   at C=1 from 928 to 125,756 tokens — 4% spread. The linear model holds at
+   L=48 exactly as it did at L=57.
+2. **Concurrency does not buy throughput past ~1K context; it costs it.**
+   Aggregate goes 9.7 -> 8.2 -> 5.5 at 8K and 3.6 -> 3.4 -> 2.0 at 32K.
+   Prefill is serialised and dominates, so adding streams adds queueing.
+   Only at 1K does concurrency help at all (43 -> 51 tok/s).
+3. **131072 context serves, and costs 3.7 minutes.** 220.6 s TTFT for
+   125,756 tokens. That is the headline SLO problem, and prefix caching is
+   the only thing that touches it.
+
+### The chunk stall — diagnosed, then fixed
+
+The p99 column is not noise, it is **arithmetic**: a decoding request waits
+one entire prefill chunk behind another request's prefill.
+
+```
+MNBT x per-token prefill rate = predicted stall
+2048 x 1670 us = 3.42 s   measured p99: 3.44 / 3.46 / 3.49 / 3.55 s
+ 512 x 1670 us = 0.86 s   measured p99: 0.872 / 0.895 s
+ 256 x 1670 us = 0.43 s   measured p99: 0.437 / 0.449 s
+```
+
+Three predictions, three matches inside 5%. A/B on **matched prompt slices**
+with MNBT the only variable (an unmatched first attempt compared 21,528
+against 46,957 tokens for the same `ctx=32768` target and had to be thrown
+away — see the instrument note below):
+
+| cell | ITL p99 | ITL p50 | TTFT p50 | agg tok/s |
+|---|---:|---:|---:|---:|
+| 8192x1 | -1.2% | -0.8% | +0.1% | 0.0% |
+| 8192x4 | **-74.7%** | -0.1% | **-12.8%** | -0.3% |
+| 32768x2 | **-74.3%** | -0.2% | +0.2% | -1.3% |
+
+**512 costs nothing measurable** and hands back ~0.33 GiB of KV (smaller
+activation buffers): 9.97 -> 10.30 GiB. TTFT at 8192x4 *improves* 12.8% from
+fairer scheduling.
+
+**256 does not continue the trend — it inverts.** p99 halves again, but a
+47K prompt becomes 184 chunks, the scheduler interleaves most decode tokens
+into the prefill window, and ITL p50 at 32768x2 goes **16.1 -> 204.9 ms, a
+12.7x regression**. Small chunks do not remove the stall; they spread it
+across every token. Median dies to save the tail.
+
+**Adopted: MNBT=512** on r15 (measured) and r20 ([INFERENCE] — same
+arithmetic, prefill rates within 4%, and shipping a known 3.4 s tail would
+be worse than shipping the inference).
+
+### Instrument defect found
+
+`b70_matrix_probe.py` context targeting is **loose**: it slices words, and
+tokens-per-word varies with corpus content, so `ctx=32768` delivered 21,528
+tokens in one run and 46,957 in another. This also explains the 2-4% wobble
+in Bench 20's prefill column. Any A/B across separate invocations must
+assert on `actual.prompt_tokens_median`, not trust `target`. A proper fix
+binary-searches word count against the real tokenizer.
+
+**Not established:** quality. Sustained multi-hour stability. GuideLLM as a
+formal acceptance gate. r20's own surface.

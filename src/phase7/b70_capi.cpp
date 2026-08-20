@@ -66,7 +66,6 @@ struct PollLayer {
   const int32_t* ids;
   const float* weights;
   float* output;
-  size_t topk;
 };
 
 class B70Poller {
@@ -308,6 +307,8 @@ class B70Poller {
 
 extern "C" {
 
+size_t sb_b70_abi_version(void) { return 2; }
+
 sb_b70_provider_t* sb_b70_create(void) {
   try {
     return reinterpret_cast<sb_b70_provider_t*>(new B70Provider());
@@ -320,13 +321,23 @@ int sb_b70_load(sb_b70_provider_t* provider, const char* bank_path,
                 uint64_t generation,
                 const int32_t* resident_experts, size_t resident_count,
                 size_t max_batch, const char* device_selector) {
+  return sb_b70_load_v2(provider, bank_path, generation, resident_experts,
+                        resident_count, max_batch, device_selector,
+                        /*top_k=*/8);
+}
+
+int sb_b70_load_v2(sb_b70_provider_t* provider, const char* bank_path,
+                   uint64_t generation,
+                   const int32_t* resident_experts, size_t resident_count,
+                   size_t max_batch, const char* device_selector,
+                   size_t top_k) {
   if (!provider || !bank_path) return -1;
   auto* p = reinterpret_cast<B70Provider*>(provider);
 
   ProviderConfig config;
   config.generation = generation;
   config.max_batch = max_batch ? max_batch : 128;
-  config.top_k = 8;
+  config.top_k = top_k;
   if (resident_experts && resident_count > 0) {
     config.resident_experts.assign(resident_experts,
                                    resident_experts + resident_count);
@@ -433,7 +444,6 @@ int sb_b70_poll_register(sb_b70_poller_t* poller, size_t layer,
   entry.ids = ids;
   entry.weights = weights;
   entry.output = output;
-  entry.topk = topk;
   // 1b: make the CUDA-pinned staging buffers DMA-able from the B70's SYCL
   // context. torch pin_memory=True registers them with the CUDA caching
   // host allocator only; from the Arc's side they are pageable, forcing a
@@ -448,9 +458,13 @@ int sb_b70_poll_register(sb_b70_poller_t* poller, size_t layer,
   }();
   try {
     auto* wrapped = reinterpret_cast<B70Poller*>(poller);
+    auto* prov = wrapped->provider();
+    const auto cap = prov->capability();
+    if (cap.supported_topk.size() != 1 ||
+        cap.supported_topk.front() != topk) {
+      return -1;
+    }
     if (xpu_register) {
-      auto* prov = wrapped->provider();
-      const auto cap = prov->capability();
       const size_t max_batch = cap.max_batch_remote;
       const size_t hidden_elems = cap.supported_hidden_sizes.empty()
           ? 0

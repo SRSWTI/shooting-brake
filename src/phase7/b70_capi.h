@@ -44,6 +44,14 @@ static_assert(sizeof(sb_b70_health_t) == 48);
 sb_b70_provider_t* sb_b70_create(void);
 
 /**
+ * Return the monotonic C ABI contract version.
+ *
+ * Version 2 adds sb_b70_load_v2 and requires callers to select the provider's
+ * routing width explicitly.
+ */
+size_t sb_b70_abi_version(void);
+
+/**
  * Load an SBEXP001 NVFP4 or SBINT401 int4 bank and select resident experts.
  *
  * @param provider       Handle from sb_b70_create.
@@ -63,12 +71,29 @@ sb_b70_provider_t* sb_b70_create(void);
  *                         Level Zero enumeration order is not stable across
  *                         boots and once cost 40% by silently picking the
  *                         Gen3 card.
+ * sb_b70_load is the frozen v1 entry point and always uses top_k == 8.
+ * New callers must use sb_b70_load_v2.
+ *
  * @return 0 on success, <0 on error.
  */
 int sb_b70_load(sb_b70_provider_t* provider, const char* bank_path,
                 uint64_t generation,
                 const int32_t* resident_experts, size_t resident_count,
                 size_t max_batch, const char* device_selector);
+
+/**
+ * Load a provider using the v2 runtime routing-width contract.
+ *
+ * Parameters have the same meaning as sb_b70_load.
+ *
+ * @param top_k Routes per token for this loaded provider instance.
+ * @return 0 on success, <0 on error.
+ */
+int sb_b70_load_v2(sb_b70_provider_t* provider, const char* bank_path,
+                   uint64_t generation,
+                   const int32_t* resident_experts, size_t resident_count,
+                   size_t max_batch, const char* device_selector,
+                   size_t top_k);
 
 /**
  * Submit one MoE dispatch (non-blocking until sb_b70_take).

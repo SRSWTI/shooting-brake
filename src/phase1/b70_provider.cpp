@@ -36,10 +36,10 @@ namespace shooting_brake::phase1 {
 namespace {
 
 // Expert-bank geometry is adopted at load time. The NVFP4 and int4 banks
-// describe different source expert counts and resident layouts, so only the
-// routing width is a compile-time property of this provider.
+// describe different source expert counts and resident layouts. The NVFP4
+// expert-ID domain has a fixed upper bound; routing row width is runtime
+// ProviderConfig state.
 constexpr std::size_t kNvfp4ExpertsPerLayer = 256;
-constexpr std::size_t kTopK = 8;
 constexpr std::size_t kInt4Alignment = 4096;
 constexpr std::uint32_t kInt4Version = 2;
 
@@ -64,8 +64,8 @@ std::size_t g_expert_bytes = 0;
 // contract.
 //
 // experts_per_layer is adopted from the bank rather than pinned to 256:
-// the 99B carries 205. kNvfp4ExpertsPerLayer remains only as the ABI upper
-// bound (the resident-set bitmap and the routing width are sized to it).
+// the 99B carries 205. kNvfp4ExpertsPerLayer only bounds the source expert-ID
+// domain and its resident-set bitmap; ProviderConfig::top_k sets row width.
 bool adopt_nvfp4_bank_geometry(std::size_t layers,
                                std::size_t experts_per_layer,
                                std::size_t hidden,
@@ -233,15 +233,15 @@ std::uint64_t nvfp4_weight_bytes_per_expert() noexcept {
 
 std::uint64_t persistent_device_bytes(
     const BankFormat format, const std::size_t max_batch,
-    const std::size_t resident_experts,
+    const std::size_t top_k, const std::size_t resident_experts,
     const std::uint64_t int4_expert_stride = 0) {
   const std::size_t scratch_intermediates =
       format == BankFormat::int4 ? 1 : 2;
   const std::uint64_t bytes_per_batch_row =
       g_hidden * sizeof(sycl::half) +
-      kTopK * sizeof(std::int32_t) +
-      kTopK * sizeof(float) +
-      kTopK * scratch_intermediates * g_intermediate * sizeof(float) +
+      top_k * sizeof(std::int32_t) +
+      top_k * sizeof(float) +
+      top_k * scratch_intermediates * g_intermediate * sizeof(float) +
       g_hidden * sizeof(float);
   const std::uint64_t bytes_per_expert =
       format == BankFormat::int4 ? int4_expert_stride
@@ -661,10 +661,12 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     }
     if (config.max_batch == 0 ||
         config.max_batch > std::numeric_limits<std::uint32_t>::max() ||
-        config.top_k != kTopK || config.generation == 0) {
+        config.top_k == 0 ||
+        config.top_k > std::numeric_limits<std::uint32_t>::max() ||
+        config.generation == 0) {
       impl_->set_error(
-          "config requires 0 < max_batch <= UINT32_MAX, top_k == 8, and "
-          "generation > 0");
+          "config requires 0 < max_batch <= UINT32_MAX, "
+          "0 < top_k <= UINT32_MAX, and generation > 0");
       return ProviderStatus::invalid_argument;
     }
 
@@ -991,15 +993,36 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
       bank_records = bank_bytes + header.data_offset;
     }
 
-    const std::size_t scratch_intermediates =
-        impl_->bank_format == BankFormat::int4 ? 1 : 2;
-    if (config.max_batch >
-        std::numeric_limits<std::size_t>::max() /
-            (kTopK * scratch_intermediates * g_intermediate *
-             sizeof(float))) {
+    if (config.top_k > g_source_experts_per_layer) {
       return impl_->reject_load_locked(
           ProviderStatus::invalid_argument,
-          "config.max_batch overflows the scratch-buffer size");
+          "config.top_k exceeds the bank's source expert count");
+    }
+
+    const std::size_t scratch_intermediates =
+        impl_->bank_format == BankFormat::int4 ? 1 : 2;
+    const auto checked_multiply = [](const std::size_t lhs,
+                                     const std::size_t rhs,
+                                     std::size_t* product) noexcept {
+      if (lhs != 0 &&
+          rhs > std::numeric_limits<std::size_t>::max() / lhs) {
+        return false;
+      }
+      *product = lhs * rhs;
+      return true;
+    };
+    std::size_t scratch_elements = config.max_batch;
+    std::size_t scratch_bytes = 0;
+    if (!checked_multiply(scratch_elements, config.top_k,
+                          &scratch_elements) ||
+        !checked_multiply(scratch_elements, scratch_intermediates,
+                          &scratch_elements) ||
+        !checked_multiply(scratch_elements, g_intermediate,
+                          &scratch_elements) ||
+        !checked_multiply(scratch_elements, sizeof(float), &scratch_bytes)) {
+      return impl_->reject_load_locked(
+          ProviderStatus::invalid_argument,
+          "config.max_batch and top_k overflow the scratch-buffer size");
     }
 
     std::optional<SelectedDevice> selected_holder;
@@ -1044,7 +1067,8 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
         static_cast<std::uint32_t>(g_hidden)};
     impl_->capability.supported_intermediate_sizes = {
         static_cast<std::uint32_t>(g_intermediate)};
-    impl_->capability.supported_topk = {static_cast<std::uint32_t>(kTopK)};
+    impl_->capability.supported_topk = {
+        static_cast<std::uint32_t>(config.top_k)};
     const std::size_t resident_experts_per_layer =
         impl_->config.resident_experts.size();
     const std::size_t resident_experts_total =
@@ -1074,8 +1098,8 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
             : std::vector<std::int32_t>{};
 
     const std::uint64_t required_bytes = persistent_device_bytes(
-        impl_->bank_format, config.max_batch, resident_experts_per_layer,
-        int4_expert_stride);
+        impl_->bank_format, config.max_batch, config.top_k,
+        resident_experts_per_layer, int4_expert_stride);
     const std::uint64_t device_bytes =
         impl_->capability.device_memory_total_bytes;
     if (device_bytes != 0 && required_bytes > device_bytes) {
@@ -1117,10 +1141,11 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
 
     impl_->hidden =
         impl_->allocate_device<sycl::half>(config.max_batch * g_hidden);
-    impl_->ids = impl_->allocate_device<std::int32_t>(config.max_batch * kTopK);
-    impl_->weights = impl_->allocate_device<float>(config.max_batch * kTopK);
-    impl_->scratch = impl_->allocate_device<float>(
-        config.max_batch * kTopK * scratch_intermediates * g_intermediate);
+    impl_->ids = impl_->allocate_device<std::int32_t>(
+        config.max_batch * config.top_k);
+    impl_->weights =
+        impl_->allocate_device<float>(config.max_batch * config.top_k);
+    impl_->scratch = impl_->allocate_device<float>(scratch_elements);
     impl_->output =
         impl_->allocate_device<float>(config.max_batch * g_hidden);
     impl_->copyout_staging =
@@ -1184,8 +1209,8 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     }
 
     const std::uint64_t owned_device_bytes = persistent_device_bytes(
-        impl_->bank_format, config.max_batch, resident_experts_per_layer,
-        int4_expert_stride);
+        impl_->bank_format, config.max_batch, config.top_k,
+        resident_experts_per_layer, int4_expert_stride);
     impl_->capability.device_memory_available_bytes =
         impl_->capability.device_memory_total_bytes > owned_device_bytes
             ? impl_->capability.device_memory_total_bytes - owned_device_bytes
@@ -1258,7 +1283,7 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
       return ProviderStatus::invalid_argument;
     }
 
-    const std::size_t route_elements = M * kTopK;
+    const std::size_t route_elements = M * impl_->config.top_k;
     const std::size_t resident_experts = impl_->config.resident_experts.size();
     for (std::size_t index = 0; index < route_elements; ++index) {
       if (ids[index] < -1 ||
@@ -1307,7 +1332,7 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
           reinterpret_cast<const quixicore::xpu::half_t*>(
               layer_records + header.down_s_offset),
           impl_->scratch, impl_->output, header.expert_stride_bytes,
-          header.group_size, M, resident_experts, kTopK, g_hidden,
+          header.group_size, M, resident_experts, impl_->config.top_k, g_hidden,
           g_intermediate, quixicore::xpu::DType::f16, true,
           quixicore::xpu::Variant::sycl, false);
     } else {
@@ -1328,14 +1353,15 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
         quixicore::xpu::ops::nvfp4_moe_split(
             *impl_->queue, impl_->hidden, impl_->ids, impl_->weights, layer_w13,
             layer_s13, layer_w13_global, layer_w2, layer_s2, layer_w2_global,
-            impl_->scratch, impl_->output, M, resident_experts, kTopK,
+            impl_->scratch, impl_->output, M, resident_experts,
+            impl_->config.top_k,
             g_hidden, g_intermediate, quixicore::xpu::DType::f16, true,
             quixicore::xpu::Variant::sycl, false);
       } else {
         quixicore::xpu::ops::nvfp4_moe_fused(
             *impl_->queue, impl_->hidden, impl_->ids, impl_->weights, layer_w13,
             layer_s13, layer_w13_global, layer_w2, layer_s2, layer_w2_global,
-            impl_->output, M, resident_experts, kTopK, g_hidden,
+            impl_->output, M, resident_experts, impl_->config.top_k, g_hidden,
             g_intermediate, quixicore::xpu::DType::f16, true,
             quixicore::xpu::Variant::sycl, false);
       }

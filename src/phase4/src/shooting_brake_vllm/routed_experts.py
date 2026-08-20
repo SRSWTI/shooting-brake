@@ -1131,8 +1131,9 @@ class HybridRoutedExperts(RoutedExperts):
             }
             logger.info_once(
                 "Shooting Brake benchmark arm resolved: %s",
-                self.shooting_brake_arm_config,
+                str(self.shooting_brake_arm_config),
             )
+        self._b70_pollers: tuple[Any, ...] = ()
         self._b70_poller: Any = None
         self._first_forward_done = False
         self._b70_stats = os.environ.get("SHOOTING_BRAKE_B70_STATS") == "1"
@@ -2222,18 +2223,26 @@ class HybridRoutedExperts(RoutedExperts):
         """
         if not self._first_forward_done:
             self._first_forward_setup(topk_ids)
-        elif self._b70_poller is not None:
+        elif self._b70_pollers:
             # A failed dispatch leaves stale data in the output buffer:
-            # the poller raises the completion flag regardless, because
+            # every poller raises its completion flag regardless, because
             # the CUDA-side wait cannot time out and an unset flag wedges
-            # the device.  Replay runs no Python, so surface it here — on
-            # the first eager forward after the fault — instead of
-            # returning silently wrong routes.
-            errors = self._b70_poller.error_count
-            if errors:
+            # the device. Replay runs no Python, so surface every lane's
+            # errors here on the first eager forward after the fault.
+            failed_lanes = [
+                (lane.device_index, lane.poller.error_count)
+                for lane in self._b70_lanes
+                if lane.poller.error_count
+            ]
+            if failed_lanes:
+                total = sum(errors for _, errors in failed_lanes)
+                detail = ", ".join(
+                    f"device {device}: {errors}"
+                    for device, errors in failed_lanes
+                )
                 raise RuntimeError(
-                    f"Shooting Brake Tier 3: {errors} B70 dispatch(es) "
-                    "failed; routed-expert output is not trustworthy"
+                    f"Shooting Brake Tier 3: {total} B70 dispatch(es) "
+                    f"failed ({detail}); routed-expert output is not trustworthy"
                 )
 
         # Route histogram (SHOOTING_BRAKE_ROUTE_STATS=1), distinct from

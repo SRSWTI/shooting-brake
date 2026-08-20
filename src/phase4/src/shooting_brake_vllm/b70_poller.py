@@ -39,6 +39,11 @@ logger = init_logger(__name__)
 
 _M_BUCKET_LABELS = ("1", "2", "3-4", "5-8", "9-16", "17-32", ">32")
 
+def _trace_path_for_device(path: str, device_index: int) -> str:
+    """Add a stable device suffix without discarding the file extension."""
+    stem, suffix = os.path.splitext(path)
+    return f"{stem}.device{device_index}{suffix}"
+
 
 class B70Poller:
     """Handle for the native polling thread.
@@ -52,7 +57,11 @@ class B70Poller:
     """
 
     def __init__(
-        self, provider: Any, generation: int = 1, pin_cpu: int = -1,
+        self,
+        provider: Any,
+        generation: int = 1,
+        pin_cpu: int = -1,
+        trace_device_index: int | None = None,
     ) -> None:
         self._provider = provider
         self._lib = provider.lib
@@ -72,12 +81,14 @@ class B70Poller:
         self._lib.sb_b70_clock_reference.argtypes = [
             ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64),
         ]
-        # Opt-in decode-trace dump: SHOOTING_BRAKE_B70_TRACE_DUMP=<path>
-        # snapshots the native per-dispatch trace ring to <path> every few
-        # seconds (atomic replace), for merging with a same-process torch
-        # profiler capture on the shared CLOCK_MONOTONIC timeline.
-        self._trace_dump_path = os.environ.get(
-            "SHOOTING_BRAKE_B70_TRACE_DUMP"
+        # Opt-in decode-trace dump: SHOOTING_BRAKE_B70_TRACE_DUMP=<path>.
+        # A multi-device registry passes ``trace_device_index`` so independent
+        # dump threads cannot atomically replace one another's snapshots.
+        trace_dump_path = os.environ.get("SHOOTING_BRAKE_B70_TRACE_DUMP")
+        self._trace_dump_path = (
+            _trace_path_for_device(trace_dump_path, trace_device_index)
+            if trace_dump_path and trace_device_index is not None
+            else trace_dump_path
         )
         self._trace_thread: threading.Thread | None = None
         self._trace_stop = threading.Event()
@@ -349,10 +360,12 @@ def get_b70_poller(placement: Any, device_index: int = 0) -> B70Poller:
     if poller is None:
         from .routed_experts import _get_b70_provider
 
-        position = placement.remote_device_indices().index(device_index)
+        remote_indices = placement.remote_device_indices()
+        position = remote_indices.index(device_index)
         poller = B70Poller(
             _get_b70_provider(placement, device_index),
             pin_cpu=_pin_cpu_for(position),
+            trace_device_index=device_index if len(remote_indices) > 1 else None,
         )
         _pollers[device_index] = poller
     return poller

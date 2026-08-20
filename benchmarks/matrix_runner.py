@@ -22,6 +22,7 @@ class RunConfig:
     target: str
     metrics_url: str
     model: str
+    tokenizer_model: str | None
     output_root: Path
     contexts: list[int]
     concurrent_rates: list[int]
@@ -52,6 +53,10 @@ def parse_args() -> RunConfig:
     parser.add_argument("--target", default="http://localhost:8080")
     parser.add_argument("--metrics-url", default="http://localhost:8080/metrics")
     parser.add_argument("--model", required=True)
+    parser.add_argument(
+        "--tokenizer-model",
+        help="Tokenizer repo/path when the served model name is only an API alias.",
+    )
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -117,6 +122,7 @@ def parse_args() -> RunConfig:
         target=args.target,
         metrics_url=args.metrics_url,
         model=args.model,
+        tokenizer_model=args.tokenizer_model,
         output_root=args.output_root,
         contexts=_parse_int_list(args.contexts),
         concurrent_rates=_parse_int_list(args.concurrent_rates),
@@ -207,6 +213,13 @@ def _guidellm_command(
     # section (backend / profile / data / constraint / output) takes a
     # ``kind`` plus inline key=value fields; per-section tuning that the
     # CLI can't reach goes through ``--override``.
+    trim_transients = config.max_requests is None or config.max_requests >= 12
+    warmup = config.warmup if trim_transients else "0"
+    cooldown = config.cooldown if trim_transients else "0"
+    profile_spec = (
+        f"kind={profile},warmup={warmup},cooldown={cooldown},"
+        f"rampup_duration={config.rampup}"
+    )
     command = [
         sys.executable, "-m", "guidellm", "run",
         "--backend",
@@ -216,13 +229,25 @@ def _guidellm_command(
             f"model={config.model},"
             f"request_format={config.request_format}"
         ),
-        "--profile", f"kind={profile}",
+    ]
+    if config.tokenizer_model is not None:
+        command += [
+            "--tokenizer",
+            (
+                "kind=huggingface_auto,"
+                f"model={config.tokenizer_model},"
+                "load_kwargs.trust_remote_code=true"
+            ),
+        ]
+    command += [
+        "--profile", profile_spec,
         "--data",
         (
             "kind=synthetic_text,"
             f"prompt_tokens={context_len},"
             f"output_tokens={config.output_tokens}"
         ),
+        "--seed", f"kind=static,value={config.random_seed}",
     ]
 
     # Per-profile load shape. concurrent runs each rate as a fixed

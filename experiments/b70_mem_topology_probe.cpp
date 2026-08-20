@@ -178,7 +178,9 @@ void report_bandwidth(Card& card, std::size_t bw_mib, int iters) {
 
 // Allocate device memory in steps, touching every byte, and watch host
 // MemAvailable. A 1:1 slope means device residency is charged to host RAM.
-void report_allocation_ladder(Card& card, double alloc_gib, double step_gib) {
+void report_host_commit(double host_gib);        // defined below
+void report_allocation_ladder(Card& card, double alloc_gib, double step_gib,
+                              double host_probe_gib) {
   sycl::queue q{card.device, sycl::property::queue::in_order()};
   const double base_host = mem_available_gib();
   const double base_dev = free_device_gib(card.device);
@@ -203,6 +205,10 @@ void report_allocation_ladder(Card& card, double alloc_gib, double step_gib) {
                 "(host delta %+6.2f)   device free %6.2f GiB\n",
                 allocated, host_now, host_now - base_host,
                 free_device_gib(card.device));
+  }
+  if (host_probe_gib > 0.0) {
+    std::printf("    -- host commit probe, device memory still held --\n");
+    report_host_commit(host_probe_gib);
   }
   for (void* p : blocks) {
     sycl::free(p, q);
@@ -253,6 +259,75 @@ void report_concurrent(std::vector<Card>& cards, std::size_t bw_mib, int iters) 
   }
 }
 
+// Is the host cost of device residency *committed* or merely accounted?
+// MemAvailable is a kernel estimate. If a real host allocation of the
+// apparently-missing size succeeds without swapping, the shadow is soft and a
+// page-cached prefill bank can coexist with B70 residency (worth 3.5x on
+// stream bandwidth). If it swaps or fails, the shadow is hard and the bank
+// must come off NVMe.
+void report_host_commit(double host_gib) {
+  const std::size_t bytes =
+      static_cast<std::size_t>(host_gib * 1024.0 * 1024.0 * 1024.0);
+  const double before = mem_available_gib();
+  std::printf("    before host alloc: MemAvailable %.2f GiB\n", before);
+  auto* p = static_cast<unsigned char*>(std::malloc(bytes));
+  if (p == nullptr) {
+    std::printf("    malloc(%.1f GiB) REFUSED -> shadow is hard\n", host_gib);
+    return;
+  }
+  // Write then read-reduce into a volatile sink. A plain write loop is dead
+  // store elimination bait at -O2: the first version of this reported
+  // 1.5e9 GiB/s because the compiler deleted the loop entirely.
+  const auto start = clock_t_::now();
+  for (std::size_t off = 0; off < bytes; off += 4096) {
+    p[off] = static_cast<unsigned char>(off >> 12);
+  }
+  volatile unsigned long long sink = 0;
+  for (std::size_t off = 0; off < bytes; off += 4096) {
+    sink += p[off];
+  }
+  const double fill_s = seconds_since(start);
+  const double after = mem_available_gib();
+  std::printf("    touched+read %.1f GiB in %.2f s (%.2f GiB/s), checksum %llu\n",
+              host_gib, fill_s, host_gib / fill_s,
+              static_cast<unsigned long long>(sink));
+  std::printf("    MemAvailable now %.2f GiB (delta %+.2f)\n", after,
+              after - before);
+  std::free(p);
+}
+
+// Hold device memory on EVERY card at once, then probe the host. That is the
+// real serving shape -- two cards resident simultaneously, not one at a time.
+void report_all_cards_then_host(std::vector<Card>& cards, double per_card_gib,
+                                double host_gib) {
+  const double base = mem_available_gib();
+  std::printf("  baseline MemAvailable %.2f GiB\n", base);
+  std::vector<sycl::queue> queues;
+  std::vector<void*> blocks;
+  const std::size_t bytes =
+      static_cast<std::size_t>(per_card_gib * 1024.0 * 1024.0 * 1024.0);
+  for (auto& card : cards) {
+    queues.emplace_back(card.device, sycl::property::queue::in_order());
+    void* p = sycl::malloc_device(bytes, queues.back());
+    if (p == nullptr) {
+      std::printf("  card %s refused %.1f GiB\n", card.bdf.c_str(), per_card_gib);
+      continue;
+    }
+    queues.back().memset(p, 0x5A, bytes).wait();
+    blocks.push_back(p);
+    std::printf("  %s holding %.1f GiB -> MemAvailable %.2f GiB\n",
+                card.bdf.c_str(), per_card_gib, mem_available_gib());
+  }
+  std::printf("  total device held %.1f GiB, host consumed %.2f GiB\n",
+              per_card_gib * static_cast<double>(blocks.size()),
+              base - mem_available_gib());
+  report_host_commit(host_gib);
+  for (std::size_t i = 0; i < blocks.size(); ++i) {
+    sycl::free(blocks[i], queues[i]);
+  }
+  std::printf("  after release: MemAvailable %.2f GiB\n", mem_available_gib());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -260,6 +335,7 @@ int main(int argc, char** argv) {
   double step_gib = 4.0;
   std::size_t bw_mib = 256;
   int iters = 7;
+  double host_probe_gib = 0.0;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto next = [&]() { return (i + 1 < argc) ? argv[++i] : nullptr; };
@@ -271,9 +347,11 @@ int main(int argc, char** argv) {
       if (const char* v = next()) bw_mib = std::strtoull(v, nullptr, 10);
     } else if (arg == "--iters") {
       if (const char* v = next()) iters = std::atoi(v);
+    } else if (arg == "--host-probe-gib") {
+      if (const char* v = next()) host_probe_gib = std::atof(v);
     } else {
       std::printf("usage: %s [--alloc-gib N] [--step-gib N] [--bw-mib N] "
-                  "[--iters N]\n", argv[0]);
+                  "[--iters N] [--host-probe-gib N]\n", argv[0]);
       return 2;
     }
   }
@@ -300,11 +378,14 @@ int main(int argc, char** argv) {
   std::printf("\n== concurrent transport\n");
   report_concurrent(cards, bw_mib, iters);
 
-  if (alloc_gib > 0.0) {
+  if (alloc_gib > 0.0 && host_probe_gib > 0.0) {
+    std::printf("\n== all-cards residency + host commit probe\n");
+    report_all_cards_then_host(cards, alloc_gib, host_probe_gib);
+  } else if (alloc_gib > 0.0) {
     for (std::size_t i = 0; i < cards.size(); ++i) {
       std::printf("\n== card %zu (%s) residency cost ladder\n", i,
                   cards[i].bdf.c_str());
-      report_allocation_ladder(cards[i], alloc_gib, step_gib);
+      report_allocation_ladder(cards[i], alloc_gib, step_gib, 0.0);
     }
   }
   std::printf("\nhost MemAvailable at end: %.2f GiB\n", mem_available_gib());

@@ -1195,3 +1195,151 @@ lane's issue/wait cost; isolating it needs a one-card 99B, which does not fit
 - **Reframed:** prefill is the product problem (206 s at 110K, no caching),
   decode is within 24% of the 88B and structurally capped at 11.16 ms by the
   5090 leg.
+
+## Bench 18 — what actually gates 99B prefill (2026-08-19, later same day)
+
+Bench 17 said "prefill is the product problem". This is the search for the
+lever, and it ends somewhere unexpected: **placement, not kernels**.
+
+### 1. `--moe-backend` A/B — the local MoE kernel is ~1.6% of ITL
+
+Identical prompts (1,456 tok via `--corpus`), identical cells, `SB_GPU_UTIL`
+lowered to 0.83 to keep >=1.5 GiB spare on the 5090:
+
+| backend | gate | ITL p50 | TTFT | KV | verdict |
+|---|---|---|---|---|---|
+| `cutlass` (VLLM_CUTLASS W4A4) | pass, identical text | **13.956 ms** | 2.732 s | 14.27 GiB | keep |
+| `emulation` (Triton -> BF16) | pass, identical text | 14.185 ms (+1.6%) | 2.708 s | 13.72 GiB | reference |
+| `marlin` (W4A16 at-load convert) | pass, identical text | 15.439 ms (+10.6%) | 2.698 s | 13.57 GiB | reject |
+
+All three produced byte-identical greedy text and finite logprobs. **B70
+service was identical across arms** (6,224 / 6,184 µs at M=256) -- the control
+that proves the A/B isolated the 5090 side.
+
+The decisive datum is `emulation`: a deliberately slow dequant-to-BF16
+reference costs only **1.6%**. So the local-expert kernel is not where decode
+time goes, and there is nothing to win by swapping it. Marlin's +10.6% is a
+`MarlinExperts`-at-batch-1 pathology, not kernel quality.
+
+`triton` is **not a valid NvFP4 MoE backend** -- `map_nvfp4_backend` accepts
+only cutlass / flashinfer_{trtllm,cutlass,cutedsl,b12x} / marlin / humming /
+emulation. `humming` was inconclusive (135 s boot budget was too short, not a
+failure); `flashinfer_trtllm` remains unqualified and is a known GPU-wedge
+risk (Bench 16 §9).
+
+### 2. Grouped B70 kernel, re-run at the **99B** geometry
+
+The 2026-08-13 verdict was measured at the 35B shape. Re-run at ours
+(N=102 resident, K=3072, dim=1024, top-8), `quixicore_xpu_bench`:
+
+| variant | M | µs/token | weight read | achieved GB/s |
+|---|---|---|---|---|
+| split (per-route GEMV) | 256 | 66.3 | 9,216 MiB | **569.7** |
+| split | 2048 | 67.7 | 73,728 MiB | **557.3** |
+| grouped | 256 | 166.2 | 459 MiB | **11.3** |
+| grouped | 2048 | 113.9 | 2,394 MiB | **10.8** |
+| grouped | 8192 | 110.4 | 9,387 MiB | **10.9** |
+
+Cross-check: split at M=256 is 66.3 µs/token for 8 routes on one card, i.e.
+~33.1 µs/token/layer at production's ~4 routes/card -- against 27.1-34.8
+measured in vLLM. The bench is trustworthy.
+
+**Split is at hardware limits** (557-570 GB/s logical, at/above the card's
+~510 GB/s via L2 reuse). Grouped reads **30.8x fewer bytes** and still loses
+1.68-2.5x because it runs at **~2% of bandwidth**. Stage timings localise it
+exactly (M=2048): `gate_up` 177.8 ms + `down` 55.0 ms = 99.9% of 233 ms;
+histogram 0.109, scan 0.020, scatter 0.108 ms are free. The routing
+infrastructure is fine; the grouped GEMMs are broken. A grouped kernel at
+even 100 GB/s would be 5.4x faster than split -- real headroom, but it is a
+new Xe2 grouped GEMM, i.e. weeks.
+
+Split is also flat in M (66.3 -> 67.7), independently re-confirming why
+`B70_MAX_BATCH` measured -1.17%.
+
+### 3. The residency shadow is **committed**, not accounted
+
+Holding 24 GiB on *both* cards at once (the real serving shape):
+
+```
+  0000:11:00.0 holding 24.0 GiB -> MemAvailable 30.36 GiB
+  0000:15:00.0 holding 24.0 GiB -> MemAvailable  6.21 GiB
+  total device held 48.0 GiB, host consumed 48.17 GiB
+  touched+read 8.0 GiB in 29.34 s (0.27 GiB/s)   <- swap thrash
+  MemAvailable now 0.32 GiB
+```
+
+1:1 to within 0.4%, and the follow-on host allocation ran at **0.27 GiB/s**,
+~25x below DRAM speed. The shadow is hard. (First attempt at this probe
+reported 1.5e9 GiB/s -- `-O2` had deleted the touch loop. Write-then-read
+into a `volatile` sink.)
+
+### 4. Bank source bandwidths, measured
+
+| source | rate | one 44.4 GiB pass |
+|---|---|---|
+| pinned host DRAM (88B's measured path) | 53.9 GiB/s | **0.82 s** |
+| pageable page cache | 18.5 GiB/s | 2.4 s |
+| **NVMe O_DIRECT** | **5.6 GB/s** | **8.5 s** |
+| B70 VRAM D2H (shared Gen4 x4 uplink) | 6.44 GB/s | 7.5 s |
+
+Disk has **84 GB free (96% full)**. zstd -1 on a real 2 GiB slice of the bank
+compresses to only **80.2%** (an earlier 55% figure was a sparser region and
+is withdrawn), and `zstd -d` runs at **3.33 GB/s single-frame** -- `-T0` did
+not parallelise, so an NVMe-compressed bank needs per-layer frames and 2-3
+decoders to stay ahead of the 5.6 GB/s read. `nproc` is 8.
+
+### 5. Where the 88B's prefill advantage actually comes from
+
+Not the kernel. The **layout**:
+
+| | 5090 | B70 #1 | B70 #2 |
+|---|---|---|---|
+| 88B | ~22.4 GiB (dense + **54 local experts**) + 2.9 GiB KV | 27.4 GiB (126 experts) | **unused** |
+| 99B as shipped | 10.34 GiB (dense + **1 local expert**) + 14.27 GiB KV | 24.34 GiB (102) | 24.34 GiB (102) |
+
+Three consequences, all measured elsewhere in this ledger: 30% of the 88B's
+routes never crossed PCIe; its shadow was 27.4 GiB not 48.7, which is the
+**only** reason its bank could be DRAM-pinned at 53.9 GiB/s; and one lane
+gave it a 142 µs inter-dispatch gap against our 208 µs.
+
+The 99B as shipped sits in the worst corner of that space. `fractional:2:F`
+already supports any local count (`cuda_n = round(num_experts *
+cuda_fraction)`, CUDA takes the high ids), so this is a **flag**, not a code
+change. `SHOOTING_BRAKE_PLACEMENT` and `SB_GPU_UTIL` are now overridable in
+`serve_99b_dual.sh` for exactly this sweep.
+
+### 6. The frontier, and why it has a floor
+
+Per-unit, all measured: expert on CUDA **0.2373 GiB**, expert in a Marlin
+bank **0.2175 GiB**, dense **10.10 GiB**, KV **24.7 KiB/token**, B70
+**201 µs per route per token**. Empirically `used ~= U * 31.84 + 1.5` GiB, so
+`U=0.90` still leaves ~1.7 GiB spare -- **0.83 was leaving 2.2 GiB unused**.
+
+| local L | KV | KV tokens | shadow | DRAM free | 8K TTFT (with DRAM partial bank) |
+|---|---|---|---|---|---|
+| 1 (shipped) | 14.3 GiB | 582K | 48.4 | ~2.8 | 15.5 s |
+| 30 | 8.1 | 330K | 41.5 | ~12 | ~7.7 s |
+| 54 (88B-like) | 2.45 | 99K | 35.8 | ~17.6 | **~4.5 s** |
+| 62 | 0.55 | 22K | 33.9 | ~19.5 | **~3.4 s** |
+
+`[ESTIMATE]` -- bank not built; Marlin per-layer scaled from the 88B floor
+bench at our shape.
+
+The floor exists because **a banked remote expert costs DRAM twice**: 0.2373
+shadow (decode needs it B70-resident) + 0.2175 bank (prefill) = 0.455 GiB,
+capping banked experts at ~117 of a 53.4 GiB budget -- while CUDA cannot
+absorb the other 88. Hence ~3.4 s is the wall on this box, i.e. rough 88B
+parity, not a win.
+
+Ruled out on the way: KV in B70 VRAM (790 MiB/token at 32K over 6.44 GB/s =
+**123 ms/token**, a 9x decode regression); host KV offload (~32 ms/token and
+no free DRAM anyway); bank in B70 spare VRAM (4.4 s/pass *and* it adds 28 GiB
+of fresh shadow); single-B70 99B (needs L=75 => 27.9 GiB CUDA weights =>
+negative KV).
+
+### 7. The one upgrade that breaks the tradeoff
+
+**+64 GiB host RAM.** At 123 GiB total, shadow 48.7 + full 44.4 GiB bank +
+engine fits, the bank pins at 53.9 GiB/s, and 8K lands at **~1.4 s with KV
+left at 530K tokens** -- 2.2x better than the 88B *without* trading context.
+Every software path measured here is strictly worse per unit of effort.

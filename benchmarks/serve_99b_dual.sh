@@ -71,7 +71,7 @@ exec .venv/bin/vllm serve srswti/axe-superveloce-99b-nvfp4 \
   --served-model-name shooting-brake-99b \
   --host 127.0.0.1 --port 8017 \
   --trust-remote-code \
-  --moe-backend cutlass \
+  --moe-backend "${SB_MOE_BACKEND:-cutlass}" \
   --max-model-len "${SB_MML:-32768}" \
   --max-num-batched-tokens "${SB_MNBT:-2048}" \
   --gpu-memory-utilization "${SB_GPU_UTIL:-0.85}" \

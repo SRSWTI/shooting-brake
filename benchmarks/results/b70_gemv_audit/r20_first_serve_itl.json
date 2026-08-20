@@ -1,0 +1,49 @@
+[
+ {
+  "label": "r20-first-serve",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r20",
+  "n": 4,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 11.955752251291566,
+  "ttft_s_mean_excl_first": 0.062373769333741315,
+  "requests": [
+   {
+    "ttft_s": 0.3695797160034999,
+    "itl_ms": 11.738486164063033,
+    "chunks": 257
+   },
+   {
+    "ttft_s": 0.0654529140010709,
+    "itl_ms": 11.934081632801963,
+    "chunks": 257
+   },
+   {
+    "ttft_s": 0.060258514000452124,
+    "itl_ms": 11.634686874998579,
+    "chunks": 257
+   },
+   {
+    "ttft_s": 0.061409879999700934,
+    "itl_ms": 12.298488246074157,
+    "chunks": 257
+   }
+  ],
+  "act_freq": {
+   "/sys/bus/pci/devices/0000:15:00.0/tile0/gt0/freq0/act_freq": {
+    "samples": 2505,
+    "active_min": 400,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.02
+   },
+   "/sys/bus/pci/devices/0000:11:00.0/tile0/gt0/freq0/act_freq": {
+    "samples": 2505,
+    "active_min": 400,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.022
+   }
+  }
+ }
+]

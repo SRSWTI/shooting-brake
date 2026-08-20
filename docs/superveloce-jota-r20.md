@@ -192,14 +192,38 @@ It needs parameterising (Phase H).
 
 ## 6. Plan
 
-Ordered by dependency. Each item: `path:line` → change → why → risk → kind.
-**Acceptance** is what must be observably true before the phase is done.
+Each item: `path:line` → change → why → risk → kind. **Acceptance** is what
+must be observably true before the phase is done.
 
-### Phase A — Placement expresses "no routed module"
+**Critical path to a first boot: D → B → C → E.** Phases A and F are
+correctness work that does not block bring-up (see Phase A). Phase F is cheap
+and lands alongside whatever is in flight.
 
-Blocks a boot today: a fractional policy on r20 assigns B70 owners to layer 0,
-`b70_bank_covers` sees a B70 owner outside `{1..47}` and raises. That is
-correct fail-closed behaviour, but it means r20 cannot place.
+### Phase A — Placement accounting for the dense layer
+
+**Not a boot blocker — corrected 2026-08-20.** The plan originally claimed a
+fractional policy would assign B70 owners to layer 0 and be refused by
+coverage. It does not: `ExpertGroupPolicy:438-441` already emits
+`grouped_row if layer in b70_capable else all_cuda`, and `bank_layer_ids` now
+sets `b70_capable = {1..47}`, so layer 0 is all-CUDA by construction.
+
+Verified: `build_for_qualified(r20, "fractional:2:0.2634...")` succeeds,
+layer 0 has **0** B70 owners, layers 1–47 have **151** each, 47 active
+layers, both remote devices used, coverage True.
+
+What is actually wrong is accounting. The dense layer is filled with 205
+CUDA owners that do not exist:
+
+```
+cuda_count()                : 2743
+CUDA over routed layers only: 2538   (47 x 54)
+fabricated in dense layer 0 :  205
+```
+
+So `count`, `cuda_count`, `count_target`, the manifest and `DeviceCapacity`
+accounting are all overstated by one full layer — ~1.01 GiB of phantom
+resident weight, which can produce a false capacity rejection, and telemetry
+that is simply untrue.
 
 | item | change | risk | kind |
 |---|---|---|---|
@@ -434,4 +458,74 @@ Each of these has a specific failure mode behind it.
 | 2026-08-20 | vLLM + SGLang source audit (4 parallel agents) | **done**, §3 |
 | 2026-08-20 | Coordinate contract + r20 spec row (`78eb60bc`) | **done**, 37 checks |
 | 2026-08-20 | Bank coverage reads explicit ids (`6955b12f`) | **done**, 41 checks |
-| 2026-08-20 | Phase A — Placement expresses "no routed module" | in progress |
+| 2026-08-20 | **Phase D** — provider runtime top_k, `sb_b70_abi_version()`=2, `sb_b70_load_v2`, v1 frozen at 8 (`826b3f04`) | **done**, silicon-verified |
+| 2026-08-20 | **Phase E** — all four bank/provider crossings through `_bank_row()`; poller `bank_row`/`model_layer`; trace in model coordinates (`191a1375`) | **done**, silicon-verified |
+| 2026-08-20 | **Phase B** — writer takes sparse source layers + discovered key root (`941e3488`) | **done**, 99B predicted size byte-exact vs artifact |
+| 2026-08-20 | Phase B — build `expert_bank_jota_118b_r20.bin` (47 rows, 205 experts, 47.63 GiB) | running |
+| 2026-08-20 | Phase A — placement accounting for the dense layer (not a blocker, see §6) | not started |
+| 2026-08-20 | Phase C — byte-exact validator through the `[1..47]` map | next |
+
+### Silicon regression, 2026-08-20 (99B through ABI v2 + the layer map)
+
+The change set touches the load-bearing serving path, so it was validated on
+the production model before r20 exists. `benchmarks/serve_99b_dual.sh`
+unchanged, new `.so`, Python binding still calling v1:
+
+```
+KV cache            3.7 GiB          (matches the measured 3.69 at L=54)
+/v1/completions     ' 42.\n\nTo find the next integer after 41, simply'
+                    byte-identical to the pre-change boot
+logprobs            finite
+trace files         sb_99b_trace.device0.json, .device1.json  (independent)
+entries             2,880 each, layers 0..47, n=48
+layer == bank_row   True on every entry   <- the identity map the 99B needs
+```
+
+`sb_b70_abi_version() == 2`; `sb_b70_load`, `sb_b70_load_v2` and
+`sb_b70_abi_version` all exported.
+
+### Progress log, continued
+
+| date | item | state |
+|---|---|---|
+| 2026-08-20 | Phase D Python half — binding calls `sb_b70_load_v2`, ABI>=2 checked, `top_k` required (`5470b82f`) | **done** |
+| 2026-08-20 | Phase F partial — monolithic guard + graph-required prefill guard (`5470b82f`) | **done** |
+| 2026-08-20 | Phase C — `validate_expert_bank.py`, byte-exact through the map (`63e655aa`) | **done**, forged-shift test caught |
+| 2026-08-20 | Phase B artifact — `expert_bank_jota_118b_r20.bin`, 47 rows, 51,146,665,300 B | **done**, 105.7 s |
+| 2026-08-20 | **Phase G steps 1-5 — FIRST SERVE** | **done**, see kill-bench Bench 19 |
+| 2026-08-20 | Phase G step 6 — output quality | **not started, gates shipping** |
+| 2026-08-20 | Phase A — placement accounting for the dense layer | not started (not a blocker) |
+
+### First serve, 2026-08-20 — measured
+
+```
+prefix cache   142.7x cold->warm, 99.75% block hit rate,
+               prefix-disjoint control back to 10.6 s with 0 new hits
+decode ITL     11.956 ms  vs 99B 13.960 (-14.4%), within 3.9% of the 88B's 11.51
+KV @ L=54      9.98 GiB   vs 99B 3.69 (+170%)
+cold prefill   1,607 us/token vs 99B 1,436 (+12%, as expected from +22.4% routes)
+trace          2,820 entries/card, model layers 1..47, bank rows 0..46,
+               layer == row+1 on all 5,640 entries
+```
+
+**A prediction of mine was wrong by 18 points** and the reason is recorded in
+Bench 19 §2: I forecast ITL +4.4% by scaling B70 service with top_k while
+holding the 208 us inter-layer gap constant. The gap is ~76% of ITL and it
+shrank, because r20 trades 36 GDN layers for sliding-window-512 attention and
+7 GiB of dense weights. Scaling the understood term and freezing the dominant
+one is the error to avoid repeating.
+
+### Revival conditions for parked items
+
+Adopted from `vendor/intel-xpu/vllm-xpu/b70_ai_things/docs/*deadends.md`,
+whose packets carry an explicit `Retry if:`. Two items were re-opened this
+session without a written trigger, so:
+
+| parked | why closed | retry if |
+|---|---|---|
+| Grouped B70 kernel | our impl hit 9.9 GB/s = 1.6% of the 608 GB/s reference; 1.55x slower than split | a vendored Xe2 grouped GEMM is ported to group-16/E4M3, **or** `xetla_patterns.yaml` diagnostics show our kernel is GRF-spilling |
+| B12x prefill | W4A4 cosine 0.82 terminal; E=1 metadata overrun; needs FlashInfer 0.6.18 | **partly true now** — b12x `#228` bounds-checks inactive routes and live work is W4A16. Still needs ~48 GiB host RAM, so: retry if the DIMMs land |
+| Marlin prefill bank | 44.4 GiB bank cannot be host-resident (2.78 GiB free) | host RAM >= 96 GB, or the 1:1 device-USM shadow is eliminated |
+| `flashinfer_trtllm` | tuner wedges 25 min at 100% GPU, or faults `CUDA misaligned address` | a FlashInfer release notes an sm_120 fused-moe fix; vendor tree is unchanged at `e77a4a0d2763` |
+| oneDNN NVFP4 W4A16 | untried | it is measured at M>=256; note `b70_ai_things` LOOP 14 beat oneDNN 2.36x at M=1, so it is not automatically the ceiling |
+| Reduce 5090 launch overhead | `rtx6kpro` measures CPU-side launch at ~5 us; our gap is 208 us, 40x that | never — the gap is GPU work, not launches |

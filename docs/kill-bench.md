@@ -1515,3 +1515,112 @@ partial      = stream_partial(stream_ids) + dispatch_partial(dispatch_ids)
 
 plus a subset argument to the arena loader. Expected: ~8.3 s at 8.5K with a
 64-expert bank, versus 12.21 s now.
+
+## Bench 19 — Laguna r20 first serve on dual B70 (2026-08-20)
+
+**Not a planned bench** — the bring-up record for
+`srswti/axe-superveloce-jota-118b-r20-nvfp4` (`LagunaForCausalLM`), with
+measured negatives and one estimate of mine that was wrong by 18 points.
+Recipe: `benchmarks/serve_jota_r20_dual.sh`. Plan:
+`docs/superveloce-jota-r20.md`.
+
+### 1. Prefix caching — the reason this model exists
+
+Identical 6,031-token prose prompt, three runs, then a **prefix-disjoint
+control**. Wall clock is the weak evidence; the hit counters are the strong
+evidence.
+
+| run | wall | prompt_tok | `hits/queries` |
+|---|---:|---:|---|
+| 0 (cold) | 9.695 s | 6,031 | 0 / 6,046 |
+| 1 | **0.071 s** | 6,031 | 6,016 / 12,077 |
+| 2 | **0.068 s** | 6,031 | 12,032 / 18,108 |
+| control (disjoint, 6,635 tok) | **10.611 s** | 6,635 | **0 new hits** |
+
+- **142.7× cold→warm.** The repeat hit **6,016 of 6,031 blocks (99.75%)**.
+- The control returned to 10.6 s with zero new hits, so the speedup is
+  caching and not a warmed engine, a clock ramp, or a scheduler artifact.
+- The 99B measures **1.007×** on this identical test (9.788 / 9.729 /
+  9.723 s) and always will: `Qwen3_5MoeForCausalLM` is `is_hybrid=True` with
+  `supports_mamba_prefix_caching=False`, so vLLM disables prefix caching for
+  the whole model. `LagunaForCausalLM` is not `IsHybrid`.
+
+### 2. Decode — faster than the 99B, and my prediction was wrong
+
+| metric | 99B (Bench 18) | r20 | delta |
+|---|---:|---:|---:|
+| ITL, C=1, 4 runs excl-first | 13.960 ms | **11.956 ms** | **−14.4%** |
+| KV @ L=54 | 3.69 GiB | **9.98 GiB** | **+170%** |
+| CUDA graph pool | 0 GiB (eager) | 0.41 GiB | — |
+
+ITL is a clean comparison: prefix caching touches prefill only. Both B70
+clocks held 2800 MHz median with `idle_fraction` 0.02.
+
+**I predicted 14.6 ms (+4.4%). Measured 11.96 ms (−14.4%) — wrong by 18
+points.** The model was `46 gaps x 208 us + 47 dispatches x 80 us`, scaling
+service by top_k 10/8 while holding the inter-layer gap constant. The gap is
+~76% of ITL and it clearly shrank: r20 replaces 36 GDN/Mamba layers with
+sliding-window-512 attention and carries 3.18 GiB of dense weights against
+the 99B's 10.24. **Lesson: I scaled the term I understood and froze the term
+that dominates.**
+
+r20's ITL lands **within 3.9% of the 88B's 11.51 ms**, the target this whole
+campaign has been chasing.
+
+### 3. The coordinate contract, proven on silicon
+
+The load-bearing risk was a compact 47-row bank read as a leading prefix,
+serving the neighbouring layer's experts — plausible tokens, finite
+logprobs, and a file that is exactly the right length either way.
+
+| trace | entries | model layers | bank rows | `layer == row+1` |
+|---|---:|---|---|---|
+| device0 | 2,820 | 1..47 (n=47) | 0..46 | **True** |
+| device1 | 2,820 | 1..47 (n=47) | 0..46 | **True** |
+
+All 5,640 entries. On the 99B the same assertion must be *identity* and is;
+on r20 it must be *offset by one* and is. Model layer 0 never appears — it is
+the dense MLP. `M` values `[1, 2, 4, 8, 256]`, so chunked prefill dispatches
+through the doorbell too.
+
+Non-empty traces are the only possible evidence for one specific failure: if
+vLLM had selected a monolithic expert class it would call
+`forward_monolithic`, our code would never run, and **no guard of ours could
+fire**. Token correctness would not have revealed it.
+
+### 4. Measured, not estimated
+
+| quantity | value |
+|---|---|
+| cold prefill | **1,607 µs/token** (6,031 tok in 9.695 s) vs the 99B's 1,436 |
+| warm prefill | ~0 — 99.75% block hit rate |
+| bank | 47 rows x 205 experts, 51,146,665,300 B, byte-exact vs checkpoint |
+| resident split | 76 / 75, disjoint, 151 remote + 54 CUDA |
+| top_k | 10, via `sb_b70_load_v2` (v1 frozen at 8) |
+
+Cold prefill is ~12% *worse* per token than the 99B — consistent with +22.4%
+routes (470 vs 384) partly offset by one fewer MoE layer. r20 pays slightly
+more once, then nothing.
+
+### 5. What this does NOT establish
+
+- **Output quality.** r20 is 20% REAP-pruned from 118B with a 512-token
+  window. Two greedy prompts and finite logprobs are not a quality
+  measurement. `" oxygen.\n\nAuthor:\n\nHi, I'm trying to understand..."` is
+  coherent but drifts. **This gates shipping regardless of latency.**
+- Throughput/concurrency, long context, TTFT at a known length on a cold
+  cache, sustained stability, per-card attribution under load.
+- The 0.0624 s probe TTFT is **cache-assisted** (`excl_first` on a repeated
+  shape) and must not be quoted as a prefill number.
+
+### 6. Instrument notes
+
+- KV numbers require a **settle** step: a boot 2 s after `pkill -9` profiled
+  a partially-released pool and reported 2.43 GiB where a settled boot
+  reported 3.7. Poll `nvidia-smi` to baseline before any boot that produces
+  a number.
+- A poll loop matching the bare word `Traceback` reported a boot failure on a
+  benign `deep_gemm` optional-import warning. Match
+  `Engine core initialization failed`.
+- `benchmarks/b70_itl_probe.py` defaults to `/v1/chat/completions`; handing
+  it `/v1/completions` returns 400.

@@ -56,7 +56,10 @@ MAGIC = b"SBEXP001"
 GSCALE_FMT = "<ff"
 GSCALE_BYTES = struct.calcsize(GSCALE_FMT)
 
-EXPERT_KEY = re.compile(r"layers\.(\d+)\.mlp\.experts\.(\d+)\.")
+EXPERT_KEY = re.compile(
+    r"^(?P<root>.+)\.layers\.(?P<layer>\d+)\.mlp\.experts\."
+    r"(?P<expert>\d+)\."
+)
 
 
 class BankShape:
@@ -68,11 +71,13 @@ class BankShape:
         intermediate: int,
         experts: int,
         nvfp4_layers: list[int],
+        key_root: str,
     ) -> None:
         self.hidden = hidden
         self.intermediate = intermediate
         self.experts = experts
         self.nvfp4_layers = nvfp4_layers
+        self.key_root = key_root
 
         # NVFP4 packs two 4-bit values per byte and one scale per 16
         # elements, so both dimensions must divide evenly or the record
@@ -111,6 +116,9 @@ class BankShape:
         return (
             f"  layers      {self.num_layers} NVFP4 "
             f"({self.nvfp4_layers[0]}..{self.nvfp4_layers[-1]})\n"
+            f"  bank rows   0..{self.num_layers - 1} -> model layers "
+            f"{self.nvfp4_layers}\n"
+            f"  key root    {self.key_root}\n"
             f"  experts     {self.experts}/layer\n"
             f"  hidden      {self.hidden}\n"
             f"  intermediate{self.intermediate:>5}\n"
@@ -157,11 +165,13 @@ def discover_shape(model_dir: Path, index: dict[str, str]) -> BankShape:
     # FP8 layers carry a plain `weight` instead and are CUDA-only.
     packed: set[int] = set()
     seen: set[int] = set()
+    roots: set[str] = set()
     for key in index:
-        m = EXPERT_KEY.search(key)
+        m = EXPERT_KEY.match(key)
         if not m:
             continue
-        layer = int(m.group(1))
+        roots.add(m.group("root"))
+        layer = int(m.group("layer"))
         seen.add(layer)
         if key.endswith(".weight_packed"):
             packed.add(layer)
@@ -169,16 +179,31 @@ def discover_shape(model_dir: Path, index: dict[str, str]) -> BankShape:
     nvfp4 = sorted(packed)
     if not nvfp4:
         raise SystemExit("no NVFP4 expert layers found; is this an FP8 checkpoint?")
-    # The provider addresses layers by bank index, so a gap would shift
-    # every layer above it onto the wrong weights.
-    if nvfp4 != list(range(nvfp4[0], nvfp4[-1] + 1)) or nvfp4[0] != 0:
+    if len(roots) != 1:
         raise SystemExit(
-            f"NVFP4 layers are not a prefix run starting at 0: {nvfp4[:5]}..."
+            f"expected one expert tensor key root, found {sorted(roots)}"
+        )
+    key_root = next(iter(roots))
+
+    # The provider addresses compact bank rows directly. Source layers may
+    # start above zero when the absolute ids are recorded externally, but a
+    # gap would still shift every layer above it onto the wrong weights.
+    expected = list(range(nvfp4[0], nvfp4[-1] + 1))
+    if nvfp4 != expected:
+        missing = sorted(set(expected) - packed)
+        raise SystemExit(
+            "NVFP4 layers contain gaps; compact bank rows require one "
+            f"contiguous source-layer run: layers={nvfp4}, missing={missing}"
         )
     fp8 = sorted(seen - packed)
     print(f"Discovered {len(nvfp4)} NVFP4 expert layers; {len(fp8)} FP8 "
           f"(CUDA-only): {fp8 if len(fp8) <= 12 else f'{fp8[:6]}...'}")
-    return BankShape(hidden, intermediate, experts, nvfp4)
+    if nvfp4[0] != 0:
+        print(
+            f"Compact source run starts at model layer {nvfp4[0]}; "
+            "bank row 0 uses that layer (not model layer 0)"
+        )
+    return BankShape(hidden, intermediate, experts, nvfp4, key_root)
 
 
 def load_layer(
@@ -189,7 +214,7 @@ def load_layer(
     """Read one layer's expert tensors, grouped by shard to open each once."""
     wanted: dict[str, list[str]] = defaultdict(list)
     for exp in range(shape.experts):
-        prefix = f"model.language_model.layers.{layer}.mlp.experts.{exp}"
+        prefix = f"{shape.key_root}.layers.{layer}.mlp.experts.{exp}"
         for proj in ("gate_proj", "up_proj", "down_proj"):
             for suffix in ("weight_packed", "weight_scale", "weight_global_scale"):
                 key = f"{prefix}.{proj}.{suffix}"
@@ -213,7 +238,7 @@ def write_layer(
     tensors: dict[str, torch.Tensor],
 ) -> None:
     for exp in range(shape.experts):
-        p = f"model.language_model.layers.{layer}.mlp.experts.{exp}"
+        p = f"{shape.key_root}.layers.{layer}.mlp.experts.{exp}"
         gate = tensors[f"{p}.gate_proj.weight_packed"]
         up = tensors[f"{p}.up_proj.weight_packed"]
         gate_s = tensors[f"{p}.gate_proj.weight_scale"]
@@ -293,13 +318,15 @@ def main() -> int:
 
     with open(tmp, "wb") as out:
         out.write(shape.header())
+        # Compact row `position` holds absolute model layer
+        # `shape.nvfp4_layers[position]`.
         for position, layer in enumerate(shape.nvfp4_layers):
             lt0 = time.perf_counter()
             tensors = load_layer(layer, shape, index)
             write_layer(out, layer, shape, tensors)
             del tensors  # bound residency to one layer
             print(
-                f"  layer {layer:2d} "
+                f"  bank row {position:2d} <- model layer {layer:2d} "
                 f"({(position + 1) / shape.num_layers * 100:5.1f}%) — "
                 f"{time.perf_counter() - lt0:.1f}s"
             )

@@ -1343,3 +1343,174 @@ negative KV).
 engine fits, the bank pins at 53.9 GiB/s, and 8K lands at **~1.4 s with KV
 left at 530K tokens** -- 2.2x better than the 88B *without* trading context.
 Every software path measured here is strictly worse per unit of effort.
+
+### 8. Placement measured, and the cost model that falls out
+
+`SHOOTING_BRAKE_PLACEMENT=fractional:2:0.2634` (54 local experts),
+`SB_GPU_UTIL=0.90`, prose corpus, identical prompts:
+
+| cell | L=1 | L=54 | delta |
+|---|---|---|---|
+| 8,501 tok TTFT | 15.476 s | **12.21 s** | **-21.1%** |
+| B70 service @ M=256 | 6,224 µs | 4,906 µs | -21.2% |
+| 17,372 tok TTFT | 1,847 µs/tok | 1,425 µs/tok | -22.9% |
+| 1,456 tok TTFT | 2.732 s | 2.332 s | -14.6% |
+| ITL | 13.956 ms | 13.657 ms | -2.1% |
+
+Boot facts: CUDA weights **23.056 GiB** (predicted 22.91), **48/48 compact
+layers verified** -- preemptive surgery handles 54 local experts, previously
+only ever exercised at 1. KV **3.69 GiB** at **4.00x concurrency for 32K**.
+B70 residency 36.1 GiB (18,362 + 18,605 MiB). Host MemAvailable **2.78 ->
+15.29 GiB**: the 1:1 shadow model confirmed in situ, +12.5 GiB freed against
+-12.6 GiB of residency.
+
+Two points fit with no slack:
+
+```
+TTFT(8.5K) = 2.91 s + 0.0616 s x (experts resident on B70)
+   L=1  : 2.91 + 204(0.0616) = 15.48   measured 15.476
+   L=54 : 2.91 + 151(0.0616) = 12.21   measured 12.21
+```
+
+**Each expert moved off the B70 is worth 61.6 ms at 8.5K.** We moved 26% of
+them and got 21%; nothing was lost, there was simply no more to take. Halving
+TTFT by placement alone needs L~153 = 36 GiB of expert weights on a 32 GiB
+card. Placement is a spent lever past ~L=61.
+
+### 9. Three-way VRAM competition (measured the hard way)
+
+`SHOOTING_BRAKE_B70_MAX_BATCH=2048` at L=54 **fails to boot**:
+
+```
+ValueError: 0.91 GiB KV cache is needed, but only 0.74 GiB available
+            estimated maximum model length is 25152
+```
+
+So `MAX_BATCH=2048` costs **~2.95 GiB of 5090 VRAM**, and local experts, KV,
+and dispatch staging all draw on the same pool. The engine refused rather
+than thrashing, which is the correct failure.
+
+This matters for the streamer, because the bank streams **once per vLLM
+forward pass**, not once per prompt:
+
+```
+TTFT = 2.91 + max( 0.0616 x N_b70 , ceil(T/MNBT) x bank_GiB / 53.9 )
+```
+
+| config | passes @8.5K | B70 term | 5090 term | TTFT |
+|---|---|---|---|---|
+| L=54, no bank (measured) | - | 9.30 s | - | **12.21 s** |
+| L=54, 64-expert bank, MNBT 2048 | 5 | 5.36 s | 1.29 s | ~8.3 s |
+| L=54, full bank (+16 GiB RAM), MNBT 2048 | 5 | 0 | 3.05 s | ~6.0 s |
+| L=54, full bank, MNBT 8192 | 2 | 0 | 1.22 s | ~4.1 s |
+| L=54, full bank, MNBT 32768 | 1 | 0 | 0.61 s | **~3.5 s** |
+
+That is why the 88B ran `MNBT=32768`: one step, one bank pass. Parity needs
+all three of L, KV and MNBT balanced -- not any one maximised.
+
+### 10. Why the 88B fit and the 99B does not
+
+| | remote | format | cards | shadow | bank | total | vs 59.44 |
+|---|---|---|---|---|---|---|---|
+| 88B | 126 | int4 | **1** | 27.4 GiB | 27.4 GiB | **54.8** | fits |
+| 99B @L=54 | 151 | NVFP4 | 2 | 36.1 GiB | 33.0 GiB | **69.1** | **short 9.7** |
+
+Device VRAM was never the constraint: 96.3 GiB total, the checkpoint uses
+59.2 GiB across three cards, and **27.6 GiB of B70 VRAM sits idle**. It is
+unusable for a bank because allocating B70 VRAM costs host DRAM 1:1 -- free
+VRAM you have to pay DRAM for -- and readback is capped at 6.44 GB/s anyway.
+
+Three compounding differences, none software-fixable: more remote experts
+(151 vs 126), NVFP4 is 9% fatter than int4, and **every remote expert is
+charged twice** (0.2373 shadow so decode can reach it + 0.2175 bank so
+prefill can stream it = 0.455 GiB), capping banked experts at ~117 of a
+53 GiB budget while the 99B has 151 to place.
+
+**+16 GiB of host RAM closes a 12.1 GiB gap** and is worth ~3.5x on 8K TTFT.
+No placement, kernel, format or compression lever measured today comes close
+to that per unit of effort.
+
+### 11. Bank format decision: NVFP4, not Marlin
+
+Marlin is 8% smaller per expert (0.2175 vs 0.2373 GiB) which matters while
+DRAM is short -- but it needs NVFP4 -> int4 requantisation, which is new code
+that changes the served weights and demands a full numerical gate.
+
+An **NVFP4** bank streamed into `CutlassExpertsFp4` -- the backend already
+serving the local experts and already qualified (Bench 18 §1) -- uses the
+*same bytes* from the existing `expert_bank_99b.bin` and the *same kernel*,
+so the streamed partial should be bit-identical to the resident one. That
+reduces the gate to a smoke test instead of a requantisation study. Start
+there; revisit Marlin only if the 8% is what stands between us and fitting.
+
+### 12. Third point validates the model; fp8 KV rejected
+
+| config | predicted | measured |
+|---|---|---|
+| L=1 | 15.48 s | 15.476 s |
+| L=54 | 12.21 s | 12.21 s |
+| **L=61 + fp8 KV** | **11.78 s** | **11.924 s** |
+
+`TTFT(8.5K) = 2.91 + 0.0616 x N_b70` holds to 1.2% across a 3x range of
+remote counts. The coefficient is real.
+
+**fp8 KV works on this hybrid model** -- `--kv-cache-dtype fp8` is accepted
+and the attention block size moves `2096 -> 4176 tokens`, so the mamba
+page-equality constraint does *not* block it (that was the open question).
+But it is a bad trade:
+
+| | L=54, bf16 KV | L=61, fp8 KV |
+|---|---|---|
+| TTFT 8.5K | 12.21 s | 11.92 s (-2.4%) |
+| **ITL** | **13.657 ms** | 15.075 ms (**+10.4%**) |
+| KV | 3.69 GiB, 4.00x @32K | 1.35 GiB, 2.55x @32K |
+| 5090 spare | 2.5 GiB | 1.38 GiB (under the 1.5 floor) |
+
+fp8 forces dequant in the attention path
+(`decode_backend=flashinfer-native, kv_cache_dtype=float8_e4m3fn`), spending
+10.4% of decode to buy 2.4% of prefill. Rejected. Note also the trade steepens
+near the wall: L=54->61 added 1.65 GiB of weights but cost 2.34 GiB of KV, so
+**L~57 is the practical maximum** at a 1.5 GiB spare-VRAM floor.
+
+**Adopted as the serve default** (`fractional:2:0.2634`, `SB_GPU_UTIL=0.90`):
+strictly better than the shipped 1/205 on both prefill and decode, keeps 131K
+KV tokens at 4.00x concurrency for 32K. The old long-context profile is one
+env var away.
+
+### 13. Pinned H2D to the 5090, measured here
+
+| transfer | 64 MiB | 256 MiB | 1 GiB |
+|---|---|---|---|
+| pinned | 47.21 | 56.78 | **57.27 GB/s** |
+| pageable | 25.71 | 20.50 | 20.93 GB/s |
+
+Better than the 88B's inherited 53.9 GiB/s. Bank pass cost: **0.28 s** for a
+64-expert NVFP4 bank (15.2 GiB), **0.67 s** for all 151 (35.8 GiB). The 5090
+leg has slack; the B70 term is what dominates.
+
+### 14. Why the existing streamer cannot be used as-is
+
+`SHOOTING_BRAKE_B70_PREFILL_STREAM=1` is already implemented for NVFP4 and
+would read this model's `SBEXP001` bank directly -- but
+`_load_host_experts_from_bank` sizes the host arena for **every** B70-owned
+expert:
+
+```
+(205-L) x 0.2373  <=  15.29 + (L-54) x 0.2373 - 2   =>   L >= 102
+```
+
+and L=102 needs 34.3 GiB of CUDA weights on a 31.84 GiB card. So the
+all-or-nothing streamer can never fit, and a **partial** bank is mandatory.
+
+The change is contained, because `_prefill_forward_offloaded` already sums
+three tiers and already passes both id spaces (compact provider slots +
+global arena ids):
+
+```
+stream_ids   = _stream_id_map_cuda[topk_ids]        # arena index, else -1
+dispatch_ids = where(stream_ids >= 0, -1, b70_ids)  # mask streamed out
+partial      = stream_partial(stream_ids) + dispatch_partial(dispatch_ids)
+```
+
+plus a subset argument to the arena loader. Expected: ~8.3 s at 8.5K with a
+64-expert bank, versus 12.21 s now.

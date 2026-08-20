@@ -32,7 +32,15 @@ export PYTHONPATH="$PWD/src/phase4/src:$PYTHONPATH"
 export VLLM_PLUGINS=shooting_brake_vllm
 export SHOOTING_BRAKE_PHASE4=all-cuda
 export SHOOTING_BRAKE_MODEL=srswti/axe-superveloce-99b-nvfp4
-export SHOOTING_BRAKE_PLACEMENT="${SHOOTING_BRAKE_PLACEMENT:-fractional:2:0.0048780487804878}"
+# Placement, measured 2026-08-20 (kill-bench 18 §8): 54 local experts beats
+# the original 1/205 on BOTH axes -- 8.5K TTFT 15.48 -> 12.21 s (-21%) and ITL
+# 13.96 -> 13.66 ms -- because every expert moved off the B70 is worth 61.6 ms
+# of prefill, and moving it also frees host DRAM 1:1 (2.78 -> 15.29 GiB) for a
+# future prefill bank. Cost: KV 14.27 -> 3.69 GiB, i.e. 582K -> 131K tokens,
+# still 4.00x concurrency at 32K. Set F=0.0048780487804878 for the old
+# long-context profile. L>~57 is not worth it: L=61 needs fp8 KV, which buys
+# 2.4% prefill and costs 10.4% ITL, and leaves <1.5 GiB spare on the 5090.
+export SHOOTING_BRAKE_PLACEMENT="${SHOOTING_BRAKE_PLACEMENT:-fractional:2:0.2634146341463415}"
 export SHOOTING_BRAKE_HYBRID=1
 export SHOOTING_BRAKE_B70_DEVICE=1
 export SHOOTING_BRAKE_B70_GRAPH=1
@@ -74,6 +82,6 @@ exec .venv/bin/vllm serve srswti/axe-superveloce-99b-nvfp4 \
   --moe-backend "${SB_MOE_BACKEND:-cutlass}" \
   --max-model-len "${SB_MML:-32768}" \
   --max-num-batched-tokens "${SB_MNBT:-2048}" \
-  --gpu-memory-utilization "${SB_GPU_UTIL:-0.85}" \
+  --gpu-memory-utilization "${SB_GPU_UTIL:-0.90}" \
   --max-num-seqs "${SB_MNS:-4}" \
   --reasoning-parser qwen3 ${SB_EXTRA_ARGS}

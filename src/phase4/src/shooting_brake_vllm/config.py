@@ -36,6 +36,19 @@ class SupportedModel:
     model_type: str = QUALIFIED_MODEL_TYPE
     default_bank_filename: str = "expert_bank.bin"
     language_model_only: bool = False
+    # Absolute transformer layers that own a routed-expert module at all.
+    # Empty means "every layer", which is true for the Qwen specs above.
+    # Laguna models carry a DENSE MLP at layer 0 -- vLLM constructs no MoE
+    # block there, so it has no routed module, no bank row, no poller
+    # registration and no route observation. That is a different condition
+    # from a routed layer that merely cannot offload (the 99B's FP8 layers
+    # 32-39), which is still a real RoutedExperts instance.
+    routed_layer_ids: tuple[int, ...] = ()
+    # Absolute layers whose experts are present in the bank, in bank-row
+    # order. The bank is stored compactly, so row i holds bank_layer_ids[i];
+    # for Laguna that is model layer i+1. Empty means the leading prefix
+    # range(bank_layers), preserving the Qwen contract exactly.
+    bank_layer_ids: tuple[int, ...] = ()
 
 
 _MODEL_SPECS = (
@@ -85,6 +98,30 @@ _MODEL_SPECS = (
         architecture="Qwen3_5MoeForCausalLM",
         default_bank_filename="expert_bank_99b.bin",
         language_model_only=True,
+    ),
+    SupportedModel(
+        # Laguna is a different architecture, not a Qwen variant: 47 sparse
+        # MoE layers + 1 dense MLP at layer 0, sliding-window attention
+        # instead of GDN, per-head attention gating, and top_k 10.
+        # It is NOT `is_hybrid`, so vLLM prefix-caches it -- measured 142x
+        # on a repeated 6,023-token prompt where the 99B managed 1.007x.
+        model="srswti/axe-superveloce-jota-118b-r20-nvfp4",
+        routed_experts_model="srswti/axe-superveloce-jota-118b-r20-nvfp4",
+        routed_expert_format="nvfp4",
+        hidden_size=3072,
+        num_layers=48,
+        # 205 experts is deliberate: it matches the 99B exactly, so the
+        # fractional placement policy, the resident-set arithmetic and the
+        # 76/75 two-card split all carry over. r15 would raise this to 218.
+        num_experts=205,
+        top_k=10,
+        moe_intermediate_size=1024,
+        architecture="LagunaForCausalLM",
+        model_type="laguna",
+        default_bank_filename="expert_bank_jota_118b_r20.bin",
+        language_model_only=True,
+        routed_layer_ids=tuple(range(1, 48)),
+        bank_layer_ids=tuple(range(1, 48)),
     ),
 )
 
@@ -150,6 +187,11 @@ class QualifiedModel:
     bank_source_expert_ids: tuple[int, ...] = ()
     routed_experts_model: str | None = None
     routed_expert_format: str = "nvfp4"
+    # Absolute layers owning a routed module, and the absolute layers present
+    # in the bank in bank-row order. Empty preserves the legacy contract:
+    # every layer routed, bank holds the leading prefix range(bank_layers).
+    routed_layer_ids: tuple[int, ...] = ()
+    bank_layer_ids: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not 0 <= self.bank_layers <= self.num_layers:
@@ -178,11 +220,66 @@ class QualifiedModel:
                 for expert in self.bank_source_expert_ids
             ):
                 raise ValueError("bank_source_expert_ids contain an invalid ID")
+        # Normalise the layer topology before anything reads it. Empty means
+        # the legacy Qwen contract, so existing specs are untouched.
+        routed = self.routed_layer_ids or tuple(range(self.num_layers))
+        banked = self.bank_layer_ids or tuple(range(self.bank_layers))
+        for name, ids in (("routed_layer_ids", routed), ("bank_layer_ids", banked)):
+            if tuple(sorted(set(ids))) != tuple(ids):
+                raise ValueError(f"{name} must be unique and increasing")
+            if not all(0 <= layer < self.num_layers for layer in ids):
+                raise ValueError(
+                    f"{name} contains a layer outside 0..{self.num_layers - 1}"
+                )
+        if len(banked) != self.bank_layers:
+            raise ValueError(
+                f"bank_layer_ids has {len(banked)} entries but "
+                f"bank_layers={self.bank_layers}"
+            )
+        orphans = tuple(layer for layer in banked if layer not in frozenset(routed))
+        if orphans:
+            raise ValueError(f"banked layers {orphans} are not routed layers")
+        object.__setattr__(self, "routed_layer_ids", routed)
+        object.__setattr__(self, "bank_layer_ids", banked)
 
     @property
     def b70_capable_layers(self) -> frozenset[int]:
         """Absolute layers whose routed experts exist in the selected bank."""
-        return frozenset(range(self.bank_layers))
+        return frozenset(self.bank_layer_ids)
+
+    def is_routed_layer(self, layer: int) -> bool:
+        """Whether this absolute layer owns a routed-expert module at all.
+
+        False for a dense MLP layer (Laguna's layer 0), which has no
+        RoutedExperts instance. This is NOT the same as a routed layer that
+        cannot offload -- those are real modules and return True.
+        """
+        return layer in frozenset(self.routed_layer_ids)
+
+    def bank_row_for_model_layer(self, layer: int) -> int:
+        """Translate an absolute model layer to its compact bank row.
+
+        The bank is stored densely, so a model whose first sparse layer is 1
+        keeps that layer's experts in row 0. Every crossing into the native
+        provider or a compact bank file MUST come through here: passing an
+        absolute index straight through reads the neighbouring layer's
+        weights and yields plausible wrong output instead of an error.
+        """
+        try:
+            return self.bank_layer_ids.index(layer)
+        except ValueError:
+            raise KeyError(
+                f"layer {layer} has no bank row; bank covers "
+                f"{sorted(self.bank_layer_ids)[:1]}..{sorted(self.bank_layer_ids)[-1:]}"
+            ) from None
+
+    def model_layer_for_bank_row(self, row: int) -> int:
+        """Inverse of `bank_row_for_model_layer`, for traces and diagnostics."""
+        if not 0 <= row < len(self.bank_layer_ids):
+            raise KeyError(
+                f"bank row {row} outside 0..{len(self.bank_layer_ids) - 1}"
+            )
+        return self.bank_layer_ids[row]
 
 
 def phase4_enabled() -> bool:
@@ -556,7 +653,10 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
     if spec.architecture not in _architectures(hf_config):
         raise QualificationError("unqualified model architecture")
     if getattr(text_config, "model_type", None) != spec.model_type:
-        raise QualificationError("unqualified Qwen text model type")
+        raise QualificationError(
+            f"unqualified text model type: expected {spec.model_type!r}, "
+            f"got {getattr(text_config, 'model_type', None)!r}"
+        )
     if spec.language_model_only and not _language_model_only(model_config):
         raise QualificationError(
             f"{model} must run text-only with language_model_only=True"
@@ -712,6 +812,14 @@ def require_qualified_config(vllm_config: object) -> QualifiedModel:
         bank_source_expert_ids=union_ids,
         routed_experts_model=spec.routed_experts_model,
         routed_expert_format=spec.routed_expert_format,
+        routed_layer_ids=spec.routed_layer_ids,
+        # A zero-layer bank (all-CUDA, nothing offloaded) has no banked
+        # layers at all, so the spec's list must not be forwarded -- it
+        # would fail the length invariant against bank_layers=0. When a
+        # bank IS present its row count must match the spec exactly; a
+        # 48-row bank under a 47-sparse-layer model is a build error and
+        # is rejected rather than silently shifted by one layer.
+        bank_layer_ids=spec.bank_layer_ids if bank_layers else (),
     )
 
     if (

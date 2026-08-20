@@ -86,5 +86,5 @@ exec .venv/bin/vllm serve srswti/axe-superveloce-jota-118b-r20-nvfp4 \
   --moe-backend "${SB_MOE_BACKEND:-cutlass}" \
   --max-model-len "${SB_MML:-32768}" \
   --max-num-batched-tokens "${SB_MNBT:-2048}" \
-  --gpu-memory-utilization "${SB_GPU_UTIL:-0.90}" \
+  --gpu-memory-utilization "${SB_GPU_UTIL:-0.85}" \
   --max-num-seqs "${SB_MNS:-4}" ${SB_EXTRA_ARGS}

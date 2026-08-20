@@ -24,6 +24,22 @@
 #                  not an architectural one. Raise SB_MML if you would rather
 #                  have one very long sequence than several long ones.
 #   max-num-seqs   4, matching the 99B recipe.
+#   gpu-util       0.85, NOT 0.90. This box drives a display: GNOME Shell and
+#                  friends need VRAM on the same 5090, so total card usage is
+#                  capped at ~29 GiB of the 31.84 GiB available rather than
+#                  letting vLLM take everything it can.
+#
+#                  The flag is NOT the observed total. vLLM budgets
+#                  `util * total` for itself, and measured actual usage runs
+#                  ~1.5 GiB above that budget (CUDA context, cuBLAS
+#                  workspaces, allocator slack) on top of whatever the
+#                  desktop already holds. Measured on this box:
+#                    util 0.90 -> budget 28.22 GiB -> engine 29,270 MiB
+#                                 + ~1,180 MiB desktop = ~30.4 GB total
+#                    util 0.85 -> budget 26.66 GiB -> see the boot log
+#                  So read the engine's real figure from `nvidia-smi` after a
+#                  boot rather than trusting the flag. Raise SB_GPU_UTIL only
+#                  if nothing else needs the card.
 # No `set -u`: sourcing oneAPI setvars.sh references unset vars and would abort.
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 source /opt/intel/oneapi/setvars.sh --force >/dev/null
@@ -32,7 +48,17 @@ export PYTHONPATH="$PWD/src/phase4/src:$PYTHONPATH"
 export VLLM_PLUGINS=shooting_brake_vllm
 export SHOOTING_BRAKE_PHASE4=all-cuda
 export SHOOTING_BRAKE_MODEL=srswti/axe-superveloce-jota-118b-r15-nvfp4
-export SHOOTING_BRAKE_PLACEMENT="${SHOOTING_BRAKE_PLACEMENT:-fractional:2:0.2634146341463415}"
+# Placement, measured 2026-08-20 (kill-bench 20): 48 local experts of 218.
+# Swept L = 20/40/48/57/61 on this exact card. Decode ITL SATURATES at
+# L~40 -- from 40 to 61 it reads 10.87/10.53/10.85/10.57 ms, flat inside
+# noise, so experts past 40 buy decode nothing. Prefill keeps paying
+# monotonically (-14.1% from L=20 to L=48 on an identical prompt slice).
+# L=48 over the previously shipped L=57 trades ~2% cold prefill for
+# +2.13 GiB KV and +27% concurrency, and cold prefill is what the 139x
+# prefix cache erases on repeat traffic. L=61 is the hard ceiling here:
+# L=65 leaves 6.0 GiB KV and one 131072-token request needs 6.64.
+# Total card usage is L-invariant (28.75-28.92 GiB across all five).
+export SHOOTING_BRAKE_PLACEMENT="${SHOOTING_BRAKE_PLACEMENT:-fractional:2:0.22018348623853212}"
 export SHOOTING_BRAKE_HYBRID=1
 export SHOOTING_BRAKE_B70_DEVICE=1
 export SHOOTING_BRAKE_B70_GRAPH=1
@@ -70,7 +96,7 @@ exec .venv/bin/vllm serve srswti/axe-superveloce-jota-118b-r15-nvfp4 \
   --moe-backend "${SB_MOE_BACKEND:-cutlass}" \
   --max-model-len "${SB_MML:-131072}" \
   --max-num-batched-tokens "${SB_MNBT:-2048}" \
-  --gpu-memory-utilization "${SB_GPU_UTIL:-0.90}" \
+  --gpu-memory-utilization "${SB_GPU_UTIL:-0.85}" \
   --max-num-seqs "${SB_MNS:-4}" \
   --reasoning-parser poolside_v1 \
   --enable-auto-tool-choice \

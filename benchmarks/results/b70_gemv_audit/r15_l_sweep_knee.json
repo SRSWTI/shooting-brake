@@ -1,0 +1,30 @@
+[
+  {
+    "local_experts": 48,
+    "remote_experts": 170,
+    "fraction": 0.22018348623853212,
+    "boot_s": 95.1,
+    "kv_gib": 10.1,
+    "max_concurrency": 1.52,
+    "card_total_mib": 28798,
+    "cold_ttft_s": 20.028,
+    "prompt_tokens": 12013,
+    "us_per_token": 1667.2,
+    "cold_cache_hits": 0,
+    "itl_ms": 10.53
+  },
+  {
+    "local_experts": 61,
+    "remote_experts": 157,
+    "fraction": 0.2798165137614679,
+    "boot_s": 90.0,
+    "kv_gib": 6.96,
+    "max_concurrency": 1.05,
+    "card_total_mib": 28796,
+    "cold_ttft_s": 20.729,
+    "prompt_tokens": 13146,
+    "us_per_token": 1576.8,
+    "cold_cache_hits": 0,
+    "itl_ms": 10.571
+  }
+]

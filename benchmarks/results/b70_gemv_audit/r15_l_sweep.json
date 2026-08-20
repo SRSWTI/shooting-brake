@@ -1,0 +1,44 @@
+[
+  {
+    "local_experts": 20,
+    "remote_experts": 198,
+    "fraction": 0.09174311926605505,
+    "boot_s": 277.3,
+    "kv_gib": 16.66,
+    "max_concurrency": 2.51,
+    "card_total_mib": 28923,
+    "cold_ttft_s": 23.311,
+    "prompt_tokens": 12013,
+    "us_per_token": 1940.4,
+    "cold_cache_hits": 0,
+    "itl_ms": 11.596
+  },
+  {
+    "local_experts": 40,
+    "remote_experts": 178,
+    "fraction": 0.1834862385321101,
+    "boot_s": 110.0,
+    "kv_gib": 11.89,
+    "max_concurrency": 1.79,
+    "card_total_mib": 28747,
+    "cold_ttft_s": 23.13,
+    "prompt_tokens": 13146,
+    "us_per_token": 1759.4,
+    "cold_cache_hits": 0,
+    "itl_ms": 10.868
+  },
+  {
+    "local_experts": 57,
+    "remote_experts": 161,
+    "fraction": 0.26146788990825687,
+    "boot_s": 95.0,
+    "kv_gib": 7.97,
+    "max_concurrency": 1.2,
+    "card_total_mib": 28864,
+    "cold_ttft_s": 21.173,
+    "prompt_tokens": 12937,
+    "us_per_token": 1636.6,
+    "cold_cache_hits": 0,
+    "itl_ms": 10.85
+  }
+]

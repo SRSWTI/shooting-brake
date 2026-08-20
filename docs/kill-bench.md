@@ -1624,3 +1624,51 @@ more once, then nothing.
   `Engine core initialization failed`.
 - `benchmarks/b70_itl_probe.py` defaults to `/v1/chat/completions`; handing
   it `/v1/completions` returns 400.
+
+## Bench 20 — Laguna r15 local-expert sweep (2026-08-20)
+
+**Ordered as an optimisation; delivered a negative result and a trade.**
+The question was whether `L=57` — inherited arithmetic, the 99B's measured
+optimum of 54 rescaled onto 218 experts — is right for Laguna, whose memory
+economics differ completely (dense 3.18 vs 10.24 GiB, KV 1.70x per token).
+I predicted ~20% on the 99B's L=1->54 precedent. **That was wrong.**
+
+`benchmarks/laguna_l_sweep.py`, five boots, util 0.85, MML 131072:
+
+| L | remote | KV GiB | conc @131K | prefill us/tok | ITL ms | card MiB |
+|---:|---:|---:|---:|---:|---:|---:|
+| 20 | 198 | 16.66 | 2.51 | 1940.4 | 11.596 | 28923 |
+| 40 | 178 | 11.89 | 1.79 | 1759.4 | 10.868 | 28747 |
+| 48 | 170 | 10.10 | 1.52 | 1667.2 | 10.530 | 28798 |
+| 57 | 161 | 7.97 | 1.20 | 1636.6 | 10.850 | 28864 |
+| 61 | 157 | 6.96 | 1.05 | 1576.8 | 10.571 | 28796 |
+
+1. **No free speed. L=57 was already near the prefill optimum.** The
+   inherited default was well-chosen. Prefill is monotone in L and still
+   improving at the ceiling.
+2. **Decode ITL saturates at L~40.** From 40 to 61 — 21 more local experts —
+   ITL reads 10.87/10.53/10.85/10.57, non-monotone, flat inside ~1.5%
+   noise. Experts past 40 buy decode *nothing*. This is the finding worth
+   keeping: the decode gap is 5090-side per-layer work (Bench 17's 208 us),
+   not expert locality, so buying locality cannot move it.
+3. **A cheap trade exists.** L=48 over L=57: ~2% cold prefill for +2.13 GiB
+   KV and +27% concurrency. Adopted as the r15 default, because the 139x
+   prefix cache (Bench 19) erases cold prefill on repeat traffic while
+   concurrency is paid on every request.
+4. **Total card usage is L-invariant** — 28.75-28.92 GiB across all five.
+   vLLM sizes KV to fill whatever weights leave, so L never threatens the
+   ~29 GiB desktop ceiling. Tuning L is free with respect to VRAM.
+5. **Hard ceiling L=61.** L=65 leaves 6.0 GiB KV; one 131072-token request
+   needs 6.64. Boot refuses, correctly.
+
+**Measurement caveat, mine.** Defeating the prefix cache required a unique
+prompt slice per point, so slice *content* varies across L — and content
+shifts per-token cost several percent through routing balance (Bench 17
+measured 9.2% gate-cost difference prose vs synthetic). Same-slice pairs are
+the only clean ones: L=20->48 is **-14.1%**, L=40->61 is **-10.4%**. The
+trend is real; individual 2-4% steps are not. A cleaner design would fix the
+slice and flush the cache between points.
+
+**Not established:** r20 was NOT swept. It has 205 experts and its own KV
+cost; its `fractional:2:0.2634` (54 local) is still inherited arithmetic and
+should not be assumed optimal from this. Nothing here measures quality.

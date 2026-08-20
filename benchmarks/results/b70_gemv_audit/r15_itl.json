@@ -1,0 +1,49 @@
+[
+ {
+  "label": "r15-util085",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r15",
+  "n": 4,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 13.094814864080096,
+  "ttft_s_mean_excl_first": 0.07228936532919761,
+  "requests": [
+   {
+    "ttft_s": 0.2858008820039686,
+    "itl_ms": 16.023105113737415,
+    "chunks": 256
+   },
+   {
+    "ttft_s": 0.07209196098847315,
+    "itl_ms": 16.24465604711041,
+    "chunks": 256
+   },
+   {
+    "ttft_s": 0.07925981699372642,
+    "itl_ms": 11.233297427465645,
+    "chunks": 256
+   },
+   {
+    "ttft_s": 0.06551631800539326,
+    "itl_ms": 11.80649111766423,
+    "chunks": 256
+   }
+  ],
+  "act_freq": {
+   "/sys/bus/pci/devices/0000:15:00.0/tile0/gt0/freq0/act_freq": {
+    "samples": 2868,
+    "active_min": 2400,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.036
+   },
+   "/sys/bus/pci/devices/0000:11:00.0/tile0/gt0/freq0/act_freq": {
+    "samples": 2868,
+    "active_min": 2400,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.036
+   }
+  }
+ }
+]

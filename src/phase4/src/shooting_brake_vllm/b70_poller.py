@@ -92,16 +92,22 @@ class B70Poller:
         )
         self._trace_thread: threading.Thread | None = None
         self._trace_stop = threading.Event()
+        # bank row -> absolute model layer, recorded at registration. The
+        # native trace reports rows, because that is what it is given; a
+        # compact bank makes rows and model layers differ by an offset and
+        # every consumer of the trace wants model layers.
+        self._model_layer_by_row: dict[int, int] = {}
 
     def register_layer(
         self,
-        layer_idx: int,
+        bank_row: int,
         signal_host: int,
         completion_host: int,
         pinned_hidden: torch.Tensor,
         pinned_ids: torch.Tensor,
         pinned_weights: torch.Tensor,
         pinned_output: torch.Tensor,
+        model_layer: int | None = None,
     ) -> None:
         """Register one layer's flags and pinned buffers.
 
@@ -110,7 +116,13 @@ class B70Poller:
         raw pointers and never takes a reference.
 
         Args:
-            layer_idx: Absolute layer index (0-31), indexes the B70 bank.
+            bank_row: COMPACT bank row, not the absolute model layer. The
+                native provider addresses expert records by row, so a bank
+                whose first sparse layer is not 0 has rows offset from model
+                layers. Passing an absolute index here reads the
+                neighbouring layer's weights and yields plausible wrong
+                output rather than an error. Use
+                ``QualifiedModel.bank_row_for_model_layer()``.
             signal_host: Host view of the signal flag; the CUDA stream
                 writes M here to request a dispatch.
             completion_host: Host view of the completion flag; set to 1
@@ -119,10 +131,13 @@ class B70Poller:
             pinned_ids: Int32 [max_batch, topk] compact B70 slots, -1 skips.
             pinned_weights: FP32 [max_batch, topk] routing weights.
             pinned_output: FP32 [max_batch, hidden] result target.
+            model_layer: Absolute model layer this row serves, recorded so
+                the trace can be reported in model coordinates. Defaults to
+                ``bank_row``, which is correct for every prefix bank.
         """
         status = self._lib.sb_b70_poll_register(
             self._handle,
-            ctypes.c_size_t(layer_idx),
+            ctypes.c_size_t(bank_row),
             ctypes.c_void_p(signal_host),
             ctypes.c_void_p(completion_host),
             ctypes.c_void_p(pinned_hidden.data_ptr()),
@@ -137,9 +152,13 @@ class B70Poller:
         )
         if status != 0:
             raise RuntimeError(
-                f"sb_b70_poll_register failed for layer {layer_idx} "
-                f"(status={status})"
+                f"sb_b70_poll_register failed for bank row {bank_row} "
+                f"(model layer {bank_row if model_layer is None else model_layer}, "
+                f"status={status})"
             )
+        self._model_layer_by_row[bank_row] = (
+            bank_row if model_layer is None else model_layer
+        )
         self._layers += 1
 
     def start(self) -> None:
@@ -176,11 +195,18 @@ class B70Poller:
             self._handle, buf, ctypes.c_size_t(capacity)))
         entries = []
         for i in range(n):
-            t0, t1, kernel, total, layer, m = struct.unpack_from(
+            t0, t1, kernel, total, row, m = struct.unpack_from(
                 "<QQQQII", buf, i * entry_bytes)
             entries.append({
                 "t0_ns": t0, "t1_ns": t1, "kernel_ns": kernel,
-                "total_ns": total, "layer": layer, "M": m,
+                "total_ns": total,
+                # ``layer`` is the absolute MODEL layer, which is what every
+                # consumer of this trace wants; ``bank_row`` is the raw value
+                # native reported. They are equal for a prefix bank, so
+                # existing 99B traces and their analyses are unchanged.
+                "layer": self._model_layer_by_row.get(row, row),
+                "bank_row": row,
+                "M": m,
             })
         return entries
 

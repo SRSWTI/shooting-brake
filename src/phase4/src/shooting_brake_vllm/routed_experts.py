@@ -1606,7 +1606,7 @@ class HybridRoutedExperts(RoutedExperts):
             bank = ExpertBank(_b70_bank_path())
             self._verify_bank = bank
 
-        planes = bank.expert(layer_idx, expert_id)
+        planes = bank.expert(self._bank_row(layer_idx), expert_id)
         checks = (
             ("gate_q", gate_q, planes.gate), ("up_q", up_q, planes.up),
             ("down_q", down_q, planes.down),
@@ -1736,7 +1736,9 @@ class HybridRoutedExperts(RoutedExperts):
         self._cpu_host = host
 
         for expert_id in host_ids:
-            p = bank.expert(layer_idx, expert_id)
+            # Bank read takes the compact row; the CPU arena below stays in
+            # ABSOLUTE model coordinates, so the two must not be conflated.
+            p = bank.expert(self._bank_row(layer_idx), expert_id)
             gs13 = p.w13_inv_global / global_scale_divisor(a1)
             gs2 = p.w2_inv_global / global_scale_divisor(a2)
             host.load_expert(
@@ -2092,6 +2094,24 @@ class HybridRoutedExperts(RoutedExperts):
             layer_idx,
         )
 
+    def _bank_row(self, layer_idx: int) -> int:
+        """This absolute model layer's COMPACT bank row.
+
+        The expert bank is stored densely, so a model whose first sparse
+        layer is not 0 has rows offset from model layers -- Laguna keeps
+        model layer 1 in row 0. The native provider addresses records by
+        row, so an absolute index reaching it reads the NEIGHBOURING
+        layer's experts. That produces plausible wrong tokens, not an
+        error, and the bank's size check cannot detect it.
+
+        Identity for every Qwen model, where the bank is a leading prefix.
+        Raises for a layer the bank does not hold, which is the correct
+        outcome for a dense layer or an FP8 all-CUDA layer.
+        """
+        return self.shooting_brake_qualified_model.bank_row_for_model_layer(
+            layer_idx
+        )
+
     def _register_b70_poller(self, layer_idx: int) -> None:
         """Bind this layer's lanes to their per-card pollers.
 
@@ -2141,7 +2161,8 @@ class HybridRoutedExperts(RoutedExperts):
                 self.shooting_brake_placement, lane.device_index,
             )
             poller.register_layer(
-                layer_idx=layer_idx,
+                bank_row=self._bank_row(layer_idx),
+                model_layer=layer_idx,
                 signal_host=lane.signal_host,
                 completion_host=lane.completion_host,
                 pinned_hidden=lane.pinned_hidden,
@@ -2717,7 +2738,7 @@ class HybridRoutedExperts(RoutedExperts):
             b70_ids = lane.slot_map[ids_np]           # [M, topk]
             b70_weights = wts_np * (b70_ids >= 0).astype(np.float32)
             output_np = provider.dispatch(
-                layer=layer_idx,
+                layer=self._bank_row(layer_idx),
                 hidden_fp16=hidden_fp16,
                 ids=b70_ids,
                 weights=b70_weights,
@@ -2773,7 +2794,7 @@ class HybridRoutedExperts(RoutedExperts):
             b70_weights = wts_np * (b70_ids >= 0).astype(np.float32)
             # Submit — SYCL kernel starts on this B70, returns immediately.
             seq = provider.issue(
-                layer=layer_idx,
+                layer=self._bank_row(layer_idx),
                 hidden_fp16=lane.pinned_hidden[:M].numpy(),
                 ids=b70_ids,
                 weights=b70_weights,

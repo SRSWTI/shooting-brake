@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Terminal chat client for the Shooting Brake 88B server.
+"""Terminal chat client for a Shooting Brake server (88B / 99B / jota-r20).
 
 Multi-turn, streaming. Two things it is deliberately careful about:
 
@@ -24,9 +24,16 @@ import time
 import urllib.error
 import urllib.request
 
-URL = "http://127.0.0.1:8016/v1/chat/completions"
-MODEL = "shooting-brake-88b"
+DEFAULT_URL = "http://127.0.0.1:8016/v1/chat/completions"
+DEFAULT_MODEL = "shooting-brake-88b"
 DEFAULT_SYSTEM = "you are jesco-- a coding agent"
+# Rebound from argv in main(); stream_turn reads them as globals.
+URL = DEFAULT_URL
+MODEL = DEFAULT_MODEL
+# Some chat templates reject `enable_thinking`. Qwen accepts it; Laguna does
+# not necessarily, so it is a flag rather than an assumption.
+SEND_TEMPLATE_KWARGS = True
+MAX_TOKENS = 4096
 # Thinking off by default: this model reasons at length and rarely emits final
 # content inside a sane max_tokens, so thinking-on looks like an empty reply.
 THINK_DEFAULT = False
@@ -54,7 +61,7 @@ def wait_for_server(timeout_s: float = 1200.0) -> bool:
     while time.monotonic() - start < timeout_s:
         try:
             with urllib.request.urlopen(
-                "http://127.0.0.1:8016/health", timeout=2
+                URL.rsplit("/v1/", 1)[0] + "/health", timeout=2
             ) as r:
                 if r.status == 200:
                     sys.stdout.write(
@@ -83,11 +90,11 @@ def stream_turn(messages: list[dict], show_think: bool, thinking: bool) -> Turn:
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "max_tokens": 4096,
+            "max_tokens": MAX_TOKENS,
             "temperature": 0.6,
             "top_p": 0.95,
     }
-    if not thinking:
+    if not thinking and SEND_TEMPLATE_KWARGS:
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -156,10 +163,33 @@ def stream_turn(messages: list[dict], show_think: bool, thinking: bool) -> Turn:
 
 
 def main() -> int:
-    print(
-        f"{BOLD}Shooting Brake 88B{RESET} "
-        f"{DIM}— 5090 dense NVFP4 + Arc Pro B70 int4 experts (126/layer){RESET}"
-    )
+    global URL, MODEL, DEFAULT_SYSTEM, SEND_TEMPLATE_KWARGS, MAX_TOKENS
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--url", default=DEFAULT_URL,
+                    help="chat-completions endpoint")
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help="served-model-name")
+    ap.add_argument("--system", default=DEFAULT_SYSTEM,
+                    help="system prompt")
+    ap.add_argument("--max-tokens", type=int, default=4096)
+    ap.add_argument("--no-template-kwargs", action="store_true",
+                    help="do not send chat_template_kwargs (some templates "
+                         "reject enable_thinking and 400 the request)")
+    ap.add_argument("--port", type=int, default=None,
+                    help="shorthand: rewrite the default URL's port")
+    args = ap.parse_args()
+
+    URL = args.url
+    if args.port is not None and args.url == DEFAULT_URL:
+        URL = f"http://127.0.0.1:{args.port}/v1/chat/completions"
+    MODEL = args.model
+    DEFAULT_SYSTEM = args.system
+    SEND_TEMPLATE_KWARGS = not args.no_template_kwargs
+    MAX_TOKENS = args.max_tokens
+
+    print(f"{BOLD}Shooting Brake{RESET} {DIM}— {MODEL} @ {URL}{RESET}")
     print(f"{DIM}system: {DEFAULT_SYSTEM}{RESET}")
     print(f"{DIM}/reset  /stats  /sys <text>  /reason  /nothink  /quit{RESET}\n")
 
@@ -224,7 +254,8 @@ def main() -> int:
             continue
 
         messages.append({"role": "user", "content": user})
-        print(f"\n{GREEN}88b ▸ {RESET}", end="", flush=True)
+        tag = MODEL.replace("shooting-brake-", "")
+        print(f"\n{GREEN}{tag} ▸ {RESET}", end="", flush=True)
         try:
             turn = stream_turn(messages, show_think, thinking)
         except (urllib.error.URLError, ConnectionError) as exc:

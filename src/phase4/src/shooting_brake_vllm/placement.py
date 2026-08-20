@@ -844,14 +844,24 @@ def b70_bank_covers(
     bank_layers: int,
     bank_experts_per_layer: int,
     bank_source_expert_ids: tuple[int, ...] = (),
+    bank_layer_ids: tuple[int, ...] = (),
 ) -> bool:
     """Whether the bank contains every source expert assigned off CUDA.
 
     SBINT401 banks carry an explicit sparse source-id list; legacy NVFP4
     banks are contiguous prefixes and therefore retain the count fallback.
     Device-local compact slots are never treated as source expert ids.
+
+    ``bank_layer_ids`` names the ABSOLUTE layers the bank holds, in row
+    order. Legacy banks are leading prefixes so the count alone is enough,
+    but a model whose first sparse layer is not 0 -- Laguna carries a dense
+    MLP at layer 0 -- must pass them explicitly. Deriving the set from the
+    count there would demand banked experts for the dense layer and
+    silently drop the last sparse one.
     """
-    bank_layer_set = set(range(bank_layers))
+    bank_layer_set = (
+        set(bank_layer_ids) if bank_layer_ids else set(range(bank_layers))
+    )
     resident_ids = (
         set(bank_source_expert_ids)
         if bank_source_expert_ids
@@ -987,6 +997,7 @@ def build_for_qualified(
         bank_source_expert_ids=getattr(
             qualified_model, "bank_source_expert_ids", (),
         ),
+        bank_layer_ids=getattr(qualified_model, "bank_layer_ids", ()),
     ):
         raise PlacementError(
             "placement assigns B70/CPU experts the selected bank does not hold"

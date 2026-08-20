@@ -32,6 +32,12 @@ from shooting_brake_vllm.config import (  # noqa: E402
     SUPPORTED_MODELS,
     QualifiedModel,
 )
+from shooting_brake_vllm.placement import (  # noqa: E402
+    Device,
+    ExpertOwner,
+    Placement,
+    b70_bank_covers,
+)
 
 FAILURES: list[str] = []
 
@@ -77,6 +83,32 @@ def laguna_like(bank_layers: int = 47) -> QualifiedModel:
         bank_experts_per_layer=205,
         routed_layer_ids=tuple(range(1, 48)),
         bank_layer_ids=tuple(range(1, 48)),
+    )
+
+
+def laguna_placement(*, b70_in_dense_layer: bool = False) -> Placement:
+    """48 rows of 205 experts: layer 0 all-CUDA, layers 1..47 split 54/151.
+
+    Layer 0 still gets CUDA owners because Placement cannot yet express
+    "this layer owns no routed module at all" -- that is a separate change.
+    What this fixture pins is that a B70 owner never appears there, and
+    that coverage notices when one does.
+    """
+    rows = []
+    for layer in range(48):
+        row: list[ExpertOwner] = []
+        remote_slot = 0
+        dense_row = layer == 0 and not b70_in_dense_layer
+        for expert in range(205):
+            if dense_row or expert < 54:
+                row.append(ExpertOwner(Device.CUDA, expert))
+            else:
+                row.append(ExpertOwner(Device.B70, remote_slot, remote_slot % 2))
+                remote_slot += 1
+        rows.append(tuple(row))
+    return Placement(
+        generation=1, num_layers=48, num_experts=205, owners=tuple(rows),
+        b70_capable_layers=frozenset(range(1, 48)), policy_name="laguna-test",
     )
 
 
@@ -161,6 +193,30 @@ def main() -> int:
                bank_experts_per_layer=205,
                routed_layer_ids=(99,), bank_layer_ids=(99,),
            ))
+
+    # ---- bank coverage over a real Placement ------------------------------
+    p = laguna_placement()
+    check("coverage: accepts a 1..47 placement given explicit layer ids",
+          b70_bank_covers(
+              p, bank_layers=47, bank_experts_per_layer=205,
+              bank_layer_ids=tuple(range(1, 48))) is True)
+    # This is the whole point of the change: the legacy count-derived set is
+    # {0..46}, which does not contain sparse layer 47. Coverage must refuse
+    # rather than quietly accept a placement it cannot serve.
+    check("coverage: refuses the same placement under the prefix assumption",
+          b70_bank_covers(
+              p, bank_layers=47, bank_experts_per_layer=205) is False)
+    check("coverage: refuses a B70 owner in the dense layer",
+          b70_bank_covers(
+              laguna_placement(b70_in_dense_layer=True),
+              bank_layers=47, bank_experts_per_layer=205,
+              bank_layer_ids=tuple(range(1, 48))) is False)
+    # A 48-row bank spanning 0..47 covers the placement, but that artifact is
+    # already rejected at QualifiedModel construction -- belt and braces.
+    check("coverage: a 0..47 bank would cover it (rejected earlier instead)",
+          b70_bank_covers(
+              p, bank_layers=48, bank_experts_per_layer=205,
+              bank_layer_ids=tuple(range(48))) is True)
 
     # ---- registry row -----------------------------------------------------
     spec = SUPPORTED_MODELS.get("srswti/axe-superveloce-jota-118b-r20-nvfp4")

@@ -888,7 +888,8 @@ is written for it.
   - **NVFP4 leg — the 99B bank, same gate, 2026-08-19** [measured-here,
     `dual_card_smoke_nvfp4.json`]. One monolithic SBEXP001 bank
     (`expert_bank_99b.bin`, 48.65 GiB, byte-exact vs checkpoint via
-    `src/phase1/validate_99b_bank.py` — 16/16 sampled records EXACT),
+    `src/phase1/validate_expert_bank.py`, then named
+    `validate_99b_bank.py` — 16/16 sampled records EXACT),
     resident split 103/102, after generalizing the provider's NVFP4
     geometry (256-expert hardcode → adopted from header; upload strides
     likewise):

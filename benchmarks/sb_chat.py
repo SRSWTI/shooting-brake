@@ -94,8 +94,15 @@ def stream_turn(messages: list[dict], show_think: bool, thinking: bool) -> Turn:
             "temperature": 0.6,
             "top_p": 0.95,
     }
-    if not thinking and SEND_TEMPLATE_KWARGS:
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    if SEND_TEMPLATE_KWARGS:
+        # BOTH directions must be explicit. vLLM's deepseek_v3-family reasoning
+        # parsers (poolside_v1 included) pick their mode from the REQUEST's
+        # chat_template_kwargs and default to IdentityReasoningParser, which
+        # does no extraction at all -- so omitting the kwarg silently dumps the
+        # chain-of-thought into `content` instead of the reasoning field.
+        payload["chat_template_kwargs"] = {
+            "enable_thinking": thinking, "thinking": thinking,
+        }
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         URL, data=body, headers={"Content-Type": "application/json"}

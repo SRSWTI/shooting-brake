@@ -123,6 +123,28 @@ _MODEL_SPECS = (
         routed_layer_ids=tuple(range(1, 48)),
         bank_layer_ids=tuple(range(1, 48)),
     ),
+    SupportedModel(
+        # Same Laguna architecture as r20, less REAP pruning: 218 experts
+        # instead of 205. Every integration mechanism is shared; only the
+        # expert count and therefore the bank size (50.65 vs 47.63 GiB) and
+        # the remote split (161 = 81/80, vs 151 = 76/75) differ. The
+        # fractional placement default resolves to 57 local either way,
+        # because round(218 * 0.2634...) == 57.
+        model="srswti/axe-superveloce-jota-118b-r15-nvfp4",
+        routed_experts_model="srswti/axe-superveloce-jota-118b-r15-nvfp4",
+        routed_expert_format="nvfp4",
+        hidden_size=3072,
+        num_layers=48,
+        num_experts=218,
+        top_k=10,
+        moe_intermediate_size=1024,
+        architecture="LagunaForCausalLM",
+        model_type="laguna",
+        default_bank_filename="expert_bank_jota_118b_r15.bin",
+        language_model_only=True,
+        routed_layer_ids=tuple(range(1, 48)),
+        bank_layer_ids=tuple(range(1, 48)),
+    ),
 )
 
 SUPPORTED_MODELS = {spec.model: spec for spec in _MODEL_SPECS}

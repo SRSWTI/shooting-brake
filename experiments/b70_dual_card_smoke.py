@@ -180,7 +180,7 @@ class Lane:
               flush=True)
         t0 = time.perf_counter()
         self.provider = B70ProviderClient(lib_path)
-        self.provider.load(bank_path, generation=1,
+        self.provider.load(bank_path, top_k=TOPK, generation=1,
                            resident_experts=load_resident,
                            device_selector=bdf)
         print(f"[{name}] loaded in {time.perf_counter() - t0:.1f}s",

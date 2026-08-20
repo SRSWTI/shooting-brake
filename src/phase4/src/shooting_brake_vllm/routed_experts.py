@@ -403,16 +403,30 @@ def _b70_device_selector(placement: Placement, device_index: int) -> str:
     return selectors[position]
 
 
-def _get_b70_provider(placement: Placement, device_index: int = 0) -> Any:
+def _get_b70_provider(
+    placement: Placement, device_index: int = 0, *, top_k: int,
+) -> Any:
     """Lazily create and cache the provider for one physical B70.
 
     One provider per card — own SYCL context, own in-order queue, own bank
     mmap. The registry replaces the old process singleton; a single-card
     config is a registry of length one, so the legacy behaviour falls out
     as the special case rather than a branch.
+
+    ``top_k`` is REQUIRED, not defaulted: the provider sizes its device
+    routing buffers from it, so a provider loaded at one width and
+    dispatched at another processes the wrong number of routes per token
+    and still returns finite output. Cached reuse is therefore validated
+    rather than assumed.
     """
     provider = _b70_providers.get(device_index)
     if provider is not None:
+        if provider.top_k != top_k:
+            raise RuntimeError(
+                f"cached B70 provider for device {device_index} was loaded "
+                f"with top_k={provider.top_k}, this caller requires {top_k}; "
+                "one process cannot serve two routing widths"
+            )
         return provider
 
     from .b70_binding import B70ProviderClient
@@ -451,7 +465,8 @@ def _get_b70_provider(placement: Placement, device_index: int = 0) -> Any:
         device_index, selector, len(resident), bank_path,
     )
     provider = B70ProviderClient(lib_path)
-    provider.load(bank_path, generation=1, resident_experts=resident_np,
+    provider.load(bank_path, top_k=top_k, generation=1,
+                  resident_experts=resident_np,
                   max_batch=max_batch, device_selector=selector)
     _b70_providers[device_index] = provider
     logger.info(
@@ -1293,7 +1308,39 @@ class HybridRoutedExperts(RoutedExperts):
                     "b70_count": self.shooting_brake_placement.b70_count(),
                     "is_monolithic": self.quant_method.is_monolithic,
                 }) + "\n")
+        # Fail closed on a monolithic quant method. We override
+        # ``forward_modular``; vLLM sends monolithic methods straight to the
+        # inherited ``forward_monolithic``, which would BYPASS offload
+        # entirely -- the engine boots, serves, and never touches a B70,
+        # while the compact allocation has already removed the experts that
+        # path expects to find. The NVFP4 oracle picks a backend dynamically
+        # and FlashInfer TRTLLM can prefer a monolithic expert class, so this
+        # is live on any new model or backend, not theory.
+        #
+        # TWO LIMITATIONS, stated rather than papered over:
+        #  1. ``is_monolithic`` returns False when it cannot yet tell
+        #     (``moe_kernel is None`` and no ``experts_cls``), so this
+        #     construction-time check can pass vacuously. It is re-run on the
+        #     first forward, where the backend is resolved and the value final.
+        #  2. Neither check can catch the worst case: if vLLM calls
+        #     ``forward_monolithic`` then OUR code never runs, so no guard of
+        #     ours executes at all. Only an empty doorbell trace reveals
+        #     that, which is why the first-boot gate must check dispatch
+        #     counts and not merely token correctness.
+        self._assert_modular_path("layer construction")
+
         _install_surgery_hook(self.quant_method)
+
+    def _assert_modular_path(self, when: str) -> None:
+        """Reject a monolithic quant method; see ``__init__`` for caveats."""
+        if getattr(self.quant_method, "is_monolithic", False):
+            raise RuntimeError(
+                f"{type(self.quant_method).__name__} is monolithic (detected "
+                f"at {when}); Shooting Brake implements only the modular "
+                "expert path, so routed-expert offload would be bypassed "
+                "silently. Pin a modular NVFP4 backend "
+                "(--moe-backend cutlass)."
+            )
 
     def _initialize_b70_slot_map_cuda(
         self, device: str | torch.device = "cuda",
@@ -2159,6 +2206,7 @@ class HybridRoutedExperts(RoutedExperts):
             )
             poller = get_b70_poller(
                 self.shooting_brake_placement, lane.device_index,
+                top_k=self.shooting_brake_qualified_model.top_k,
             )
             poller.register_layer(
                 bank_row=self._bank_row(layer_idx),
@@ -2196,6 +2244,10 @@ class HybridRoutedExperts(RoutedExperts):
         freed memory is already reflected in the profiling peak vLLM sizes
         the KV cache from. See :func:`_install_surgery_hook`.
         """
+        # Authoritative re-check: by the first forward the NVFP4 backend is
+        # resolved, so ``is_monolithic`` is final here in a way it is not at
+        # construction time.
+        self._assert_modular_path("first forward")
         self._ensure_layer_device_map(topk_ids)
         if self._b70_graph_mode:
             self._register_b70_poller(self.layer_index)
@@ -2734,6 +2786,7 @@ class HybridRoutedExperts(RoutedExperts):
         for lane in self._b70_lanes:
             provider = _get_b70_provider(
                 self.shooting_brake_placement, lane.device_index,
+                top_k=self.shooting_brake_qualified_model.top_k,
             )
             b70_ids = lane.slot_map[ids_np]           # [M, topk]
             b70_weights = wts_np * (b70_ids >= 0).astype(np.float32)
@@ -2788,6 +2841,7 @@ class HybridRoutedExperts(RoutedExperts):
         for lane in self._b70_lanes:
             provider = _get_b70_provider(
                 self.shooting_brake_placement, lane.device_index,
+                top_k=self.shooting_brake_qualified_model.top_k,
             )
             # Translate global IDs → this card's slots, zero foreign routes.
             b70_ids = lane.slot_map[ids_np]
@@ -2823,6 +2877,7 @@ class HybridRoutedExperts(RoutedExperts):
         for lane, sequence in lanes_and_seqs:
             provider = _get_b70_provider(
                 self.shooting_brake_placement, lane.device_index,
+                top_k=self.shooting_brake_qualified_model.top_k,
             )
             pinned_output = lane.pinned_output[:M]
             provider.take(sequence, M, output=pinned_output.numpy())
@@ -3013,6 +3068,27 @@ class HybridRoutedExperts(RoutedExperts):
         if cpu_ids is not None:
             y = y + self._cpu_prefill_partial(
                 layer_idx, x, cpu_ids, topk_weights
+            )
+        # Every B70-owned route was masked OUT of the CUDA partial above, and
+        # only the graph/Tier-3 branch below adds the B70 partial back. So a
+        # layer that owns B70 experts and is NOT in graph mode silently DROPS
+        # those routes: finite logprobs, plausible tokens, wrong answer.
+        #
+        # This fails rather than falling back deliberately. The graph
+        # issue/take helpers read buffers that are only allocated under graph
+        # mode, so there is no cheap eager path to enable here -- relaxing
+        # the condition alone would trade a silent wrong answer for a crash
+        # deeper in.
+        if (
+            not self._b70_graph_mode
+            and self.shooting_brake_placement.is_b70_active(layer_idx)
+        ):
+            raise RuntimeError(
+                f"layer {layer_idx} owns "
+                f"{self.shooting_brake_placement.layer_b70_count(layer_idx)} "
+                "B70 experts but offloaded prefill is running without "
+                "graph/Tier-3 mode; those routes would be dropped from the "
+                "result. Set SHOOTING_BRAKE_B70_GRAPH=1."
             )
         if self._b70_graph_mode:
             # Two id spaces, and they are not interchangeable. The provider

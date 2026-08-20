@@ -7,7 +7,8 @@ alongside CUDA. SYCL and CUDA coexist (validated: separate driver stacks).
 Lifecycle::
 
     provider = B70ProviderClient(lib_path)
-    provider.load(bank_path, generation=1, resident_experts=[128,129,...,255])
+    provider.load(bank_path, top_k=8, generation=1,
+                  resident_experts=[128, 129, ..., 255])
     output = provider.dispatch(layer=0, hidden_fp16=..., ids=..., weights=..., M=8)
     provider.shutdown()
 
@@ -22,6 +23,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+
+#: Minimum ``sb_b70_abi_version()`` this binding accepts. Bumped whenever the
+#: C ABI gains a contract the Python side depends on -- version 2 introduced
+#: ``sb_b70_load_v2`` with a runtime routing width. A shared object older than
+#: this does not export the version symbol at all, which is deliberate: it
+#: turns a silent width mismatch into a loud import-time failure.
+REQUIRED_ABI_VERSION = 2
 
 
 class _NativeB70Health(ctypes.Structure):
@@ -64,17 +73,47 @@ class B70ProviderClient:
         self._hidden = 0
         self._resident_count = 0
         self._sequence = 0
+        # Routing width this provider was LOADED with. Its device buffers are
+        # sized from it, so a later caller dispatching a different width is a
+        # silent-wrong-output bug rather than an error; callers reusing a
+        # cached provider must compare against this.
+        self._top_k = 0
 
     def _setup_signatures(self) -> None:
         lib = self._lib
         lib.sb_b70_create.restype = ctypes.c_void_p
         lib.sb_b70_create.argtypes = []
 
-        lib.sb_b70_load.restype = ctypes.c_int
-        lib.sb_b70_load.argtypes = [
+        # ABI staleness guard. A shared object predating the versioned load
+        # entry point does not export this symbol AT ALL, so the lookup
+        # below raises instead of letting a width-8 provider serve width-10
+        # routing. That failure mode is otherwise silent: the provider would
+        # process 8 of 10 routes per token and still return finite output.
+        try:
+            lib.sb_b70_abi_version.restype = ctypes.c_size_t
+            lib.sb_b70_abi_version.argtypes = []
+        except AttributeError as exc:
+            raise B70ProviderError(
+                "libsb_b70_provider.so predates the versioned load ABI "
+                "(no sb_b70_abi_version symbol). Rebuild it: "
+                "source /opt/intel/oneapi/setvars.sh --force && "
+                "make -C src/phase7 b70"
+            ) from exc
+        abi = int(lib.sb_b70_abi_version())
+        if abi < REQUIRED_ABI_VERSION:
+            raise B70ProviderError(
+                f"libsb_b70_provider.so reports ABI version {abi}, this "
+                f"plugin requires >= {REQUIRED_ABI_VERSION}"
+            )
+
+        # v2 carries top_k. v1 still exists in the C ABI, frozen at 8 for
+        # older callers, but nothing in Python may use it: a caller that
+        # forgets the width is exactly the bug this guard exists to stop.
+        lib.sb_b70_load_v2.restype = ctypes.c_int
+        lib.sb_b70_load_v2.argtypes = [
             ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint64,
             ctypes.POINTER(ctypes.c_int32), ctypes.c_size_t, ctypes.c_size_t,
-            ctypes.c_char_p,
+            ctypes.c_char_p, ctypes.c_size_t,
         ]
 
         lib.sb_b70_issue.restype = ctypes.c_int
@@ -163,6 +202,8 @@ class B70ProviderClient:
     def load(
         self,
         bank_path: str | Path,
+        *,
+        top_k: int,
         generation: int = 1,
         resident_experts: np.ndarray | None = None,
         max_batch: int = 128,
@@ -189,13 +230,17 @@ class B70ProviderClient:
             ids_ptr = None
             count = ctypes.c_size_t(0)
 
-        status = self._lib.sb_b70_load(
+        status = self._lib.sb_b70_load_v2(
             self._handle, bank, ctypes.c_uint64(generation),
             ids_ptr, count, ctypes.c_size_t(max_batch),
             device_selector.encode("utf-8") if device_selector else None,
+            ctypes.c_size_t(top_k),
         )
         if status != 0:
-            raise B70ProviderError(f"sb_b70_load failed with status {status}")
+            raise B70ProviderError(
+                f"sb_b70_load_v2 failed with status {status} "
+                f"(top_k={top_k}, max_batch={max_batch})"
+            )
 
         self._resident_count = self._lib.sb_b70_num_resident(self._handle)
         self._loaded = True
@@ -211,10 +256,16 @@ class B70ProviderClient:
         self._resident_per_layer = (
             self._resident_count // layers if layers else 0
         )
+        self._top_k = top_k
 
     @property
     def resident_per_layer(self) -> int:
         return self._resident_per_layer
+
+    @property
+    def top_k(self) -> int:
+        """Routing width this provider was loaded with; 0 before ``load``."""
+        return self._top_k
 
     @property
     def device_memory(self) -> tuple[int, int] | None:

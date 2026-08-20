@@ -297,6 +297,12 @@ sb_b70_provider_t* sb_b70_create(void) {
   return reinterpret_cast<sb_b70_provider_t*>(new (std::nothrow) DummyProvider());
 }
 
+// Mirrors the real provider's versioned load ABI. Without these the Python
+// binding refuses to load this shared object at all, by design: its
+// staleness guard cannot distinguish "old build" from "different
+// implementation", and guessing would defeat the guard's purpose.
+std::size_t sb_b70_abi_version(void) { return 2; }
+
 int sb_b70_load(sb_b70_provider_t* handle, const char* bank_path,
                 std::uint64_t generation, const std::int32_t*,
                 std::size_t resident_count, std::size_t max_batch,
@@ -304,6 +310,17 @@ int sb_b70_load(sb_b70_provider_t* handle, const char* bank_path,
   if (!handle) return -1;
   return reinterpret_cast<DummyProvider*>(handle)->load(
       bank_path, generation, resident_count, max_batch);
+}
+
+int sb_b70_load_v2(sb_b70_provider_t* handle, const char* bank_path,
+                   std::uint64_t generation, const std::int32_t* resident,
+                   std::size_t resident_count, std::size_t max_batch,
+                   const char* device_selector, std::size_t top_k) {
+  // The dummy computes nothing, so any nonzero width is servable; rejecting
+  // zero keeps it faithful to the real provider's validation.
+  if (top_k == 0) return -1;
+  return sb_b70_load(handle, bank_path, generation, resident, resident_count,
+                     max_batch, device_selector);
 }
 
 int sb_b70_issue(sb_b70_provider_t* handle, std::uint64_t generation,

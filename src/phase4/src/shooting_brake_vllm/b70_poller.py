@@ -375,7 +375,9 @@ def _pin_cpu_for(position: int) -> int:
     return int(cpus[position])
 
 
-def get_b70_poller(placement: Any, device_index: int = 0) -> B70Poller:
+def get_b70_poller(
+    placement: Any, device_index: int = 0, *, top_k: int,
+) -> B70Poller:
     """Return the poller for one physical B70, creating it on first use.
 
     The thread is NOT started here — the caller starts it once the first
@@ -389,7 +391,7 @@ def get_b70_poller(placement: Any, device_index: int = 0) -> B70Poller:
         remote_indices = placement.remote_device_indices()
         position = remote_indices.index(device_index)
         poller = B70Poller(
-            _get_b70_provider(placement, device_index),
+            _get_b70_provider(placement, device_index, top_k=top_k),
             pin_cpu=_pin_cpu_for(position),
             trace_device_index=device_index if len(remote_indices) > 1 else None,
         )

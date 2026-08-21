@@ -144,7 +144,11 @@ Result bench(sycl::queue& q, const char* policy_name, int E, int M, int N,
   auto* D = sycl::malloc_device<ElementD>(d_elems, q);
   auto* rows = sycl::malloc_device<int>(E, q);
   auto* atomic_buf = sycl::malloc_device<int32_t>(1, q);
-  if (!A || !B || !S || !D || !rows || !atomic_buf) {
+  // Real zeroed bias, NOT nullptr. The mainloop applies bias unconditionally,
+  // so a null pointer faults inside the kernel and surfaces as a bare SIGSEGV
+  // on the host with no diagnostic.
+  auto* Bias = sycl::malloc_device<ElementA>(size_t(E) * N, q);
+  if (!A || !B || !S || !D || !rows || !atomic_buf || !Bias) {
     r.note = "device allocation failed";
     return r;
   }
@@ -169,14 +173,15 @@ Result bench(sycl::queue& q, const char* policy_name, int E, int M, int N,
   q.memcpy(S, s_host.data(), s_elems * sizeof(ElementS)).wait();
   q.memcpy(rows, rows_host.data(), E * sizeof(int)).wait();
   q.memcpy(atomic_buf, &zero, sizeof(int32_t)).wait();
+  q.memset(Bias, 0, size_t(E) * N * sizeof(ElementA)).wait();
+  q.memset(D, 0, d_elems * sizeof(ElementD)).wait();
 
   auto once = [&]() {
     q.memcpy(atomic_buf, &zero, sizeof(int32_t)).wait();
     launch<'R', 'R', policy, MoE::A_DTYPE::BITS16, MoE::B_DTYPE::MXFP4,
            ElementA, ElementB, ElementS, ElementA, ElementD>(
-        q, A, reinterpret_cast<const ElementB*>(B), S,
-        static_cast<const ElementA*>(nullptr), D, N, K, rows, E, group_size,
-        atomic_buf);
+        q, A, reinterpret_cast<const ElementB*>(B), S, Bias, D, N, K, rows, E,
+        group_size, atomic_buf);
   };
 
   try {
@@ -207,6 +212,7 @@ Result bench(sycl::queue& q, const char* policy_name, int E, int M, int N,
   sycl::free(D, q);
   sycl::free(rows, q);
   sycl::free(atomic_buf, q);
+  sycl::free(Bias, q);
   return r;
 }
 
@@ -230,6 +236,11 @@ int main(int argc, char** argv) {
   const int top_k = arg_int(argc, argv, "--top-k", 10);
   const int cards = arg_int(argc, argv, "--cards", 2);
   const int M = arg_int(argc, argv, "--m", tokens * top_k / cards);
+
+  // Unbuffered: printf to a pipe is block-buffered, so a crash loses every
+  // line already "printed". A silent exit 139 with no output is otherwise
+  // indistinguishable from crashing before the first statement.
+  setvbuf(stdout, nullptr, _IONBF, 0);
 
   sycl::queue q{sycl::gpu_selector_v};
   auto dev = q.get_device();

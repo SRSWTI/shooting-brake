@@ -1846,3 +1846,82 @@ grouped attempt managed 9.9 GB/s and lost 1.55x.
 
 Note the tension: MNBT=512 (Bench 21) gives only ~30 rows/expert, and small M
 is where grouped GEMMs lose. MNBT would want re-tuning after the kernel lands.
+
+## Bench 23 — Xe2 grouped MoE GEMM at r15 geometry: the gate PASSES (2026-08-21)
+
+`src/phase7/xe2_probe/`, speed-only, unmodified vendored kernel, synthetic
+MXFP4, r15's real shape: E=85 resident experts, K=3072, N=1024, M=2560
+routes (512 tok x top10 / 2 cards) = **30.1 rows/expert**.
+
+| shape | policy | ms | GB/s |
+|---|---|---:|---:|
+| gate/up N=1024 K=3072 | `w4a16_policy_m_32` (32x64x32) | 0.369 | **441.7** |
+| gate/up | `w4a16_policy` (128x256x32) | 0.789 | 206.6 |
+| gate/up | `w4a16_policy_m_16` | 0.483 | 337.6 |
+| gate/up | `w4a16_policy_m_8` | 0.776 | 210.1 |
+| down N=3072 K=1024 | `w4a16_policy_m_32` | 0.344 | **474.4** |
+
+Stable across runs: 442.0 / 442.7 / 441.7 GB/s. Pre-committed gate was
+>=200 GB/s. **Passed by 2.2x.**
+
+**The headline.** Intel's kernel reaches the same bandwidth as our already
+saturated split path (437.6 GB/s) while moving **30.1x fewer bytes** --
+127.5 MiB per grouped pass against 3,840 MiB. That is the whole prize, and it
+is now measured on this silicon at our shape rather than inferred from a
+synthetic bake-off at someone else's.
+
+Real per-token cost, summing the three actual projections:
+`(0.369 + 0.369 + 0.344) ms x 47 layers / 512 tok` = **99.3 us/token**
+against **1,705 us/token** measured in production = **17.2x on the B70 GEMM
+leg**. With B70 at 86-92% of TTFT that is ~6.6x end-to-end: 8K cold TTFT
+13.8 s -> ~2.1 s, 124K 212 s -> ~32 s.
+
+### Two things the M sweep settled
+
+1. **Policy choice is worth 2.1x and is M-dependent.** At 30 rows/expert the
+   small-M policy wins 441.7 vs 206.6 GB/s for the big one. Production must
+   use the M-dependent selector; a fixed policy throws away half the win.
+2. **MNBT=512 costs ~2x of the grouped kernel's efficiency.** At M=10240
+   (MNBT 2048, 120.5 rows/expert) the BIG policy wins and per-token drops to
+   **52.5 us/token** -- a 33x leg, ~7.9x end-to-end. So the Bench 21 decision
+   to drop MNBT to 512 for the ITL p99 fix directly fights this. Both are
+   real; the tradeoff needs measuring once the kernel is in, not guessing now.
+
+### What this does NOT establish
+
+- **Correctness.** Speed only, by design. Values were random bits.
+- **NVFP4.** This ran MXFP4 (E8M0/group-32), which the kernel already
+  supports. Our bank is E4M3/group-16. The `ScaleCopyTraits` specialization
+  for `float_ue4m3_t` is still required and its cost is unmeasured -- though
+  the E4M3 decode is a scalar op at scale-group load, not inside the DPAS
+  loop, so it should be near-free. `[INFERENCE]`
+- **Uneven routing.** `rows_per_expert` was even, the optimistic case for the
+  work queue. Natural text measured max/mean 1.63 (Bench 17), which will cost
+  something.
+
+### Environment bug found: Level-Zero V2 adapter segfaults
+
+oneAPI 2026.1 defaults to the Level-Zero **V2** adapter, and it jumps to a
+null pointer on a plain USM `memcpy`:
+
+```
+#0  0x0000000000000000 in ?? ()
+#1  ur_command_list_manager::isGraphCaptureActive()  <- libur_adapter_level_zero_v2.so
+#2  v2::ur_queue_immediate_out_of_order_t::enqueueUSMMemcpy(...)
+```
+
+Workaround: **`SYCL_UR_USE_LEVEL_ZERO_V2=0`** (or `UR_LOADER_USE_LEVEL_ZERO_V2=0`).
+`UR_L0_USE_IMMEDIATE_COMMANDLISTS=0` does NOT fix it. OpenCL works but is ~5%
+slower (420.1 vs 441.7 GB/s), so it is not the answer.
+
+**Open risk worth checking:** whether `libsb_b70_provider.so` can reach that
+same path in production. It has not misbehaved, so it either avoids it or uses
+a different queue mode -- but that is an absence of symptoms, not a proof.
+
+### Instrument note
+
+The probe first died as a bare `EXIT=139` with **no output at all**, because
+`printf` to a pipe is block-buffered and the buffer dies with the process --
+indistinguishable from crashing before the first statement. `setvbuf(...,
+_IONBF, ...)` made it diagnosable in one run. Third silent-success trap of the
+day; the lesson that stuck is to check for the artifact, never the exit code.

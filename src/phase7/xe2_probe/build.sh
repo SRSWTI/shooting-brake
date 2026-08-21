@@ -23,3 +23,5 @@ icpx -fsycl -std=c++20 -O2 -o xe2_grouped_probe xe2_grouped_probe.cpp \
   -I "$D/csrc/xpu/grouped_gemm" -I "$D/.deps/cutlass-sycl-src/include" \
   -I "$D/.deps/cutlass-sycl-src/tools/util/include" -I "$D"
 echo "built: $(pwd)/xe2_grouped_probe"
+# Run with SYCL_UR_USE_LEVEL_ZERO_V2=0 -- oneAPI 2026.1's Level-Zero V2 adapter
+# segfaults on a plain USM memcpy (null fn ptr in isGraphCaptureActive).

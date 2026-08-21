@@ -181,7 +181,7 @@ Result bench(sycl::queue& q, const char* policy_name, int E, int M, int N,
 
   auto once = [&]() {
     q.memcpy(atomic_buf, &zero, sizeof(int32_t)).wait();
-    launch<'R', 'R', policy, MoE::A_DTYPE::BITS16, BDT,
+    launch<'R', 'C', policy, MoE::A_DTYPE::BITS16, BDT,
            ElementA, ElementB, ElementS, ElementA, ElementD>(
         q, A, reinterpret_cast<const ElementB*>(B), S, Bias, D, N, K, rows, E,
         group_size, atomic_buf);

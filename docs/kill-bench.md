@@ -1990,3 +1990,76 @@ against the current path.
 Also still open: route sorting in the provider (histogram/prefix/scatter, plus
 the alpha application on un-sort), M-dependent policy selection in production
 (worth 2.1x and shape-dependent), and the MNBT tension from Bench 23.
+
+## Bench 25 — NVFP4 correctness gate PASSED, and it corrected the speed (2026-08-21)
+
+`src/phase7/xe2_probe/xe2_nvfp4_verify.cpp`. Controlled inputs rather than a
+fit: E2M1 encodes {0,.5,1,1.5,2,3,4,6}, so a weight byte of `0x21` holds one
+nibble worth 0.5 and one worth 1.0. With one-hot activations and every block
+scale set to E4M3 1.0 (`0x38`), the output reads the convention off directly.
+
+### The gate found a real bug on its first run
+
+Every k returned 0.5 -- always the low nibble, never alternating. Cause:
+
+```cpp
+constexpr char actual_layout_of_B = LayoutKindB ^ ('R' ^ 'C');   // it INVERTS
+```
+
+Passing `'R'` makes B column-major internally, so a packed byte holds two
+adjacent **N** values at the same k, not two K values. Our bank is `[N, K/2]`
+with K contiguous, so **the layout char must be `'C'`**. With that fixed:
+
+```
+k=0 -> 0.5   k=1 -> 1.0   k=2 -> 0.5   k=3 -> 1.0   ...  (8/8 alternating)
+```
+
+**All four format questions are now settled on evidence:**
+
+| question | answer | how |
+|---|---|---|
+| scale dtype | E4M3 | checkpoint says `torch.float8_e4m3fn` |
+| scale decode | correct | `0x38` -> exactly 1.0 in the kernel |
+| alpha | multiplier, `1/global` | bank trailer == `1/gscale`, byte-exact |
+| scale layout | `[N, K/16]` row-major | bank bytes == checkpoint bytes |
+| nibble order | low nibble = even k | 8/8 alternating with layout `'C'` |
+
+### Which invalidated my own speed numbers
+
+Benches 23 and 24 both ran `layoutB='R'` -- the transposed access pattern.
+Same bytes moved, different access order, materially different bandwidth.
+Re-measured with `'C'`, r15 geometry, group 16:
+
+| path | ms | GB/s | us/token |
+|---|---:|---:|---:|
+| MXFP4 `m_32` (tile_k 32, incorrect at gs=16) | 0.399 | 429.2 | 110.0 |
+| MXFP4 `m_32_k16` | 0.495 | 346.2 | 136.3 |
+| **NVFP4 `m_32_k16`** | 0.623 | **275.0** | **171.6** |
+| NVFP4 `m_16_k16` | 0.904 | 189.7 | 248.9 |
+
+**Corrected projection: 171.6 us/token vs 1,705 in production = 9.9x on the
+B70 GEMM leg, ~5.2x end-to-end.** Prefill 1,705 -> ~327 us/token; 8K cold TTFT
+13.8 s -> ~2.6 s; 124K 212 s -> ~41 s.
+
+Revision history of this one number, all downward, each time because the
+correctness work exposed a flaw in my own measurement: **6.6x (Bench 23) ->
+5.8x (Bench 24) -> 5.2x (here)**. The first two were measured with a
+transposed weight layout that happened to run faster. Speed measured before
+correctness is worth nothing, and this is the third time today that a setup
+that ran cleanly was measuring the wrong thing.
+
+### Where the 275 vs 429 GB/s gap goes
+
+Two costs, both now separated: `tile_k` 32 -> 16 for group-16 correctness is
+429.2 -> 346.2 (**19%**), and the E4M3 decode on top is 346.2 -> 275.0
+(**21%**). The decode is dearer than the "near-free" I predicted because at
+`tile_k=16` the scale reload fires every tile, making it per-tile rather than
+per-group work. Both are the price of correctness on our real format; neither
+is optional.
+
+### Still to do
+
+Route sorting in the provider (histogram/prefix/scatter, gather in, scatter
+out, alpha on the way back), provider integration behind a flag, `.so` rebuild,
+then a real before/after boot. Nothing is wired into the serving path yet, so
+the server today behaves exactly as it did this morning.

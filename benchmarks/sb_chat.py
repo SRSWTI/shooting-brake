@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.request
 
-DEFAULT_URL = "http://127.0.0.1:8016/v1/chat/completions"
+DEFAULT_URL = "http://127.0.0.1:8017/v1/chat/completions"
 DEFAULT_MODEL = "shooting-brake-88b"
 DEFAULT_SYSTEM = "you are jesco-- a coding agent"
 # Rebound from argv in main(); stream_turn reads them as globals.

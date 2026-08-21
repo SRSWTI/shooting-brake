@@ -19,7 +19,7 @@ how you size everything) and **"Killed — do not retry"**.
 |---|---|
 | Serving today | 88B, one B70, `split:54` |
 | Target | 99B (`srswti/axe-superveloce-99b-nvfp4`), two B70s |
-| 99B status | **FIRST BOOT PASSED (2026-08-19, eager, dual-B70)**: correct greedy tokens, finite logprobs, 3,599 doorbell dispatches across both cards, KV 14.04 GiB = 341,723 tokens. Bank: `expert_bank_99b.bin` (monolithic SBEXP001, byte-exact, Bench 15/16). Recipe: `benchmarks/serve_99b_dual.sh` — requires `--moe-backend cutlass` + FlashInfer skip-ops (Bench 16, sm_120 findings). Not yet: graph mode, ITL/TTFT numbers, per-card GB/s. |
+| 99B status | **FIRST BOOT PASSED (2026-08-19, eager, dual-B70)**: correct greedy tokens and finite logprobs. The surviving trace file contains 3,599 dispatches from **one lane**; both pollers wrote the same path, so it is not a merged two-card count. Eager KV was 14.04 GiB = 341,723 tokens with zero CUDA-graph allocation; graph mode will reduce that capacity. Bank: `expert_bank_99b.bin` (monolithic SBEXP001, byte-exact, Bench 15/16). Recipe: `benchmarks/serve_99b_dual.sh` — requires `--moe-backend cutlass` for the qualified arm. Not yet: graph mode, ITL/TTFT, graph-mode KV, or per-card production traces. |
 | Dual-B70 status | **code complete and hardware-gated**: per-lane dispatch/provider/poller landed, Bench 15 PASSED both formats, Bench 16 first serve passed. |
 
 ### Measured production baseline — quote these, not older numbers
@@ -133,41 +133,38 @@ bank streaming**, so keep experts resident in VRAM.
 
 ---
 
-## 4. Dual-B70: what to expect
+## 4. Dual-B70: what the measurements actually predict
 
-Each card owns half the remote experts, so each reads half the bytes, in
-parallel:
+The old forecast divided the 88B's 5.6 remote routes by two and called the
+result the 99B route count. That is wrong: the serving placements differ.
 
-| | today (1 card) | dual-B70 |
+| | 88B production | 99B dual-B70 |
 |---|---:|---:|
-| remote experts touched per dispatch | 5.6 | 2.8 per card |
-| weight bytes per card | 27.25 MB | **13.6 MB** |
-| kernel | 67.1 µs | **~33.5 µs** |
-| overhead | 15.4 µs | 15.4 µs |
-| **dispatch** | **82.5 µs** | **~49 µs** |
+| CUDA / remote experts | 54 / 126 | **1 / 204** |
+| expected remote routes at M=1 | 5.6 total | **7.96 total = 3.98/card** |
+| expected weight bytes per card | 27.25 MB | **~21.1 MB** |
+| observed remote window | 82.54 µs p50 in vLLM | **79.0 µs mean standalone, exact 4+4 NVFP4 fixture** |
 
-**Expected: ~−1.6 ms/token, roughly −11% to −16% ITL** depending on how much of
-the window overlaps CUDA work. `[estimate]` — derived from the measured cost
-model, not yet observed.
+The 99B's measured standalone dual-doorbell window is therefore approximately
+the same size as the 88B's production single-card service, not the previously
+projected 49 µs. The earlier **−11% to −16% ITL** claim is withdrawn.
 
-### Why this is bigger than the old estimate
+The 99B may still be faster: the 5090 CUDA partial has one compact expert
+instead of the 88B's 54-expert local population, while attention/GDN geometry
+is unchanged. How much of that CUDA reduction is exposed after overlap is not
+derivable from the doorbell measurement. **Only warmed graph-mode ITL can price
+it.**
 
-`window_decomposition.json` projected only **−5.9%**, because it assumed
-"fixed 61 µs stays". **That 61 µs was inflated by a cross-clock measurement
-error** (see §6). The real fixed cost is 15.4 µs, so far more of the dispatch
-is halvable than that projection allowed.
+### Remaining risks
 
-### Two risks that would eat the win
-
-1. **Serialized pollers.** If both cards share one poller thread they take
-   turns: `2 × (15.4 + 33.5) ≈ 98 µs`, **worse than today's 82.5 µs.**
-   **One poller thread per card is a correctness requirement, not a tuning
-   choice.**
-2. **Less work per card is more latency-bound.** At 2.8 experts instead of 5.6
-   there is less memory parallelism, so achieved bandwidth may fall below
-   406 GB/s and the kernel will not halve cleanly. **This is the main reason
-   the estimate is a range.** Measure achieved GB/s per card in the first
-   dual-card run.
+1. **Graph integration.** Bench 15 proved a standalone CUDA graph can replay
+   two doorbells 200 times, but vLLM graph capture with the compact
+   `CutlassExpertsFp4` partial has not run.
+2. **Production observability.** The first boot's two pollers shared one trace
+   path, so one lane overwrote the other. Per-device trace files are required
+   before attributing the vLLM window.
+3. **Graph memory.** The eager boot allocated no CUDA graphs; its 341,723-token
+   KV result is not a graph-mode capacity result.
 
 ---
 
@@ -288,27 +285,29 @@ open risks are retired —
   replays, zero poller errors, partials ≤ 1.9e-6 vs the CPU oracle, and
   cross-card isolation exact in both directions.
 
-**Still NOT established:** full-vLLM stability with two lanes, and per-card
-achieved GB/s at the production per-card route count (~2.8 for the 99B) —
-the Bench 14 latency-bound risk. Both wait on the first boot. One bring-up
-hazard on record: a transient `std::bad_alloc` on the second ~28 GB
-provider load (retry succeeded; suspected host commit pressure right after
-the first card's stream).
+**Established in full vLLM, eager mode:** the 99B loaded with two lanes,
+generated coherent greedy tokens, and returned finite logprobs. **Still not
+established:** normal vLLM graph capture, warmed ITL/TTFT, graph-mode KV
+capacity, long-context stability, or a merged/per-device production trace.
+The 99B placement drives ~3.98 routes/card at M=1, not 2.8.
+
+One bring-up hazard remains on record: a transient `std::bad_alloc` on the
+second ~28 GB provider load (retry succeeded; suspected host commit pressure
+right after the first card's stream).
 
 ### Suggested order — updated
 
 1. ~~Per-device provider + poller~~ **done** (blockers 3, 4, 5, 6).
 2. ~~Per-device slot map and validation~~ **done** (blockers 1, 2).
 3. ~~Standalone two-card gate~~ **done — Bench 15 WORKED.**
-4. Build two banks for the chosen 99B split (205 experts: N−1 remote
-   split across the cards + 1 CUDA expert, per the rule above). Decide the
-   source first: fresh extraction from the nvfp4 checkpoint, or slicing
-   the existing 122B int4 banks if the REAP kept-expert mapping is
-   recoverable (check `recipe.yaml` in the checkpoint; would save the
-   half-day-per-arm build AND change the bank-format decision).
-5. Boot, confirm correctness, then **measure achieved GB/s per card before
-   celebrating any ITL number** — if it falls well below 406 GB/s the
-   kernel has gone latency-bound and the win will not be what §4 projects.
+4. ~~Build and validate the 99B bank~~ **done** — one monolithic, byte-exact
+   `SBEXP001` bank; providers load disjoint 102/102 resident lists.
+5. ~~Eager first-token gate~~ **done — Bench 16 WORKED.**
+6. Split trace output per device, surface errors from every poller, and make
+   the ITL probe target the 99B endpoint and both B70 clocks.
+7. Boot the normal graph arm with an explicit `doorbell` arm assertion. After
+   a correctness warmup, run four C=1 ITL probes, inspect both per-device
+   traces and graph-mode KV, then measure TTFT separately.
 
 ---
 
@@ -384,11 +383,12 @@ both explains the number and predicts its neighbours.**
 | MoE intermediate | 1024 | **1024** | 1024 |
 
 Attention/GDN geometry is field-for-field identical across all three, so the
-plugin's attention, KV and Marlin-prefill machinery transfers unchanged.
+plugin's attention and KV machinery transfers unchanged.
 
-**Per-token work is identical across all three models** — 8 experts × 48
-layers of the same shape. The 99B is not slower than the 88B; it is more
-*storage* for the same per-token bandwidth.
+**Routed-expert arithmetic per token is identical** — 8 experts × 48 layers
+of the same shape. That does **not** establish equal latency: the 88B and 99B
+use different local/remote populations, CUDA MoE backends, B70 formats, and
+prefill paths. The 99B performance result remains unmeasured.
 
 ### Why 99B is the right size — the systems argument
 
@@ -438,8 +438,8 @@ Any hit-rate curve derived from it does not transfer. Re-capture with
 
 ## 9. Hard prohibitions (carried forward, still binding)
 
-- Do not call the 99B production-ready before a real two-card smoke and vLLM
-  boot pass.
+- Do not call the 99B production-ready before graph-mode correctness,
+  warmed SLO measurements, graph-mode KV sizing, and long-context stability.
 - **Do not use `ZE_AFFINITY_MASK` to select two cards inside one serving
   process.** Use explicit per-device contexts.
 - Do not use enumeration indices in production configuration; use PCI BDFs.
@@ -477,15 +477,18 @@ Skip these; they are closed or irrelevant to dual-B70:
 
 ---
 
-## 11. Open, sized, not started
+## 11. Open work — no unmeasured percentages
 
-| item | size | notes |
-|---|---:|---|
-| **Dual-B70 split** | **−11 to −16% ITL** | this document |
-| **Pool B** (host/scheduler GPU-idle) | **1.92 ms ≈ 16%** | **completely untouched**; kill-bench 1, 2, 3 are cheap flag flips |
-| B70 GEMV bandwidth at M=1 (kill-bench 14) | −5.7% | kernel hits 510 GB/s at M≥2 but only 406 at M=1 — latency-bound, not bandwidth-bound |
-| 5090 local-expert budget (kill-bench 12) | ~−3.8% | blocked on a real route capture and a bank rebuild |
-| MTP speculative decode | large, unquantified | 785 `mtp.*` tensors ship in the checkpoint |
+| item | current evidence | next gate |
+|---|---|---|
+| **99B graph-mode decode** | eager correctness only; standalone dual NVFP4 doorbell is 79.0 µs at the exact 4+4 route shape | graph boot, correctness warmup, four C=1 ITL runs |
+| **Per-card production attribution** | first-boot trace is one lane because both dump threads replaced the same file | per-device traces plus aggregate poller telemetry |
+| **99B prefill / TTFT** | no 99B TTFT; one-lane eager trace implies ~32 µs/token/layer for M=256 chunked dispatch | real 1K/8K TTFT after decode gate; qualify an SM120 grouped prefill backend separately |
+| **Graph-mode KV capacity** | eager only: 341,723 tokens with 0 GiB CUDA-graph memory | read capacity after capture at the serving graph sizes |
+| **Pool B** | 88B inherited target: 1.92 ms of host/scheduler GPU-idle | re-measure on 99B before applying the 88B percentage |
+| **B70 GEMV M=1** | 88B int4 kernel: 406 GB/s vs its 510 GB/s M≥2 plateau | do not transfer the −5.7% estimate to 99B NVFP4 without a matching profile |
+| **5090 NVFP4 backend A/B** | vLLM CUTLASS eager arm works; other SM120 backends unqualified | compare only after the baseline graph arm is stable |
+| **MTP speculative decode** | checkpoint ships **zero `mtp.*` tensors** despite `mtp_num_hidden_layers: 1` | source a compatible BF16 head or keep MTP off |
 
-**Pool B is the cheapest unclaimed money after dual-B70** — 1.92 ms per step
-where the GPU does nothing at all, and nobody has looked at it yet.
+The next headline is a measured 99B graph-mode ITL, not another arithmetic
+projection.

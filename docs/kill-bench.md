@@ -1751,3 +1751,98 @@ binary-searches word count against the real tokenizer.
 
 **Not established:** quality. Sustained multi-hour stability. GuideLLM as a
 formal acceptance gate. r20's own surface.
+
+## Bench 22 — r15 cold-vs-warm surface (2026-08-21, IN FLIGHT)
+
+**Status: 31 of 48 cells.** Resumable — rerun the identical command and the
+instrument skips completed cells:
+
+```
+SB_MNS=6 benchmarks/serve_jota_r15_dual.sh          # server, MNS 6 for C<=6
+HF_HUB_OFFLINE=1 .venv/bin/python benchmarks/r15_cold_warm_matrix.py \
+  --model shooting-brake-jota-r15 \
+  --tokenizer-dir srswti/axe-superveloce-jota-118b-r15-nvfp4 \
+  --corpus ~/sb_corpus_big.txt \
+  --contexts 1024,4096,8192,16384,32768,61440,92160,126976 \
+  --concurrency 1,2,3,4,5,6 --output-tokens 512 \
+  --json-out benchmarks/results/b70_gemv_audit/r15_cold_warm_matrix.json
+```
+
+Done: 1024/4096/8192/16384/32768 complete at C=1..6, plus 61440 C=1.
+Remaining: 61440 C=2..6, 92160 C=1..6, 126976 C=1..6 (~2 h, all prefill).
+
+### What it already establishes
+
+1. **Bench 21's concurrency finding was an artifact of cold prompts.** I
+   reported "concurrency costs aggregate throughput." Warm, it does not:
+   1K aggregate goes 89.2 -> 145.6 -> 159.4 -> **211.1** tok/s at C=1..4, a
+   2.4x scale-up. Cold it barely moves (69.5 -> 125.2). What Bench 21
+   measured was prefill serialisation, not a concurrency ceiling. Production
+   runs warm.
+2. **ITL is identical cold vs warm at every concurrency** (10.87/10.87,
+   13.20/13.21, 18.36/18.38, ...). Caching touches prefill only, exactly as
+   expected, and it doubles as a determinism check on the instrument.
+3. **The ITL tiers are CUDA-graph batch buckets, not a smooth curve.**
+   10.87 / 13.20 / **18.36, 18.41** / **27.67, 27.92** ms for C=1..6. C=3
+   costs what C=4 costs; C=5 costs what C=6 costs. Captured sizes are
+   {1,2,4,8} with padding, so **always fill to the bucket boundary** -- C=3
+   wastes a slot and C=5 wastes two. C=7/8 should also read ~27.9 ms, making
+   `max_num_seqs=8` free relative to 6 per token. Unconfirmed.
+4. **The prefix cache does not degrade, it falls off a cliff.** Warm hit rate
+   at ctx=16384: C=4 -> 0.9994, C=5 -> **0.200**, C=6 -> **0.000**, and at
+   C=6 warm TTFT equals cold to 1 ms (99.2017 vs 99.2026 s). Hits at C=5 were
+   exactly 16,384 of 81,916 -- one prompt's worth survived, four were evicted.
+   **Zero preemptions**, so it is not scheduler thrash. 98,304 tokens is only
+   44% of the ~221K pool, so raw capacity does not explain it either.
+   **Mechanism unknown** and worth chasing: `gpu_cache_usage_perc` came back
+   -1 because the gauge was renamed in 0.27, which would help diagnose.
+   Practical rule until then: bank on caching for ONE shared prefix of up to
+   ~65K tokens, not for several large distinct ones.
+
+### Instrument
+
+`benchmarks/r15_cold_warm_matrix.py` (`ca77b678`). Token targeting lands
+within 3 tokens of any target up to 126,976 (drift <=0.2% across all 31
+cells); cold passes read 0.000 hit rate, warm 0.99+. Two of my own bugs were
+found and fixed en route: a guess-and-correct prompt sizer that oscillated
+(6330 tokens for a 4096 target, because each correction sampled a different-
+density corpus region), and quoting warm-TTFT *ratios* at the measurement
+floor where 0.017 s vs 0.070 s swings the ratio 4x for no physical reason.
+Warm TTFT is reported in absolute ms.
+
+## Group-32 / NVFP4 grouped kernel — plan corrected before any build
+
+Recorded here because it **invalidates what I proposed**: converting the bank
+to group-32 was never sufficient.
+
+- The vendored Xe2 grouped kernel implements **MXFP4, not NVFP4**. `B_DTYPE`
+  has no NVFP4 entry and the scale decode is `bits << 23`, i.e. E8M0
+  exponent-only at group 32. Ours is E4M3 at group 16 plus an FP32 global
+  scale, so even at group 32 the scale *format* is wrong.
+- Upstream `sycl-tla` (95 PRs newer than the pinned `.deps` snapshot) has real
+  Xe block-scaled grouped GEMM (`xe_array_mma_blockscaled_mxfp.hpp`,
+  `xe_tile_scheduler_group.hpp`, `examples/51_xe35_block_scaled_grouped_gemm`,
+  arch tag `IntelXe`) -- but for `mx_float4_t` only. Every nvfp4 path is
+  `sm100`/`sm103`, i.e. NVIDIA. **Nobody upstream has an Xe NVFP4 grouped
+  GEMM.**
+- `nv_float4_t` already exists (`float_subbyte.h:506`) with
+  `ScaleFactorType = float_ue4m3_t`, and the Xe collective gates scale loads
+  through a `ScaleCopyTraits` specialization. So the NVFP4 route is a bounded
+  traits specialization at SF vector 16 (plus two scale groups per 32-wide
+  K-tile, since every policy has `tile_k=32` and scales load only when
+  `k_tile*tile_k % group_size == 0` -- group 16 would silently apply the first
+  group's scale to all 32 elements). That keeps the 54 GiB bank **bit-exact**:
+  no requantisation, no quality gate, no rebuild. Strictly better than MXFP4
+  conversion, which would stack E8M0's power-of-two-only scales on top of the
+  16->32 merge.
+
+**Next action, gate pre-committed.** `src/phase7/xe2_probe/` builds and is
+unrun (deliberately: it saturates B70 bandwidth and would corrupt Bench 22).
+It measures the unmodified kernel on synthetic MXFP4 at our real geometry
+(E=85, K=3072, N=1024, ~30 rows/expert). **Best >=200 GB/s justifies the
+`ScaleCopyTraits` port; below that the plan dies.** Reference points: the
+split path we ship achieves 437.6 GB/s and is already saturated; our own
+grouped attempt managed 9.9 GB/s and lost 1.55x.
+
+Note the tension: MNBT=512 (Bench 21) gives only ~30 rows/expert, and small M
+is where grouped GEMMs lose. MNBT would want re-tuning after the kernel lands.

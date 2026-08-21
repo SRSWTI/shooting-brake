@@ -49,6 +49,11 @@ struct Capability {
   std::vector<std::uint32_t> supported_intermediate_sizes;
   std::vector<std::uint32_t> supported_topk;
   std::uint32_t num_resident_experts = 0;
+  // Result wire width. When true the provider copies fp16 out of
+  // take() and the caller MUST supply fp16 storage; the pair is
+  // published rather than inferred from the environment on both sides,
+  // because a mismatch is silent garbage rather than an error.
+  bool output_fp16 = false;
   std::uint32_t max_batch_remote = 0;
   std::vector<std::string> kernel_families;
   std::uint32_t health_heartbeat_interval_ms = 1000;

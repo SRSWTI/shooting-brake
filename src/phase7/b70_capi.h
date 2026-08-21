@@ -125,6 +125,11 @@ int sb_b70_take(sb_b70_provider_t* provider, uint64_t generation,
                 uint64_t sequence, float* output, size_t output_elements);
 
 /** Number of resident experts per layer. */
+/* Result wire width: 1 = take() writes fp16, 0 = fp32, -1 = bad handle.
+ * Callers MUST size their output buffer from this and not from the
+ * environment -- a mismatch produces garbage, not an error. */
+int sb_b70_out_fp16(sb_b70_provider_t* provider);
+
 size_t sb_b70_num_resident(sb_b70_provider_t* provider);
 
 /**

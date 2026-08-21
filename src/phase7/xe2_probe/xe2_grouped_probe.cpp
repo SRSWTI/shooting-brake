@@ -281,6 +281,9 @@ int main(int argc, char** argv) {
   out.push_back(bench<MoE::w4a16_policy_m_32_k16, MoE::B_DTYPE::NVFP4>(q, "NVFP4 m_32_k16 (32x64x16)", E, M, N, K, group_size, iters));
   out.push_back(bench<MoE::w4a16_policy_m_16_k16, MoE::B_DTYPE::NVFP4>(q, "NVFP4 m_16_k16 (16x64x16)", E, M, N, K, group_size, iters));
   out.push_back(bench<MoE::w4a16_policy_k16, MoE::B_DTYPE::NVFP4>(q, "NVFP4 k16 (128x256x16)", E, M, N, K, group_size, iters));
+  out.push_back(bench<MoE::w4a16_policy_m_64_k16, MoE::B_DTYPE::NVFP4>(q, "NVFP4 m_64_k16 (64x64x16)", E, M, N, K, group_size, iters));
+  out.push_back(bench<MoE::w4a16_policy_m_64_n128_k16, MoE::B_DTYPE::NVFP4>(q, "NVFP4 m64_n128_k16 (64x128x16)", E, M, N, K, group_size, iters));
+  out.push_back(bench<MoE::w4a16_policy_m_128_k16, MoE::B_DTYPE::NVFP4>(q, "NVFP4 m_128_k16 (128x64x16)", E, M, N, K, group_size, iters));
 #endif
 
   printf("%-30s %10s %12s %14s\n", "policy", "ms", "GB/s", "us/token");

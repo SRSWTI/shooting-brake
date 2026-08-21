@@ -131,4 +131,39 @@ class w4a16_policy_m_16_k16 : public xe_gemm_policy_base {
   using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
 };
 
+// Deeper tile_k=16 tiles. At MAX_BATCH=2048 a card sees 2048*10/2 = 10240
+// routes over 85 experts = ~120 rows/expert, so a 32-row tile needs four
+// passes per expert. These trade that for fewer, larger tiles.
+class w4a16_policy_m_64_k16 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_64, _64, _16>;
+  using SGLayout = Layout<Shape<_2, _4, _1>, Stride<_4, _1, _0>>;
+};
+
+class w4a16_policy_m_64_n128_k16 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_64, _128, _16>;
+  using SGLayout = Layout<Shape<_2, _8, _1>, Stride<_8, _1, _0>>;
+};
+
+class w4a16_policy_m_128_k16 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_128, _64, _16>;
+  using SGLayout = Layout<Shape<_4, _4, _1>, Stride<_4, _1, _0>>;
+};
+// k16's tile with the default (auto-derived) D store atom. w4a16_policy_k16
+// pins XE_STORE_2D<16, 8, 32> -- a 16-bit store -- which static-asserts against
+// a 32-bit output element ("CopyBits % ValBits == 0"). Our GEMMs must write
+// fp32: the unscaled dot product over K=3072 reaches ~1e6 and saturates fp16's
+// 65,504 to Inf before the per-expert alpha (~8.7e-05) can bring it back, and
+// Inf - Inf in the SwiGLU is the NaN that took a boot to find. The probe
+// measured this tile with half output; whether the wider store keeps the 1.41x
+// is exactly what the next boot answers.
+class w4a16_policy_k16_d32 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_128, _256, _16>;
+  using SGLayout = Layout<Shape<_4, _8, _1>, Stride<_8, _1, _0>>;
+};
+
+
 }  // namespace MoE

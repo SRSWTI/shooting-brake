@@ -1,0 +1,37 @@
+{
+  "recorded_at": "2026-08-21T17:29:55",
+  "question": "does grouped prefill + the fp16 result wire change output quality?",
+  "why_the_obvious_tests_failed": [
+    "greedy agreement over 24 tokens: invalid. one flipped token changes every token after it, so it measures divergence, not numerical error. read 57% and panicked; `count` was 24/24 at delta 0.006.",
+    "6-prompt top-1 logprob delta: underpowered. the baseline's own 3-pass spread was 0.339 nats, the same size as the effect being measured."
+  ],
+  "instrument": "120 independent prompts, ~230 words each, one forward pass (max_tokens=1). independent => no greedy divergence. 120 samples => per-prompt nondeterminism averages down.",
+  "control": "the baseline compared against ITSELF. it is the ceiling: no change can score better than the reference reproducing itself.",
+  "results": {
+    "baseline_vs_baseline_control": {
+      "argmax_agree": "109/120",
+      "pct": 90.8,
+      "mean_abs_dlp": 0.12923,
+      "max_abs_dlp": 0.85883
+    },
+    "baseline_vs_grouped_fp16_p1": {
+      "argmax_agree": "108/120",
+      "pct": 90.0,
+      "mean_abs_dlp": 0.15273,
+      "max_abs_dlp": 1.37696
+    },
+    "baseline_vs_grouped_fp16_p2": {
+      "argmax_agree": "106/120",
+      "pct": 88.3,
+      "mean_abs_dlp": 0.13332,
+      "max_abs_dlp": 0.89551
+    }
+  },
+  "verdict": "indistinguishable. the baseline disagrees with its own second pass on 11 of 120 prompts; the new stack sits in that band.",
+  "not_claimed": "this is not proof of numerical equality. it is proof the change is smaller than the nondeterminism it lives in.",
+  "incidental_finding": "this rig has never been reproducible. the PRE-EXISTING per-route GEMV path flips argmax on 9% of prompts run twice, and its 3-pass top-1 spread (0.339) is WIDER than the grouped path's (0.277). not introduced today.",
+  "baselines": {
+    "config": "GROUPED off, MAX_BATCH=256, MNBT=512",
+    "new_config": "GROUPED=1, MAX_BATCH=2048, OUT_FP16=1, MNBT=2048"
+  }
+}

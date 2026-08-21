@@ -1,0 +1,104 @@
+[
+  {
+    "label": "mb2048-grouped",
+    "recorded_at": "2026-08-21T16:49:58",
+    "baseline_us_per_token": 1705.0,
+    "gate": {
+      "ok": true,
+      "status": 200,
+      "text": "60, 61, 62, ",
+      "logprobs_finite": true
+    },
+    "cells": [
+      {
+        "context": 1024,
+        "prompt_tokens": 1025,
+        "cold_s": 0.6295281120001164,
+        "warm_s": 0.016680697000083455,
+        "us_per_token": 614.1737678049916,
+        "vs_baseline": 2.7760873052158104,
+        "warm_speedup": 37.73991650330719
+      },
+      {
+        "context": 8192,
+        "prompt_tokens": 8193,
+        "cold_s": 4.317987089000098,
+        "warm_s": 0.026274495999814462,
+        "us_per_token": 527.0336981569752,
+        "vs_baseline": 3.2350872552596655,
+        "warm_speedup": 164.34138599768346
+      },
+      {
+        "context": 16384,
+        "prompt_tokens": 16385,
+        "cold_s": 8.692481270000144,
+        "warm_s": 0.03774506200011274,
+        "us_per_token": 530.5145724748334,
+        "vs_baseline": 3.213860822043455,
+        "warm_speedup": 230.29452885715702
+      },
+      {
+        "context": 32768,
+        "prompt_tokens": 32769,
+        "cold_s": 17.924388809999982,
+        "warm_s": 0.05675918199995067,
+        "us_per_token": 546.9922429735415,
+        "vs_baseline": 3.117046031094215,
+        "warm_speedup": 315.7971658227132
+      }
+    ],
+    "aggregate_us_per_token": 540.7453107825728,
+    "aggregate_speedup": 3.1530555438982995
+  },
+  {
+    "label": "mb2048-fp16wire",
+    "recorded_at": "2026-08-21T17:07:35",
+    "baseline_us_per_token": 1705.0,
+    "gate": {
+      "ok": true,
+      "status": 200,
+      "text": "60, 61, 62, ",
+      "logprobs_finite": true
+    },
+    "cells": [
+      {
+        "context": 1024,
+        "prompt_tokens": 1025,
+        "cold_s": 0.5055904939999891,
+        "warm_s": 0.09924050700010412,
+        "us_per_token": 493.25901853657473,
+        "vs_baseline": 3.4566017770105417,
+        "warm_speedup": 5.094598055605044
+      },
+      {
+        "context": 8192,
+        "prompt_tokens": 8193,
+        "cold_s": 3.968557278999924,
+        "warm_s": 0.10190549000026294,
+        "us_per_token": 484.38389832783156,
+        "vs_baseline": 3.519935336178442,
+        "warm_speedup": 38.94350813670278
+      },
+      {
+        "context": 16384,
+        "prompt_tokens": 16385,
+        "cold_s": 6.711580033000246,
+        "warm_s": 0.03775808499995037,
+        "us_per_token": 409.61733494050935,
+        "vs_baseline": 4.162421495778799,
+        "warm_speedup": 177.75212998776468
+      },
+      {
+        "context": 32768,
+        "prompt_tokens": 32766,
+        "cold_s": 13.890336514999944,
+        "warm_s": 0.11723367700005838,
+        "us_per_token": 423.9253041262267,
+        "vs_baseline": 4.021934957419584,
+        "warm_speedup": 118.48418364454292
+      }
+    ],
+    "aggregate_us_per_token": 429.6127108739246,
+    "aggregate_speedup": 3.9686907692550895
+  }
+]

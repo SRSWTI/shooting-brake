@@ -70,7 +70,36 @@ constexpr char kLayoutB = 'C';
 // `k_tile * tile_k % group_size == 0`, so a tile_k of 32 spanning two
 // 16-element groups loads only the first group's scale and applies it to all
 // 32 values -- wrong, and silently so. Costs 4.6% against the tile_k=32 tile.
-using PolicyK16 = MoE::w4a16_policy_m_32_k16;
+//
+// WHICH tile_k=16 policy wins is M-dependent, and the crossover sits inside
+// the range SHOOTING_BRAKE_B70_MAX_BATCH moves us across. Measured 2026-08-21,
+// E=85, N=1024, K=3072, group 16, this silicon:
+//
+//   rows/expert | m_32_k16 (32x64x16) | k16 (128x256x16)
+//   ------------|---------------------|------------------
+//        30     | 429 GB/s   <- wins  | 122 GB/s
+//       120     | 116 GB/s            | 164 GB/s  <- wins
+//
+// A 128-row tile swallows an expert's whole row set in one pass once
+// rows/expert clears ~64; below that it runs mostly padding. Pinning either
+// one statically throws away ~1.4x at the end it is wrong for -- which is what
+// shipping m_32_k16 did the moment MAX_BATCH went 256 -> 2048.
+using PolicySmallM = MoE::w4a16_policy_m_32_k16;
+using PolicyBigM = MoE::w4a16_policy_m_32_k16;  // measured: k16_d32 lost 7% in situ
+constexpr int kBigTileRowsPerExpert = 64;
+
+// Only the policy varies between the two GEMMs, so bind the rest once.
+template <class policy>
+inline void launch_nvfp4(sycl::queue& q, const sycl::half* a,
+                         const std::uint8_t* w, const std::uint8_t* s,
+                         const sycl::half* bias, float* d, int n, int k,
+                         const std::int32_t* rows, int e, int gs,
+                         std::int32_t* atom) {
+  launch<kLayoutA, kLayoutB, policy, MoE::A_DTYPE::BITS16,
+         MoE::B_DTYPE::NVFP4, HalfT, E2M1, std::uint8_t, HalfT, float>(
+      q, reinterpret_cast<const HalfT*>(a), reinterpret_cast<const E2M1*>(w), s,
+      reinterpret_cast<const HalfT*>(bias), d, n, k, rows, e, gs, atom);
+}
 
 }  // namespace
 
@@ -163,12 +192,19 @@ bool grouped_moe_nvfp4(sycl::queue& q, const sycl::half* act_src,
 
   // 5. w13: [routes, H] x [E, 2I, H] -> [routes, 2I]
   q.memset(atom, 0, sizeof(std::int32_t));
-  launch<kLayoutA, kLayoutB, PolicyK16, MoE::A_DTYPE::BITS16,
-         MoE::B_DTYPE::NVFP4, HalfT, E2M1, std::uint8_t, HalfT, float>(
-      q, reinterpret_cast<const HalfT*>(g_act),
-      reinterpret_cast<const E2M1*>(w13), s13,
-      reinterpret_cast<const HalfT*>(bias13), g_mid, 2 * I, H, rows, E,
-      group_size, atom);
+  // Rows per expert has to be estimated on the host: the true count is
+  // offs[E], which lives on the device and reading it would cost a sync. The
+  // /2 is the two-card split this rig ships -- a different card count wants
+  // this re-derived, not inherited. At M=512 this yields 30 (small tile wins),
+  // at M=2048 it yields 120 (big tile wins), matching both measured points.
+  const bool big_tile = (M * top_k) / (2 * E) >= kBigTileRowsPerExpert;
+  if (big_tile) {
+    launch_nvfp4<PolicyBigM>(q, g_act, w13, s13, bias13, g_mid, 2 * I, H, rows,
+                             E, group_size, atom);
+  } else {
+    launch_nvfp4<PolicySmallM>(q, g_act, w13, s13, bias13, g_mid, 2 * I, H,
+                               rows, E, group_size, atom);
+  }
 
   // 6. SwiGLU. alpha13 lands here rather than in the kernel: it is constant per
   //    expert, so it factors out of the dot product entirely.
@@ -191,12 +227,13 @@ bool grouped_moe_nvfp4(sycl::queue& q, const sycl::half* act_src,
 
   // 7. w2: [routes, I] x [E, H, I] -> [routes, H]
   q.memset(atom, 0, sizeof(std::int32_t));
-  launch<kLayoutA, kLayoutB, PolicyK16, MoE::A_DTYPE::BITS16,
-         MoE::B_DTYPE::NVFP4, HalfT, E2M1, std::uint8_t, HalfT, float>(
-      q, reinterpret_cast<const HalfT*>(g_gated),
-      reinterpret_cast<const E2M1*>(w2), s2,
-      reinterpret_cast<const HalfT*>(bias2), g_outr, H, I, rows, E, group_size,
-      atom);
+  if (big_tile) {
+    launch_nvfp4<PolicyBigM>(q, g_gated, w2, s2, bias2, g_outr, H, I, rows, E,
+                             group_size, atom);
+  } else {
+    launch_nvfp4<PolicySmallM>(q, g_gated, w2, s2, bias2, g_outr, H, I, rows, E,
+                               group_size, atom);
+  }
 
   // 8. weighted scatter back to token rows. alpha2 applied here for the same
   //    reason as alpha13. The output is fully written, not accumulated onto

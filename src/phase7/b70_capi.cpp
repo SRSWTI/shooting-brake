@@ -371,6 +371,12 @@ int sb_b70_take(sb_b70_provider_t* provider, uint64_t generation,
       p->take(generation, sequence, output, output_elements, &result));
 }
 
+int sb_b70_out_fp16(sb_b70_provider_t* provider) {
+  if (!provider) return -1;
+  auto* p = reinterpret_cast<B70Provider*>(provider);
+  return p->capability().output_fp16 ? 1 : 0;
+}
+
 size_t sb_b70_num_resident(sb_b70_provider_t* provider) {
   if (!provider) return 0;
   auto* p = reinterpret_cast<B70Provider*>(provider);

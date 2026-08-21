@@ -419,6 +419,16 @@ struct B70Provider::Impl {
   std::uint8_t* upload_staging = nullptr;
   float* copyout_staging = nullptr;
 
+  // fp16 result wire (SHOOTING_BRAKE_B70_OUT_FP16=1). Both B70s hang off one
+  // shared Gen4 x4 uplink -- 6.44 GB/s aggregate concurrent against 9.7 solo,
+  // measured by experiments/b70_mem_topology_probe -- so the result copy is
+  // priced in PCIe, not VRAM. At M=2048 the fp32 output is 25.2 MiB per card
+  // per layer against 12.6 MiB of inbound activations, which makes it the
+  // largest single term in prefill: 175 of 262 us/token.
+  sycl::half* out16 = nullptr;
+  sycl::half* copyout_staging16 = nullptr;
+  bool out_fp16 = false;
+
   // Grouped prefill path (SHOOTING_BRAKE_B70_GROUPED=1). The per-route GEMV
   // reads each expert's 5.06 MiB once PER ROUTE; at M=2560 over 85 resident
   // experts that is ~30x more traffic than the weights require, and the split
@@ -571,6 +581,8 @@ struct B70Provider::Impl {
 
       free_pointer(upload_staging);
       free_pointer(copyout_staging);
+      free_pointer(out16);
+      free_pointer(copyout_staging16);
       free_pointer(output);
       free_pointer(scratch);
       free_pointer(weights);
@@ -1139,6 +1151,7 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     }
     impl_->capability.num_resident_experts =
         static_cast<std::uint32_t>(resident_experts_total);
+    impl_->capability.output_fp16 = impl_->out_fp16;
     impl_->capability.max_batch_remote =
         static_cast<std::uint32_t>(config.max_batch);
     impl_->capability.kernel_families =
@@ -1208,6 +1221,23 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
         impl_->allocate_device<float>(config.max_batch * g_hidden);
     impl_->copyout_staging =
         impl_->allocate_host<float>(config.max_batch * g_hidden);
+
+    // Narrow result wire. Values here are the final scattered MoE output with
+    // the per-expert alpha already applied, so they sit at activation scale --
+    // fp16's 65,504 ceiling is not in play. That is specifically NOT true of
+    // the GEMM accumulators upstream, where an unscaled dot product over
+    // K=3072 reaches ~1e6 and saturating it to Inf was the NaN that cost a
+    // boot to find. Those stay fp32.
+    {
+      const char* v = std::getenv("SHOOTING_BRAKE_B70_OUT_FP16");
+      impl_->out_fp16 = v != nullptr && v[0] == '1' && v[1] == '\0';
+    }
+    if (impl_->out_fp16) {
+      impl_->out16 =
+          impl_->allocate_device<sycl::half>(config.max_batch * g_hidden);
+      impl_->copyout_staging16 =
+          impl_->allocate_host<sycl::half>(config.max_batch * g_hidden);
+    }
 
     // Grouped prefill scratch. Only allocated when the flag is on and only
     // for NVFP4 -- the int4 bank has a different record layout and its own
@@ -1489,9 +1519,23 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
     // submitting it here keeps its latency off the critical path —
     // take() would otherwise wait for the kernel, only then submit the
     // copy, and wait again.
-    impl_->copy_out.emplace(impl_->queue->memcpy(
-        impl_->copyout_staging, impl_->output,
-        M * g_hidden * sizeof(float)));
+    if (impl_->out_fp16) {
+      // Narrow on the device. Widening on the host instead would put ~4 ms of
+      // CPU conversion on take()'s critical path and hand the PCIe saving
+      // straight back; this pass is ~0.08 ms of VRAM traffic.
+      const std::size_t n = static_cast<std::size_t>(M) * g_hidden;
+      const float* src = impl_->output;
+      sycl::half* dst = impl_->out16;
+      impl_->queue->parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
+        dst[i] = static_cast<sycl::half>(src[i]);
+      });
+      impl_->copy_out.emplace(impl_->queue->memcpy(
+          impl_->copyout_staging16, impl_->out16, n * sizeof(sycl::half)));
+    } else {
+      impl_->copy_out.emplace(impl_->queue->memcpy(
+          impl_->copyout_staging, impl_->output,
+          M * g_hidden * sizeof(float)));
+    }
 #ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
     if (impl_->armed_test_fault &&
         *impl_->armed_test_fault ==
@@ -1642,8 +1686,16 @@ ProviderStatus B70Provider::take(const std::uint64_t generation,
     impl_->health.last_error.clear();
     impl_->retire_pending_locked();
 
-    std::memcpy(output, impl_->copyout_staging,
-                required_elements * sizeof(float));
+    // The caller's buffer element width follows the wire: sb_b70_out_fp16()
+    // publishes which to allocate. Getting that pair wrong is silent garbage,
+    // which is why the provider states its choice instead of both sides
+    // reading the environment and hoping they agree.
+    std::memcpy(output,
+                impl_->out_fp16
+                    ? static_cast<const void*>(impl_->copyout_staging16)
+                    : static_cast<const void*>(impl_->copyout_staging),
+                required_elements *
+                    (impl_->out_fp16 ? sizeof(sycl::half) : sizeof(float)));
     return ProviderStatus::ok;
   } catch (...) {
     try {

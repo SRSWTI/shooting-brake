@@ -70,6 +70,7 @@ class B70ProviderClient:
         self._setup_signatures()
         self._handle: ctypes.c_void_p | None = None
         self._loaded = False
+        self._out_dtype = None
         self._hidden = 0
         self._resident_count = 0
         self._sequence = 0
@@ -132,6 +133,12 @@ class B70ProviderClient:
 
         lib.sb_b70_num_resident.restype = ctypes.c_size_t
         lib.sb_b70_num_resident.argtypes = [ctypes.c_void_p]
+
+        # Result wire width. Absent on providers built before the fp16 wire, so
+        # this stays optional -- a missing symbol means fp32, not an error.
+        if hasattr(lib, "sb_b70_out_fp16"):
+            lib.sb_b70_out_fp16.restype = ctypes.c_int
+            lib.sb_b70_out_fp16.argtypes = [ctypes.c_void_p]
 
         lib.sb_b70_device_memory.restype = ctypes.c_int
         lib.sb_b70_device_memory.argtypes = [
@@ -364,6 +371,25 @@ class B70ProviderClient:
             )
         return seq
 
+    @property
+    def out_dtype(self) -> "np.dtype":
+        """Element type take() writes -- asked of the provider, never guessed.
+
+        The provider decides from its own environment; if this side inferred it
+        independently the two could disagree and the result would be silent
+        garbage rather than an error. Providers without the symbol predate the
+        fp16 wire and are fp32.
+        """
+        if self._out_dtype is None:
+            fn = getattr(self._lib, "sb_b70_out_fp16", None)
+            if fn is None or not self._handle:
+                self._out_dtype = np.dtype(np.float32)
+            else:
+                self._out_dtype = np.dtype(
+                    np.float16 if fn(self._handle) == 1 else np.float32
+                )
+        return self._out_dtype
+
     def take(
         self,
         sequence: int,
@@ -391,10 +417,11 @@ class B70ProviderClient:
         if not self._loaded or not self._handle:
             raise B70ProviderError("provider not loaded")
 
+        dtype = self.out_dtype
         if output is None:
-            output = np.empty((M, self._hidden), dtype=np.float32)
-        elif not output.flags["C_CONTIGUOUS"] or output.dtype != np.float32:
-            output = np.ascontiguousarray(output, dtype=np.float32)
+            output = np.empty((M, self._hidden), dtype=dtype)
+        elif not output.flags["C_CONTIGUOUS"] or output.dtype != dtype:
+            output = np.ascontiguousarray(output, dtype=dtype)
 
         status = self._lib.sb_b70_take(
             self._handle,

@@ -39,6 +39,35 @@ from .partition import (
 from .placement import Device, Placement, build_for_qualified
 from .provider import ShootingBrakeExpertProviderClient
 
+
+def _b70_wire_dtype() -> torch.dtype:
+    """Element type of the B70 result wire.
+
+    Both B70s share one Gen4 x4 uplink -- 6.44 GB/s aggregate concurrent
+    against 9.7 solo, measured -- and at MAX_BATCH=2048 the fp32 result is
+    25.2 MiB per card per layer against 12.6 MiB of inbound activations. That
+    makes the result copy the largest single term in prefill (175 of 262
+    us/token), so narrowing it is the cheapest byte reduction on the board. It
+    halves the host->5090 leg for free as well.
+
+    Safe because these are the FINAL scattered outputs with the per-expert
+    alpha already applied: activation scale, nowhere near fp16's 65,504. The
+    GEMM accumulators upstream are a different story -- an unscaled dot product
+    over K=3072 reaches ~1e6, and saturating that to Inf is the NaN that cost a
+    boot to find. Those stay fp32 inside the provider.
+
+    Read from the environment rather than queried from the provider because the
+    provider reads the same variable in the same process, so the two cannot
+    disagree. ``sb_b70_out_fp16()`` publishes the provider's choice for tooling
+    and for the numpy ``take()`` path, which allocates its own buffers.
+    """
+    return (
+        torch.float16
+        if os.environ.get("SHOOTING_BRAKE_B70_OUT_FP16") == "1"
+        else torch.float32
+    )
+
+
 logger = init_logger(__name__)
 
 
@@ -1058,7 +1087,7 @@ class HybridRoutedExperts(RoutedExperts):
                 ),
                 pinned_output=torch.empty(
                     *self._dispatch_geometry.hidden_shape,
-                    dtype=torch.float32, pin_memory=True, device="cpu",
+                    dtype=_b70_wire_dtype(), pin_memory=True, device="cpu",
                 ),
             )
             for index in
@@ -1185,9 +1214,11 @@ class HybridRoutedExperts(RoutedExperts):
                 )
                 # Device-side result buffers (pre-allocated, no torch.empty
                 # in forward).
+                # Name is historical: this is the wire's landing buffer,
+                # fp16 when the narrow wire is on. dev_bf16 casts from it.
                 lane.dev_fp32 = torch.empty(
                     self._b70_max_batch, self.hidden_size,
-                    dtype=torch.float32, device="cuda",
+                    dtype=_b70_wire_dtype(), device="cuda",
                 )
                 lane.dev_bf16 = torch.empty(
                     self._b70_max_batch, self.hidden_size,
@@ -1259,11 +1290,11 @@ class HybridRoutedExperts(RoutedExperts):
                 pin_memory=True, device="cpu",
             )
             self._cpu_pinned_output = torch.empty(
-                self._b70_max_batch, hidden, dtype=torch.float32,
+                self._b70_max_batch, hidden, dtype=_b70_wire_dtype(),
                 pin_memory=True, device="cpu",
             )
             self._dev_cpu_fp32 = torch.empty(
-                self._b70_max_batch, hidden, dtype=torch.float32,
+                self._b70_max_batch, hidden, dtype=_b70_wire_dtype(),
                 device="cuda",
             )
             self._dev_cpu_bf16 = torch.empty(

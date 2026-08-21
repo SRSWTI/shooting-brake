@@ -10,7 +10,9 @@
 #     or line and is not obviously a flag problem.
 #  3. cutlass-sycl from .deps, NOT vendor/cutlass -- the latter is upstream
 #     NVIDIA CUTLASS and has no Xe DPAS atoms.
-set -euo pipefail
+# No `set -u`: sourcing oneAPI setvars.sh references unset vars and aborts.
+# The serve recipes in benchmarks/ carry the same warning for the same reason.
+set -eo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 D="$(cd ../../../vendor/intel-xpu/vllm-xpu/vllm-xpu-kernels && pwd)"
 source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1

@@ -1,5 +1,7 @@
 #include "b70_provider.hpp"
 
+#include "grouped_moe.hpp"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -132,6 +134,23 @@ bool profiling_requested() noexcept {
 
 bool int4_requested() noexcept {
   const char* value = std::getenv("SHOOTING_BRAKE_B70_INT4");
+  return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
+// Grouped prefill: read each resident expert ONCE per layer instead of once
+// per route. OFF by default because it is new; the per-route GEMV stays the
+// only path that has served production traffic.
+//
+// Measured 2026-08-21 standalone at r15 geometry on real bank bytes
+// (src/phase7/xe2_probe/xe2_grouped_moe): 2.355 ms/layer = 216 us/token
+// against the 1,705 us/token the GEMV path measures in vLLM, i.e. ~7.9x on
+// the B70 GEMM leg and ~4.7x end-to-end with B70 at 86-92% of TTFT.
+//
+// Decode deliberately keeps the GEMV: at M=1 each token already touches its
+// experts once, so there is no read amplification to remove and grouping would
+// only add permutation work.
+bool grouped_requested() noexcept {
+  const char* value = std::getenv("SHOOTING_BRAKE_B70_GROUPED");
   return value != nullptr && value[0] == '1' && value[1] == '\0';
 }
 
@@ -400,6 +419,31 @@ struct B70Provider::Impl {
   std::uint8_t* upload_staging = nullptr;
   float* copyout_staging = nullptr;
 
+  // Grouped prefill path (SHOOTING_BRAKE_B70_GROUPED=1). The per-route GEMV
+  // reads each expert's 5.06 MiB once PER ROUTE; at M=2560 over 85 resident
+  // experts that is ~30x more traffic than the weights require, and the split
+  // kernel is already at 437 GB/s of the card's ~510, so the waste is bytes
+  // rather than rate. These buffers hold the expert-major permutation that
+  // lets each expert be read once instead.
+  //
+  // Sized off max_batch * top_k, the worst case where every route is distinct.
+  sycl::half* g_act = nullptr;    // [routes, hidden]   gathered, expert-major
+  float* g_mid = nullptr;         // [routes, 2*inter]  w13 output, fp32:
+                                  // the un-scaled dot product overflows fp16
+  sycl::half* g_gated = nullptr;  // [routes, inter]    after SwiGLU
+  float* g_outr = nullptr;        // [routes, hidden]   w2 output, fp32
+  sycl::half* g_bias13 = nullptr; // zeros; the kernel applies bias uncondit.
+  sycl::half* g_bias2 = nullptr;
+  std::int32_t* g_hist = nullptr;    // [experts+1] routes per expert
+  std::int32_t* g_offs = nullptr;    // [experts+1] exclusive prefix sum
+  std::int32_t* g_cursor = nullptr;  // [experts]   scatter write cursor
+  std::int32_t* g_rows = nullptr;    // [experts]   rows_per_expert for the GEMM
+  std::int32_t* g_slot_row = nullptr;  // [routes] slot -> source token
+  std::int32_t* g_slot_exp = nullptr;  // [routes] slot -> expert
+  float* g_slot_w = nullptr;           // [routes] slot -> router weight
+  std::int32_t* g_atomic = nullptr;    // grouped GEMM persistent work counter
+  bool grouped_ready = false;
+
   std::optional<sycl::event> dispatch_begin;
   std::optional<sycl::event> kernel_begin;
   std::optional<sycl::event> kernel_end;
@@ -539,6 +583,20 @@ struct B70Provider::Impl {
       free_pointer(w2);
       free_pointer(s13);
       free_pointer(w13);
+      free_pointer(g_atomic);
+      free_pointer(g_slot_w);
+      free_pointer(g_slot_exp);
+      free_pointer(g_slot_row);
+      free_pointer(g_rows);
+      free_pointer(g_cursor);
+      free_pointer(g_offs);
+      free_pointer(g_hist);
+      free_pointer(g_bias2);
+      free_pointer(g_bias13);
+      free_pointer(g_outr);
+      free_pointer(g_gated);
+      free_pointer(g_mid);
+      free_pointer(g_act);
 
       for (auto& range : registered_host_ranges) {
         try {
@@ -1151,6 +1209,41 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     impl_->copyout_staging =
         impl_->allocate_host<float>(config.max_batch * g_hidden);
 
+    // Grouped prefill scratch. Only allocated when the flag is on and only
+    // for NVFP4 -- the int4 bank has a different record layout and its own
+    // kernel, so grouping it is a separate exercise.
+    if (grouped_requested() && impl_->bank_format != BankFormat::int4) {
+      const std::size_t routes = config.max_batch * config.top_k;
+      const std::size_t experts = resident_experts_per_layer;
+      impl_->g_act = impl_->allocate_device<sycl::half>(routes * g_hidden);
+      impl_->g_mid =
+          impl_->allocate_device<float>(routes * 2 * g_intermediate);
+      impl_->g_gated =
+          impl_->allocate_device<sycl::half>(routes * g_intermediate);
+      impl_->g_outr = impl_->allocate_device<float>(routes * g_hidden);
+      // The mainloop applies bias unconditionally, so a null pointer faults
+      // inside the kernel and surfaces as a bare SIGSEGV with no diagnostic.
+      impl_->g_bias13 =
+          impl_->allocate_device<sycl::half>(experts * 2 * g_intermediate);
+      impl_->g_bias2 = impl_->allocate_device<sycl::half>(experts * g_hidden);
+      impl_->g_hist = impl_->allocate_device<std::int32_t>(experts + 1);
+      impl_->g_offs = impl_->allocate_device<std::int32_t>(experts + 1);
+      impl_->g_cursor = impl_->allocate_device<std::int32_t>(experts);
+      impl_->g_rows = impl_->allocate_device<std::int32_t>(experts);
+      impl_->g_slot_row = impl_->allocate_device<std::int32_t>(routes);
+      impl_->g_slot_exp = impl_->allocate_device<std::int32_t>(routes);
+      impl_->g_slot_w = impl_->allocate_device<float>(routes);
+      impl_->g_atomic = impl_->allocate_device<std::int32_t>(1);
+      impl_->queue
+          ->memset(impl_->g_bias13, 0,
+                   experts * 2 * g_intermediate * sizeof(sycl::half))
+          .wait();
+      impl_->queue
+          ->memset(impl_->g_bias2, 0, experts * g_hidden * sizeof(sycl::half))
+          .wait();
+      impl_->grouped_ready = true;
+    }
+
     if (impl_->bank_format != BankFormat::int4) {
       const std::size_t layer_staging_bytes =
           resident_experts_per_layer * g_w13_bytes;
@@ -1349,7 +1442,26 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
       const float* layer_w2_global = impl_->w2_global + first_expert;
 
       use_split = M <= 32;
-      if (use_split) {
+      // Grouped prefill takes the large-M arm when armed. Any refusal falls
+      // through to the fused GEMV, so a shape this path does not serve
+      // degrades in speed rather than in correctness.
+      bool grouped_done = false;
+      if (!use_split && impl_->grouped_ready) {
+        grouped_done = sb::xe2::grouped_moe_nvfp4(
+            *impl_->queue, impl_->hidden, impl_->ids, impl_->weights,
+            layer_w13, layer_s13, layer_w13_global, layer_w2, layer_s2,
+            layer_w2_global, impl_->g_act, impl_->g_mid, impl_->g_gated,
+            impl_->g_outr, impl_->g_bias13, impl_->g_bias2, impl_->g_hist,
+            impl_->g_offs, impl_->g_cursor, impl_->g_rows, impl_->g_slot_row,
+            impl_->g_slot_exp, impl_->g_slot_w, impl_->g_atomic,
+            impl_->output, static_cast<int>(M),
+            static_cast<int>(resident_experts),
+            static_cast<int>(impl_->config.top_k), static_cast<int>(g_hidden),
+            static_cast<int>(g_intermediate), 16);
+      }
+      if (grouped_done) {
+        // The op wrote impl_->output; nothing further for this layer.
+      } else if (use_split) {
         quixicore::xpu::ops::nvfp4_moe_split(
             *impl_->queue, impl_->hidden, impl_->ids, impl_->weights, layer_w13,
             layer_s13, layer_w13_global, layer_w2, layer_s2, layer_w2_global,

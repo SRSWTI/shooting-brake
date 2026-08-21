@@ -329,8 +329,24 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < iters; ++i) one_layer();
     q.wait_and_throw();
-    double ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t0).count() / iters;
+    double ms_pipelined = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count() / iters;
+
+    // Same work, but drained after every layer. If this matches the pipelined
+    // figure, back-to-back layers cost nothing extra and the shortfall is in
+    // the stages themselves. If it is FASTER, the gap is a queueing artifact.
+    auto t0b = std::chrono::steady_clock::now();
+    for (int i = 0; i < iters; ++i) { one_layer(); q.wait_and_throw(); }
+    double ms_drained = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0b).count() / iters;
+    printf("\n=== gap experiment ===\n");
+    printf("  pipelined (1 wait / %d layers) : %.3f ms/layer\n", iters, ms_pipelined);
+    printf("  drained   (1 wait / layer)     : %.3f ms/layer\n", ms_drained);
+    printf("  attributed stage sum           : see below\n");
+    // Headline is the DRAINED figure: the provider's doorbell drains every
+    // layer (issue -> take waits before the next issue), so pipelined timing
+    // would describe a regime production never runs in.
+    double ms = ms_drained;
 
     printf("=== full grouped MoE layer, real bank weights ===\n");
     printf("per layer      : %.3f ms\n", ms);

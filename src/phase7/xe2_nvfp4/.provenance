@@ -1,0 +1,3 @@
+a07c4844
+Derived from vendor/intel-xpu/vllm-xpu/vllm-xpu-kernels @ that tree state.
+Upstream is MXFP4 (E8M0/group-32); our changes add NVFP4 (E4M3/group-16).

@@ -123,7 +123,10 @@ void launch(sycl::queue& q, const ElementA* act, const ElementB* wgt,
   q.wait_and_throw();
 }
 
-template <class policy>
+// BDT selects MXFP4 (E8M0 scales) or NVFP4 (E4M3 scales). ElementS stays
+// uint8_t for both: the scale byte is raw either way, and the kernel does the
+// format-specific decode internally.
+template <class policy, MoE::B_DTYPE BDT = MoE::B_DTYPE::MXFP4>
 Result bench(sycl::queue& q, const char* policy_name, int E, int M, int N,
              int K, int group_size, int iters) {
   using ElementA = cutlass::half_t;
@@ -178,7 +181,7 @@ Result bench(sycl::queue& q, const char* policy_name, int E, int M, int N,
 
   auto once = [&]() {
     q.memcpy(atomic_buf, &zero, sizeof(int32_t)).wait();
-    launch<'R', 'R', policy, MoE::A_DTYPE::BITS16, MoE::B_DTYPE::MXFP4,
+    launch<'R', 'R', policy, MoE::A_DTYPE::BITS16, BDT,
            ElementA, ElementB, ElementS, ElementA, ElementD>(
         q, A, reinterpret_cast<const ElementB*>(B), S, Bias, D, N, K, rows, E,
         group_size, atomic_buf);
@@ -262,6 +265,23 @@ int main(int argc, char** argv) {
   out.push_back(bench<MoE::w4a16_policy_m_32>(q, "w4a16_policy_m_32 (32x64x32)", E, M, N, K, group_size, iters));
   out.push_back(bench<MoE::w4a16_policy_m_16>(q, "w4a16_policy_m_16 (16x64x32)", E, M, N, K, group_size, iters));
   out.push_back(bench<MoE::w4a16_policy_m_8>(q, "w4a16_policy_m_8 (8x64x32)", E, M, N, K, group_size, iters));
+#ifdef XE2_NVFP4_FORK
+  // tile_k=16 tiles, only present in our fork. These exist so that
+  // tile_k == group_size for NVFP4's 16-element block scales, which keeps the
+  // existing scale-reload gate correct without touching the mainloop. Run
+  // these with --group-size 16; they are the ones that decide whether NVFP4
+  // has a fast path at all.
+  out.push_back(bench<MoE::w4a16_policy_k16>(q, "w4a16_policy_k16 (128x256x16)", E, M, N, K, group_size, iters));
+  out.push_back(bench<MoE::w4a16_policy_m_32_k16>(q, "w4a16_policy_m_32_k16 (32x64x16)", E, M, N, K, group_size, iters));
+  out.push_back(bench<MoE::w4a16_policy_m_16_k16>(q, "w4a16_policy_m_16_k16 (16x64x16)", E, M, N, K, group_size, iters));
+
+  // The real target: NVFP4 (E4M3 scales) on the tile_k=16 tiles, which is the
+  // only combination that is BOTH our bank's format and numerically correct at
+  // group 16. Run with --group-size 16.
+  out.push_back(bench<MoE::w4a16_policy_m_32_k16, MoE::B_DTYPE::NVFP4>(q, "NVFP4 m_32_k16 (32x64x16)", E, M, N, K, group_size, iters));
+  out.push_back(bench<MoE::w4a16_policy_m_16_k16, MoE::B_DTYPE::NVFP4>(q, "NVFP4 m_16_k16 (16x64x16)", E, M, N, K, group_size, iters));
+  out.push_back(bench<MoE::w4a16_policy_k16, MoE::B_DTYPE::NVFP4>(q, "NVFP4 k16 (128x256x16)", E, M, N, K, group_size, iters));
+#endif
 
   printf("%-30s %10s %12s %14s\n", "policy", "ms", "GB/s", "us/token");
   double best = 0.0;

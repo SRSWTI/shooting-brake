@@ -1925,3 +1925,68 @@ The probe first died as a bare `EXIT=139` with **no output at all**, because
 indistinguishable from crashing before the first statement. `setvbuf(...,
 _IONBF, ...)` made it diagnosable in one run. Third silent-success trap of the
 day; the lesson that stuck is to check for the artifact, never the exit code.
+
+## Bench 24 — NVFP4 grouped path built and running (2026-08-21)
+
+`src/phase7/xe2_nvfp4/` — our fork of the vendored kernel (provenance in
+`.provenance`). Upstream is MXFP4 only; this adds NVFP4.
+
+### Three blockers, three resolutions
+
+1. **Scale layout — NOT a blocker, checked first and free.** `extract_experts.py`
+   writes compressed-tensors scales verbatim: `[N, K/16]` uint8, row-major.
+   The kernel indexes `Scales[n * group_num + group_idx]` with
+   `group_num = K/group_size`. **Identical.** Record arithmetic confirms it
+   byte-exact: 3,145,728 + 393,216 + 1,572,864 + 196,608 + 8 = 5,308,424,
+   which is the real record size. No rearrangement anywhere, and the 54 GiB
+   bank is untouched.
+2. **group-16 vs `tile_k=32` — solved with a tile policy, not mainloop work.**
+   The scale reload is gated on `k_tile * tile_k % group_size == 0`, so a
+   32-wide tile spanning two 16-groups loads only the first scale and applies
+   it to all 32 values -- silently wrong. Rather than teach the mainloop to
+   carry two scales, added `tile_k=16` policies so `tile_k == group_size` and
+   the existing gate is already correct. Measured cost: `m_32_k16` reads
+   419.5 GB/s against `m_32`'s 439.9, i.e. **4.6% for correctness**. This was
+   the item ranked "medium risk, real work"; it became a 20-line policy class.
+3. **Per-expert FP32 global scale — removed from the kernel entirely.**
+   `sum_k A_k (e2m1 * s_block * alpha) = alpha * sum_k A_k e2m1 * s_block`.
+   Alpha is constant per expert, so it belongs on that expert's OUTPUT rows,
+   which the provider already touches during the un-sort. One multiply per
+   output element instead of one per weight, and zero kernel surface.
+
+### Measured, r15 geometry (E=85, K=3072, N=1024, 30.1 rows/expert)
+
+| path | tile_k | ms | GB/s | correct at gs=16 | our format |
+|---|---:|---:|---:|---|---|
+| MXFP4 `m_32` | 32 | 0.390 | 439.9 | NO | no |
+| MXFP4 `m_32_k16` | 16 | 0.409 | 419.5 | yes | no |
+| **NVFP4 `m_32_k16`** | 16 | 0.503 | **340.4** | yes | **yes** |
+| NVFP4 `m_16_k16` | 16 | 0.803 | 213.5 | yes | yes |
+| NVFP4 `k16` (128x256x16) | 16 | 1.435 | 119.4 | yes | yes |
+
+**The E4M3 decode costs 23%** (0.503 vs 0.409 ms), not the "near-free" I
+predicted. I argued the decode sits at a group boundary rather than the inner
+loop -- true at `tile_k=32`, but at `tile_k=16` the reload fires every tile, so
+it is effectively per-tile, and E4M3 -> float is real work next to a shift.
+
+Revised projection: 138.6 us/token against **1,705 measured in production** =
+**12.3x on the B70 GEMM leg**, ~**5.8x end-to-end** at 90% B70 share. Prefill
+1,705 -> ~294 us/token; 8K cold TTFT 13.8 s -> ~2.4 s; 124K 212 s -> ~37 s.
+Down from the 6.6x projected in Bench 23 purely because of the decode cost.
+
+### NOT established -- this is the next gate, and it is the important one
+
+**Correctness is unverified.** These numbers prove the path compiles, runs,
+addresses the right bytes and moves them at 340 GB/s. They prove **nothing**
+about the arithmetic: inputs were random bits with no reference comparison.
+Specifically unproven: that `reinterpret_cast<float_e4m3_t const&>(byte)` is
+the right bit interpretation for compressed-tensors scale bytes, and that the
+stored trailer is a multiplier rather than a divisor (`extract_experts.py:269`
+says `param = 1/global`, so alpha multiplies -- but that has not been
+exercised end to end). A fast kernel computing the wrong product is worse than
+no kernel, so nothing ships until argmax and prompt-logprob equivalence pass
+against the current path.
+
+Also still open: route sorting in the provider (histogram/prefix/scatter, plus
+the alpha application on un-sort), M-dependent policy selection in production
+(worth 2.1x and shape-dependent), and the MNBT tension from Bench 23.

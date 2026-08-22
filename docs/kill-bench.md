@@ -2261,3 +2261,96 @@ loginctl enable-linger "$USER"       # required, not optional
 ./benchmarks/matrix_tiered.sh        # detach with setsid nohup for long runs
 ./benchmarks/matrix_progress.sh "$PWD/bench-matrix/jota_r15_c6"
 ```
+
+## Bench 29 - intra-dispatch pipelining: the plan, not yet built (2026-08-22)
+
+**Not a measurement.** The design and its falsifiable prediction, written down
+before building so the number can be checked against it rather than rationalised
+after.
+
+### Why it is the only lever left
+
+At 430 us/token the budget decomposes (all three terms measured, not modelled):
+
+| term | us/token | how it was measured |
+|---|---:|---|
+| PCIe transfer | 175 | 1.128 MB/token over both cards' shared 6.44 GB/s uplink |
+| B70 compute | 187 | standalone full layer, 8.15 ms at M=2048, x47 / 2048 |
+| everything else | 68 | residual: 430 - 175 - 187 |
+
+They run **strictly in series** inside one dispatch: copy in, compute, copy out.
+Two expensive resources, each idle while the other works.
+
+```
+today       [copy in][    compute    ][copy out]
+pipelined   [copy A ][ compute A ][ compute B ]
+                     [  copy B  ][ copy out A ][copy out B]
+```
+
+Prediction: `max(175, 187 x 1.03) + 68 = 261 us/token = 6.5x`. The 1.03 is the
+grouped kernel's penalty for halving rows/expert (120 -> 60), interpolated from
+the standalone 512/2048 points (2.361 / 8.154 ms per layer).
+
+Note the ordering dependency: this only pays **because Bench 26's fp16 wire
+already pushed transfer (175) below compute (187)**. At the old fp32 wire (262)
+overlapping would merely have exposed the wire as the new ceiling, capping at
+4.8x. The two changes are not independent and fp16 had to come first.
+
+### Why cross-layer overlap is NOT available
+
+Layer N+1's activations are layer N's output. Strictly sequential -- there is no
+earlier work to hide the transfer behind. This is the difference from every
+published MoE streaming design (see the FreeToken audit below): those stream
+**weights**, which are input-independent and therefore overlappable across
+layers. We stream **activations**, which are not. Hence *intra*-dispatch.
+
+### Scope and the one real hazard
+
+Provider-only: `src/phase1/b70_provider.cpp`. No ABI, no plugin, no bank, no
+checkpoint. Flag-gated `SHOOTING_BRAKE_B70_PIPELINE=1`, default off, A/B against
+430 us/token. Extra memory lands on the B70s (~550 MB -> ~1.1 GB of 7.5 GB
+free), NOT the 5090, so KV and max_model_len are untouched -- unlike every other
+memory lever tried today.
+
+**Hazard:** both halves currently share one set of scratch buffers -- `hist`,
+`offs`, `cursor`, `slot_row/exp/w`, `g_act/g_mid/g_gated`. Two chunks in flight
+race on device-scope atomics into them. Each needs a per-chunk copy. Miss one
+and it is silent garbage: the same failure class as the `slot_row` out-of-bounds
+read and the fp16 `Inf - Inf` NaN, both of which reached a booted server today
+and were caught only by the correctness gate. Build it alone, gate it, and do
+not report a number that has not cleared `benchmarks/b70_ttft_smoke.py` plus the
+120-prompt sweep.
+
+## Bench 29b - vendor/FreeToken audit: what transfers and what does not
+
+`vendor/FreeToken` advertises "full-layer double-buffered prefill streaming" and
+a "bandwidth-adaptive CPU-GPU co-execution (q*) policy", so it was read before
+building Bench 29.
+
+**Not reusable.** `python/freetoken/moe/fused_nvfp4.py` is Triton on CUDA
+(`_e2m1_lut`, `e4m3_kernel_view`, dequant inside the K-loop -- the same NVFP4
+format and the same in-kernel dequant strategy as ours) but there is no
+SYCL/Level-Zero path; the xpu/sycl grep hits are arch-detection strings only.
+Our bottleneck is the Intel B70 leg. Their kernels cannot run on it.
+
+**Their overlap solves a different leg.** `layers/moe.py:380` --
+*"stream whole layers -- double-buffered behind the previous layer's GEMMs when
+prefill_overlap is on"* -- moves **expert weights** host->GPU because the
+experts do not fit in VRAM. Ours are already B70-resident, so that transfer does
+not exist for us. Their pattern is cross-layer and legal precisely because
+weights are input-independent; see Bench 29 for why ours cannot be.
+
+**What does transfer, three things:**
+1. **The design shape is confirmed by an independent implementation.** A
+   `prefill_overlap` boolean flag, and `[2, num_experts, ...]` double-buffer
+   *views* over one pre-allocated pool (`moe/offload_cache.py:240`) rather than
+   separately allocated buffers. That view idiom is a cleaner answer to Bench
+   29's per-chunk duplication hazard than allocating a second set: index a
+   leading dim of 2 instead of maintaining two pointer sets.
+2. **Elastic VRAM/KV rebalance without restart** (`engine/engine.py`,
+   `scheduler/scheduler.py`). Directly relevant operationally: today every
+   MAX_BATCH / MNBT / L step cost a ~100 s reboot, and Bench 20's L-sweep cost
+   five. Worth reading before the next placement sweep.
+3. **The `q*` policy is the same problem shape as our local/remote expert
+   split** -- which Bench 26 measured as a weak lever (2.5-3%), so this is
+   confirmation to keep NOT spending time there, not an invitation to.

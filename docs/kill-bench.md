@@ -2223,3 +2223,41 @@ requires distrusting a reported number.
 pre-grouped baseline, so this is the checkpoint's capability ceiling (15%
 REAP-pruned), not evidence about our changes either way. The evidence about our
 changes is Bench 26's 120-prompt sweep, which found no measurable difference.
+
+## Bench 28 - full matrix on grouped+fp16, and why it needs tiering (2026-08-22)
+
+Config under test: `GROUPED=1 MAX_BATCH=2048 OUT_FP16=1 SB_MNBT=2048 SB_MNS=6`,
+the 430 us/token arm that cleared Bench 26's quality gate.
+
+**First attempt died at 8/24 cells.** One long `matrix_runner` invocation cannot
+finish here. Device USM on the B70s costs host RAM 1:1 (~48.7 GiB for the pair)
+against 59.4 GiB total, leaving ~5 GiB, and an hour of GuideLLM consumed it
+monotonically: 2.9G/1.2G swap at 02:54 -> 0.5G/0.0G at 03:34. At 03:45 server
+and runner were both gone with **no error in either log** -- the server's last
+line is a successful 200 OK. `loginctl enable-linger` was already on, so this
+was memory pressure, not logind.
+
+**Fix: `benchmarks/matrix_tiered.sh`** -- one context tier per server lifetime.
+Proven to work; the reclaim is exact:
+
+```
+07:05:28  tier 1024 done, mem 8.9G
+07:05:32  tier 4096: server stopped -> mem 55.5G   <- accumulation zeroed
+```
+
+Within a tier memory still bleeds (9.0 -> 5.3G over ~35 min at 32K); each tier
+boundary returns it. `--skip-existing` makes a death cost one tier, not the run.
+
+Observed pace, 3 profiles per context (`concurrent` sweeps C=1..6 internally):
+~17 min/cell at 16K, ~80 min/cell at 65K. High-context cells dominate.
+
+Note the inversion: memory is *steadier* at high context (7.3-7.8G at 65K vs
+5.3G at 32K). Fewer concurrent requests fit in the 8.38 GiB KV pool, so there is
+less GuideLLM churn -- the cells that stress KV hardest stress host RAM least.
+
+**Resume with the identical command; completed cells are skipped:**
+```bash
+loginctl enable-linger "$USER"       # required, not optional
+./benchmarks/matrix_tiered.sh        # detach with setsid nohup for long runs
+./benchmarks/matrix_progress.sh "$PWD/bench-matrix/jota_r15_c6"
+```

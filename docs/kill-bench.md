@@ -2116,3 +2116,66 @@ logout, NOT crashes: graceful `Process manager: send sigterm to process
 EngineCore`, 1h46m after the last request, no CUDA/SYCL error, no OOM.
 `setsid nohup` does not survive it. Any multi-hour run needs
 `loginctl enable-linger` first, or it dies at logout with partial results.
+
+## Bench 27 - r15 concurrent technical batch + the reasoning-channel trap (2026-08-22)
+
+Six systems-engineering questions (dma-buf/BAR1, CUDA graph capture, fp16
+overflow, MoE read amplification, ASPM link reporting, pinned memory), streamed
+at C=6 on grouped + fp16 wire. Questions chosen because today's work
+established ground truth for each, so answers can be GRADED not eyeballed.
+
+### Serving metrics, C=6 concurrent, streamed
+
+| metric | value |
+|---|---|
+| TTFT | 0.28-0.31 s (mean 0.30) |
+| ITL p50 | 27.25 ms |
+| ITL p99 | 161 ms |
+| per-stream decode | 29-30 tok/s |
+| aggregate throughput | 138.9 tok/s |
+| wall | 17.0 s for 2,363 output tokens |
+
+Against C=1 (ITL 11.40 ms, ~88 tok/s single stream): C=6 buys **1.58x
+aggregate** at **2.4x per-stream ITL**. Concurrency scales, sub-linearly.
+
+### Answer quality, graded against measurements taken today
+
+- **fp16 overflow: correct, and it reproduced our actual bug from first
+  principles.** `3072 x 1e6 = 3.072e9`, `x 8.7e-05 = 267,264 > 65,504` ->
+  Inf, then `Inf - Inf = NaN` in the SwiGLU. That is exactly Bench 25's fault.
+  Its proposed fix (clamp before store) is inferior to ours (widen the store):
+  clamping preserves the overflow as a saturated value, silently wrong. It does
+  flag that the alternative changes numerics.
+- **MoE read amplification: exact.** Derived `2560/85 = 30.1x`. Our own probe
+  printed `amplification: 30.1x`.
+- **CUDA graph capture: weak.** Hedged ("may not be fully deterministic") and
+  padded its remedy list. The real constraint is that capture forbids
+  operations requiring host synchronisation; `cudaMemcpyAsync` from PINNED
+  memory is capturable.
+
+### The trap: thinking cannot be turned off here
+
+`chat_template_kwargs` accepts neither `{"thinking": false}` nor
+`{"enable_thinking": false}` -- reasoning is emitted regardless:
+
+| request | finish | reasoning | content |
+|---|---|---|---|
+| no kwarg, 500 tok | length | 1,682 | **0** |
+| `thinking=False`, 500 | length | 1,657 | **0** |
+| `enable_thinking=False`, 500 | length | 1,756 | **0** |
+| `enable_thinking=False`, 1200 | **stop** | 2,154 | **0** |
+| `thinking=False`, 1600 | length | 5,244 | **0** |
+
+For some prompts the model reasons and then **ends its turn without answering**
+(`finish=stop`, content empty). Deterministic, 4/4 on the ASPM prompt.
+
+Consequences for benchmarking:
+- Timing metrics stay VALID. Reasoning tokens are output tokens, so TTFT, ITL
+  and throughput measure real work either way.
+- "Did it answer" is NOT valid on `/v1/chat/completions` at small output caps.
+- `/v1/completions` bypasses the reasoning channel entirely and is the right
+  endpoint for any measurement that inspects text. Bench 26's 120-prompt
+  quality sweep used it, so that result is unaffected.
+- A bare `Q:/A:` completion prompt makes this checkpoint hallucinate
+  multiple-choice scaffolding (`B: ... C: ... Answer: A`, `\boxed{A}`) -- an
+  artefact of MCQ tuning, not a regression. Use the chat template for prose.

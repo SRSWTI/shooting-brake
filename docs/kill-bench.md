@@ -2179,3 +2179,47 @@ Consequences for benchmarking:
 - A bare `Q:/A:` completion prompt makes this checkpoint hallucinate
   multiple-choice scaffolding (`B: ... C: ... Answer: A`, `\boxed{A}`) -- an
   artefact of MCQ tuning, not a regression. Use the chat template for prose.
+
+### Bench 27b - the fix for the reasoning channel (2026-08-22)
+
+`chat_template_kwargs` cannot disable thinking on this deployment (Bench 27).
+What works: render the chat template yourself and hand the model an **already
+closed** thinking block. `poolside_v1` keys on `</think>`, so a pre-closed pair
+leaves no reasoning channel to spend the budget in.
+
+```python
+s = tok.apply_chat_template([{"role": "user", "content": q}],
+                            tokenize=False, add_generation_prompt=True)
+prompt = s + "<think>\n\n</think>\n\n"      # then POST /v1/completions
+```
+
+4/4 answered, including the ASPM prompt that was deterministically empty 4/4
+before. It is also strictly faster, because no tokens are spent reasoning:
+
+| | TTFT | ITL p50 | ITL p99 | tok/s/stream | aggregate |
+|---|---|---|---|---|---|
+| C=4, forced non-thinking | 0.29-0.32 s | **18.55 ms** | 118.9 ms | **44.1** | **170.5 tok/s** |
+| C=6, reasoning on | 0.30 s | 27.25 ms | 161 ms | 29.9 | 138.9 tok/s |
+| C=1 | 0.03 s | 11.40 ms | 13.2 ms | ~88 | - |
+
+ITL scales 11.40 -> 18.55 -> 27.25 ms across C=1/4/6: sub-linear, so
+concurrency buys aggregate throughput.
+
+### Answer quality, graded (not an A/B -- see caveat)
+
+Correct: fp16 Inf-minus-Inf NaN derived from first principles with our exact
+arithmetic; MoE read amplification `2560/85 = 30.1x` matching our probe; the
+tile-scheduler question (dynamic atomic dequeue of tiles, not whole GEMMs).
+
+Wrong: **ASPM.** The model accepts sysfs's 2.5 GT/s as real and invents
+compression/caching to explain 6.4 GB/s. The real answer -- measured here today
+-- is that ASPM downtrains the link at idle so sysfs reports the IDLE state,
+and it upshifts under load. Weak: CUDA graph capture (hedged, padded remedies).
+
+Pattern: strong where clean arithmetic decides it, weak where the answer
+requires distrusting a reported number.
+
+**Caveat, stated plainly:** these six prompts were NOT run against the
+pre-grouped baseline, so this is the checkpoint's capability ceiling (15%
+REAP-pruned), not evidence about our changes either way. The evidence about our
+changes is Bench 26's 120-prompt sweep, which found no measurable difference.

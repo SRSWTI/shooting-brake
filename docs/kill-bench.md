@@ -2063,3 +2063,56 @@ Route sorting in the provider (histogram/prefix/scatter, gather in, scatter
 out, alpha on the way back), provider integration behind a flag, `.so` rebuild,
 then a real before/after boot. Nothing is wired into the serving path yet, so
 the server today behaves exactly as it did this morning.
+
+## Bench 26 - r15 grouped + fp16 wire: full acceptance gate (2026-08-22)
+
+Run before committing a long benchmark matrix to this config. Every row is
+measured on the live server, not projected.
+
+| check | result | reference | verdict |
+|---|---|---|---|
+| correctness gate | correct greedy tokens, finite logprobs | - | PASS |
+| output quality, 120-prompt argmax | 108/120 and 106/120 vs baseline | control (baseline vs itself) 109/120 | INDISTINGUISHABLE |
+| prefill, aggregate 1K-32K | 430 us/token | 1,705 this morning | 3.97x |
+| decode ITL p50, C=1 | 11.40 ms (3 runs: 11.52/11.38/11.40) | 11.1-11.2 ms | +2.2%, inside noise |
+| ITL p99, C=4 @ 8K | 852 ms | 872 ms at the shipped MNBT=512 | EQUAL |
+| prefix cache | 5-178x warm speedup | - | works |
+| KV pool | 8.38 GiB | 10.51 GiB at MNBT=512 | -20%, the MNBT trade |
+
+**The MNBT=512 -> 2048 trade came out free.** Bench 21 shipped 512 because 2048
+gave a 3,440 ms p99 ITL stall. That stall is `MNBT x prefill us/token`, and
+prefill is now 4x cheaper, so the 4x bigger chunk costs the same tail it used
+to: 852 vs 872 ms. Predicted 881, measured 852 -- 3%.
+
+**Decode is structurally untouchable by this work** and the measurement agrees:
+`use_split = M <= 32` keeps M=1 on the old per-route GEMV. First sample read
+12.46 ms and would have been reported as a +12% regression; it was a cold first
+run (ttft 226 ms vs 29 ms warm). Three samples killed it. Fourth time today a
+single measurement lied.
+
+### The finding that outlives the speedup
+
+**This rig has never been reproducible, and nobody had measured that.** The
+PRE-EXISTING per-route GEMV path flips argmax on **9% of prompts run twice**
+(109/120 agreement with itself), and its 3-pass top-1 logprob spread (0.339
+nats) is WIDER than the grouped path's (0.277).
+
+Consequences, which are permanent:
+- No prefill change here can be validated by exact output comparison. The only
+  valid instrument is many independent single-forward-pass prompts with the
+  reference compared against ITSELF as the ceiling.
+- Two quality instruments were built and thrown away first: greedy agreement
+  over 24 tokens (invalid -- one flip changes every later token; read 57% and
+  looked catastrophic while `count` was 24/24 at delta 0.006), and a 6-prompt
+  top-1 delta (underpowered -- the baseline's own spread was the same size as
+  the effect).
+- Benchmark matrices on this box will not produce bit-identical reruns. Treat
+  per-cell deltas under ~10% argmax / ~0.13 nats as noise.
+
+### Operational note that cost two servers today
+
+Both server deaths today were `logind` reaping user processes on session
+logout, NOT crashes: graceful `Process manager: send sigterm to process
+EngineCore`, 1h46m after the last request, no CUDA/SYCL error, no OOM.
+`setsid nohup` does not survive it. Any multi-hour run needs
+`loginctl enable-linger` first, or it dies at logout with partial results.

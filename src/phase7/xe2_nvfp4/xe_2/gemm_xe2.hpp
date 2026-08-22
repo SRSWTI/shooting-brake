@@ -333,7 +333,7 @@ CUTE_DEVICE void xe_gemm_4bits(
   auto pAgA = thr_prefetch_A.partition_S(gA);
   auto pBgB = thr_prefetch_B.partition_S(gB);
 
-  const int prefetch_dist = 6;
+  const int prefetch_dist = 1;  // measured: 1 beats Intel's 6 by 15.7% at tile_k=16
 
   constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
 

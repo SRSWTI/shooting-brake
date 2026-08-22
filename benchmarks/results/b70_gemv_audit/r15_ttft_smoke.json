@@ -100,5 +100,56 @@
     ],
     "aggregate_us_per_token": 429.6127108739246,
     "aggregate_speedup": 3.9686907692550895
+  },
+  {
+    "label": "prefetch1",
+    "recorded_at": "2026-08-22T15:51:15",
+    "baseline_us_per_token": 1705.0,
+    "gate": {
+      "ok": true,
+      "status": 200,
+      "text": "60, 61, 62, ",
+      "logprobs_finite": true
+    },
+    "cells": [
+      {
+        "context": 1024,
+        "prompt_tokens": 1025,
+        "cold_s": 0.5011100380070275,
+        "warm_s": 0.062415245003649034,
+        "us_per_token": 488.88784195807557,
+        "vs_baseline": 3.487507468320744,
+        "warm_speedup": 8.028648096754738
+      },
+      {
+        "context": 8192,
+        "prompt_tokens": 8192,
+        "cold_s": 3.2229662079917034,
+        "warm_s": 0.08987845099181868,
+        "us_per_token": 393.42849218648723,
+        "vs_baseline": 4.333697314407572,
+        "warm_speedup": 35.85916504374423
+      },
+      {
+        "context": 16384,
+        "prompt_tokens": 16383,
+        "cold_s": 6.512102690001484,
+        "warm_s": 0.10481144199729897,
+        "us_per_token": 397.49146615403066,
+        "vs_baseline": 4.289400264355112,
+        "warm_speedup": 62.13160095793075
+      },
+      {
+        "context": 32768,
+        "prompt_tokens": 32769,
+        "cold_s": 13.441110824001953,
+        "warm_s": 0.05641495199233759,
+        "us_per_token": 410.1776320303321,
+        "vs_baseline": 4.156735684392262,
+        "warm_speedup": 238.254405070265
+      }
+    ],
+    "aggregate_us_per_token": 405.64837088184083,
+    "aggregate_speedup": 4.203147657892703
   }
 ]

@@ -2354,3 +2354,28 @@ weights are input-independent; see Bench 29 for why ours cannot be.
 3. **The `q*` policy is the same problem shape as our local/remote expert
    split** -- which Bench 26 measured as a weak lever (2.5-3%), so this is
    confirmation to keep NOT spending time there, not an invitation to.
+
+### Bench 28b - `--skip-existing` is config-blind (2026-08-22)
+
+The tiered matrix resumed over 8 cells banked by the first, dead attempt. Those
+cells were verified to be the same config two ways, because the obvious way does
+not work:
+
+- `serve_jota_r15_dual.sh` **exports** its knobs rather than echoing them, so
+  the server log cannot tell you what config produced a result. Proving it
+  needed a live `/proc/<pid>/environ` snapshot.
+- Independent confirmation from the data itself: TTFT is config-diagnostic. The
+  earliest cell (ctx 1024, C=1, written 02:35) reads **0.469 s**, against
+  measured references of 1.766 s pre-grouped, 0.630 s grouped-fp32-wire, and
+  0.506 s grouped-fp16-wire. Unambiguous.
+
+**The trap, for the next run:** `--skip-existing` keys on the output path only.
+It has no idea which build or which flags produced a cell. Reuse the same
+`--output-root` after a config change -- e.g. benchmarking Bench 29's pipelining
+against this surface -- and it will skip all 24 cells and compare nothing, or
+half-fill a root and present two configs as one result set. That reads as a
+partial regression and is indistinguishable from a real one.
+
+Rule: **one `--output-root` per config.** Name it after the arm
+(`jota_r15_c6` = grouped + fp16 wire + MAX_BATCH 2048 + MNBT 512->2048). A new
+arm gets a new root, and the two are diffed afterwards rather than merged.

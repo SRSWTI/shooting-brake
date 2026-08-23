@@ -440,3 +440,73 @@ So the level-up lands Shooting Brake within roughly **2x of a single RTX PRO
 96 GiB datacenter part that holds the entire model in one address space. That is
 the number worth chasing, and long context is where this architecture is
 structurally strongest. Decode is already at parity there.
+
+---
+
+## 9. FP8 wire: screened, and it is DOMINATED (2026-08-23)
+
+`benchmarks/fp8_wire_numerics.py`, real NVFP4 weights from layer 3, activations
+drawn at the amax the checkpoint itself calibrated (`input_global_scale=2064`
+-> amax 1.302). Dequant verified before trusting any number: weight std
+**0.03024**, plausible for a trained MLP; the script aborts if it is not.
+
+| wire | rel L2 | vs the bf16 leg already in production |
+|---|---:|---:|
+| bf16 activations (today's H2D, unquestioned) | 2.30e-3 | 1x |
+| fp16 partial (today's D2H, gated Bench 26) | 2.07e-4 | 0.09x |
+| FP8 partial, per-token | 2.65e-2 | **11.5x** |
+| FP8 partial, per-block 16 | 2.23e-2 | 9.7x |
+| FP8 both legs | 4.51e-2 | 19.6x |
+
+### Three things this settles
+
+**1. Block granularity does not rescue it.** Per-token 2.65e-2 -> block-16
+2.23e-2 is a **16% improvement for 16x the scale bytes** (block 16 over hidden
+3072 = 768 B of scales on a 3072 B payload, +25%). I predicted finer blocks
+would fix this by analogy with `w4a8_nvfp4`'s near-lossless per-32-block
+activation quant. Wrong, and for an identifiable reason: block scaling fixes
+*dynamic range*, and this error is *mantissa* -- E4M3 has 3 bits, ~6% per
+element, and no amount of rescaling adds bits. Ninth wrong mechanism story,
+same pattern.
+
+**2. The independent-per-card-scale worry was unfounded.** Shared scale and
+independent scales are **identical** at 2.45e-2, and cancellation amplification
+is only **1.22x**. I flagged this as the trap that would make me ship a bug by
+gating a partial in isolation. It is not a trap. Risk retired by measurement.
+
+**3. Input is the worse direction, as predicted.** f8in 3.66e-2 with 30% max
+relative error, against f8out 2.65e-2 and 5.9%. Input propagates through both
+GEMMs and the SwiGLU; output is rounded once.
+
+### Why FP8 is dominated -- the arithmetic that matters
+
+Pipelining's ceiling is `max(transfer, compute)` per dispatch (one CCS, one BCS,
+§1). Transfer and compute are now **balanced**: 175 vs ~165 us/token. So:
+
+| config | serial | pipelined `max()+other` | vs today |
+|---|---:|---:|---:|
+| today | 175 + 165 + 64 = 404 | -- | 1.00x |
+| + pipelining only | -- | 175 + 64 = **239** | **1.69x** |
+| + FP8 out + pipelining | -- | 165 + 64 = 229 | 1.76x |
+| + FP8 both + pipelining | -- | 165 + 64 = 229 | 1.76x |
+
+**FP8 buys 4% on top of pipelining, for 11x the numerical error of the bf16 leg
+already in production.** And FP8-both is worth exactly the same as FP8-out,
+because both land under the compute floor -- so the riskier input leg buys
+literally nothing.
+
+The ordering assumption I wrote in §2.2 was correct *when I wrote it* (transfer
+262 vs compute 187) and is now stale: fp16 + prefetch cut transfer to 175 and
+compute to 165, and once the two terms are within 6% of each other, `max()`
+already captures almost the entire win. **FP8 was only ever valuable as a
+prerequisite. Pipelining removed the need for it.**
+
+### Verdict
+
+**Do not build the FP8 wire.** Not rejected on quality -- it may well pass a
+120-prompt sweep -- rejected because it is worth 4% and pipelining is worth 69%.
+Revisit only if pipelining lands and compute becomes the wall by a wide margin,
+at which point cutting bytes below compute is again worth something.
+
+Screen retained as `benchmarks/fp8_wire_numerics.py`; data in
+`benchmarks/results/b70_gemv_audit/fp8_wire_numerics.json`.

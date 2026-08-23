@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import zlib
 import json
 import os
 import subprocess
@@ -202,6 +203,17 @@ def _guidellm_repo_root(script_path: Path) -> Path:
     return script_path.resolve().parents[1]
 
 
+def _cell_seed(config: "RunConfig", profile: str, context_len: int) -> int:
+    """Distinct synthetic prompts per cell, deterministically.
+
+    zlib.crc32 rather than hash(): PYTHONHASHSEED randomises str hashing per
+    process, which would make a --skip-existing resume generate different
+    prompts for a cell than the original run did.
+    """
+    key = f"{config.random_seed}|{profile}|{context_len}|{config.output_tokens}"
+    return zlib.crc32(key.encode()) & 0x7FFF_FFFF
+
+
 def _guidellm_command(
     repo_root: Path,
     config: RunConfig,
@@ -247,7 +259,15 @@ def _guidellm_command(
             f"prompt_tokens={context_len},"
             f"output_tokens={config.output_tokens}"
         ),
-        "--seed", f"kind=static,value={config.random_seed}",
+        # Per-CELL seed, not per-run. GuideLLM restarts its synthetic generator
+        # in every subprocess, so a constant seed makes cell N's sample K
+        # byte-identical to cell M's sample K -- and with prefix caching on, every
+        # cell after the first measures a cache HIT instead of prefill. Measured
+        # 2026-08-22: ctx_1024/C=1 read TTFT min 63 / median 89 / max 126 ms on a
+        # 1,066-token prompt whose cold cost is ~430 ms. The whole 24-cell grid's
+        # TTFT column was warm-path. bench_88b.py:cell_seed already guarded this;
+        # matrix_runner did not.
+        "--seed", f"kind=static,value={_cell_seed(config, profile, context_len)}",
     ]
 
     # Per-profile load shape. concurrent runs each rate as a fixed

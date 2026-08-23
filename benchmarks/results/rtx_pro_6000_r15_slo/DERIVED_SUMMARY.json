@@ -1,0 +1,142 @@
+{
+  "recorded_at": "2026-08-23",
+  "source": "https://huggingface.co/srswti/axe-superveloce-jota-118b-r15-nvfp4/tree/main/benchmark_slo",
+  "reference_rig": {
+    "gpu": "1x NVIDIA RTX PRO 6000 Blackwell (SM120, 96 GiB)",
+    "tp": 1,
+    "model": "srswti/axe-superveloce-jota-118b-r15-nvfp4",
+    "vllm": "0.27.1",
+    "max_model_len": 160000,
+    "max_num_seqs": 6,
+    "gpu_memory_utilization": 0.9,
+    "prefix_caching": "disabled (--no-enable-prefix-caching, server-side)",
+    "harness": "guidellm, 512 output tokens, 60s/100req/3err per strategy"
+  },
+  "strategies": 134,
+  "errored_strategies": 0,
+  "synchronous_c1": [
+    {
+      "ctx": "1k",
+      "ptok": 1066.0,
+      "otok": 512.0,
+      "ttft": 67.9924488067627,
+      "itl": 7.016202941566064,
+      "itl_p99": 7.020606453404734,
+      "otps": 140.24446849726837,
+      "prefill_us_per_token": 63.8
+    },
+    {
+      "ctx": "4k",
+      "ptok": 4138.0,
+      "otok": 512.0,
+      "ttft": 188.57383728027344,
+      "itl": 7.11701994072901,
+      "itl_p99": 7.120371798013288,
+      "otps": 134.21550872559206,
+      "prefill_us_per_token": 45.6
+    },
+    {
+      "ctx": "8k",
+      "ptok": 8234.0,
+      "otok": 512.0,
+      "ttft": 415.4822826385498,
+      "itl": 7.2501326260501395,
+      "itl_p99": 7.253177478588724,
+      "otps": 125.0734569528867,
+      "prefill_us_per_token": 50.5
+    },
+    {
+      "ctx": "16k",
+      "ptok": 16426.0,
+      "otok": 512.0,
+      "ttft": 946.8166828155518,
+      "itl": 7.520094776340193,
+      "itl_p99": 7.527604728295612,
+      "otps": 108.52267579092077,
+      "prefill_us_per_token": 57.6
+    },
+    {
+      "ctx": "32k",
+      "ptok": 32810.0,
+      "otok": 512.0,
+      "ttft": 2336.108446121216,
+      "itl": 8.033589607582167,
+      "itl_p99": 8.040192075904802,
+      "otps": 82.81561698085166,
+      "prefill_us_per_token": 71.2
+    },
+    {
+      "ctx": "64k",
+      "ptok": 65578.0,
+      "otok": 512.0,
+      "ttft": 6255.934476852417,
+      "itl": 9.046368869550074,
+      "itl_p99": 9.053938076220847,
+      "otps": 53.11675797871722,
+      "prefill_us_per_token": 95.4
+    },
+    {
+      "ctx": "96k",
+      "ptok": 98346.0,
+      "otok": 512.0,
+      "ttft": 11911.006689071655,
+      "itl": 10.112478775054274,
+      "itl_p99": 10.112552960091607,
+      "otps": 39.04489835685574,
+      "prefill_us_per_token": 121.1
+    },
+    {
+      "ctx": "127k",
+      "ptok": 130090.0,
+      "otok": 512.0,
+      "ttft": 18929.21209335327,
+      "itl": 11.098536026687771,
+      "itl_p99": 11.132424591572084,
+      "otps": 33.727620167596214,
+      "prefill_us_per_token": 145.5
+    }
+  ],
+  "concurrent_peak_output_tok_s": {
+    "1k": 304.2,
+    "4k": 268.8,
+    "8k": 231.3,
+    "16k": 169.9,
+    "32k": 115.7,
+    "64k": 61.1,
+    "96k": 39.6,
+    "127k": 37.1
+  },
+  "shooting_brake_comparison": {
+    "sb_prefill_us_per_token": {
+      "8k": 406,
+      "32k": 421,
+      "64k": 446,
+      "127k": 494,
+      "provenance": "benchmarks/results/b70_gemv_audit/ (cold512 matrix, per-cell seeds, f150f17d)"
+    },
+    "sb_decode_itl_ms": {
+      "value": 11.4,
+      "provenance": "b70_itl_probe n=4 C=1, 3 runs; flatness 1K-30K from b70_matrix_probe"
+    },
+    "prefill_ratio_sb_over_ref": {
+      "8k": 8.0,
+      "32k": 5.9,
+      "64k": 4.7,
+      "127k": 3.4
+    },
+    "decode_ratio_sb_over_ref": {
+      "1k": 1.62,
+      "32k": 1.42,
+      "96k": 1.13,
+      "127k": 1.03
+    }
+  },
+  "findings": [
+    "Reference prefill is attention-bound and superlinear: 50.5 -> 145.5 us/token from 8K to 127K (2.9x).",
+    "Shooting Brake prefill is transport-bound and nearly flat: 406 -> 494 us/token over the same range (1.2x).",
+    "Therefore the prefill gap HALVES with context: 8.0x at 8K -> 3.4x at 127K.",
+    "Reference decode ITL grows with KV: 7.02 -> 11.10 ms. Shooting Brake decode is context-independent (fixed 211 us/layer inter-dispatch gap), flat at 11.40 ms.",
+    "Therefore decode reaches PARITY at 127K: 11.10 vs 11.40 ms = 1.03x.",
+    "Reference concurrency peaks at C=4 and degrades past it; at 96K/127K only C=1-2 admit."
+  ]
+}

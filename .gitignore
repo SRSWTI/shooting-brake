@@ -43,3 +43,7 @@ benchmarks/matrix/**/*.html
 # --- editor / OS ------------------------------------------------------------
 .DS_Store
 *.swp
+
+# 154 MB of guidellm results.json from the RTX PRO 6000 reference run; CSVs +
+# DERIVED_SUMMARY.json are tracked, raw JSONs are re-downloadable from HF.
+benchmarks/results/rtx_pro_6000_r15_slo/**/results.json

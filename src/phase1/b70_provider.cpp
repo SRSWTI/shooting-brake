@@ -37,18 +37,6 @@
 namespace shooting_brake::phase1 {
 namespace {
 
-// 8-bit result-wire prototype (SHOOTING_BRAKE_B70_WIRE_FP8=1). Requires
-// OUT_FP16=1 -- it packs [M*H u8][M f32 scales] into the fp16 staging, which
-// is exactly big enough. Read once; a mid-run env change must not desync the
-// producer and consumer halves of the wire.
-inline bool wire_fp8() {
-  static const bool enabled = [] {
-    const char* v = std::getenv("SHOOTING_BRAKE_B70_WIRE_FP8");
-    return v != nullptr && v[0] == '1' && v[1] == '\0';
-  }();
-  return enabled;
-}
-
 // Expert-bank geometry is adopted at load time. The NVFP4 and int4 banks
 // describe different source expert counts and resident layouts. The NVFP4
 // expert-ID domain has a fixed upper bound; routing row width is runtime
@@ -1623,32 +1611,7 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
               static_cast<int>(g_hidden), static_cast<int>(g_intermediate),
               16);
           if (pipelined && grouped_done) {
-            if (wire_fp8()) {
-              // 8-bit wire prototype: per-token scale + byte payload packed
-              // into the fp16 staging ([M*H u8][M f32 scales] fits in 2*M*H).
-              // Speed is byte-exact for any 8-bit format; e4m3 encode lands
-              // with the serving integration.
-              const float* src = impl_->output + r0 * g_hidden;
-              auto* base = reinterpret_cast<std::uint8_t*>(impl_->out16);
-              std::uint8_t* dst = base + r0 * g_hidden;
-              float* scl =
-                  reinterpret_cast<float*>(base + M * g_hidden) + r0;
-              const std::size_t hh = g_hidden;
-              impl_->queue->parallel_for(
-                  sycl::range<1>(mc), [=](sycl::id<1> i) {
-                    const float* x = src + i[0] * hh;
-                    float amax = 0.0f;
-                    for (std::size_t j = 0; j < hh; ++j)
-                      amax = sycl::fmax(amax, sycl::fabs(x[j]));
-                    const float s = sycl::fmax(amax / 127.0f, 1e-30f);
-                    const float inv = 1.0f / s;
-                    std::uint8_t* d = dst + i[0] * hh;
-                    for (std::size_t j = 0; j < hh; ++j)
-                      d[j] = static_cast<std::uint8_t>(
-                          sycl::clamp(x[j] * inv + 128.0f, 0.0f, 255.0f));
-                    scl[i[0]] = s;
-                  });
-            } else if (impl_->out_fp16) {
+            if (impl_->out_fp16) {
               // Narrow this chunk's rows now so its D2H can leave the card
               // while the next chunk computes.
               const std::size_t n = mc * g_hidden;
@@ -1711,15 +1674,7 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
         const std::size_t r0 = c * pl_rows;
         const std::size_t mc = std::min(pl_rows, M - r0);
         impl_->copy_queue->ext_oneapi_submit_barrier({pl_mark[c]});
-        if (wire_fp8()) {
-          auto* dbase = reinterpret_cast<std::uint8_t*>(impl_->out16);
-          auto* hbase = reinterpret_cast<std::uint8_t*>(impl_->copyout_staging16);
-          impl_->copy_queue->memcpy(hbase + r0 * g_hidden,
-                                    dbase + r0 * g_hidden, mc * g_hidden);
-          impl_->copy_out.emplace(impl_->copy_queue->memcpy(
-              hbase + M * g_hidden + r0 * sizeof(float),
-              dbase + M * g_hidden + r0 * sizeof(float), mc * sizeof(float)));
-        } else if (impl_->out_fp16) {
+        if (impl_->out_fp16) {
           impl_->copy_out.emplace(impl_->copy_queue->memcpy(
               impl_->copyout_staging16 + r0 * g_hidden,
               impl_->out16 + r0 * g_hidden,
@@ -1730,28 +1685,6 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
               impl_->output + r0 * g_hidden, mc * g_hidden * sizeof(float)));
         }
       }
-    } else if (wire_fp8()) {
-      const float* src = impl_->output;
-      auto* base = reinterpret_cast<std::uint8_t*>(impl_->out16);
-      float* scl = reinterpret_cast<float*>(base + M * g_hidden);
-      const std::size_t hh = g_hidden;
-      std::uint8_t* dst = base;
-      impl_->queue->parallel_for(sycl::range<1>(M), [=](sycl::id<1> i) {
-        const float* x = src + i[0] * hh;
-        float amax = 0.0f;
-        for (std::size_t j = 0; j < hh; ++j)
-          amax = sycl::fmax(amax, sycl::fabs(x[j]));
-        const float s = sycl::fmax(amax / 127.0f, 1e-30f);
-        const float inv = 1.0f / s;
-        std::uint8_t* d = dst + i[0] * hh;
-        for (std::size_t j = 0; j < hh; ++j)
-          d[j] = static_cast<std::uint8_t>(
-              sycl::clamp(x[j] * inv + 128.0f, 0.0f, 255.0f));
-        scl[i[0]] = s;
-      });
-      impl_->copy_out.emplace(impl_->queue->memcpy(
-          impl_->copyout_staging16, impl_->out16,
-          M * g_hidden + M * sizeof(float)));
     } else if (impl_->out_fp16) {
       // Narrow on the device. Widening on the host instead would put ~4 ms of
       // CPU conversion on take()'s critical path and hand the PCIe saving
@@ -1927,10 +1860,8 @@ ProviderStatus B70Provider::take(const std::uint64_t generation,
                 impl_->out_fp16
                     ? static_cast<const void*>(impl_->copyout_staging16)
                     : static_cast<const void*>(impl_->copyout_staging),
-                wire_fp8()
-                    ? required_elements + impl_->pending_M * sizeof(float)
-                    : required_elements * (impl_->out_fp16 ? sizeof(sycl::half)
-                                                           : sizeof(float)));
+                required_elements *
+                    (impl_->out_fp16 ? sizeof(sycl::half) : sizeof(float)));
     return ProviderStatus::ok;
   } catch (...) {
     try {

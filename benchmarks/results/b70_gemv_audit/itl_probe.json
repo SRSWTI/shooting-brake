@@ -595,5 +595,40 @@
    "active_median": 2800,
    "idle_fraction": 0.008
   }
+ },
+ {
+  "label": "dec-A-nospec",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r15",
+  "n": 3,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 12.123359421550013,
+  "ttft_s_mean_excl_first": 0.062040358505328186,
+  "requests": [
+   {
+    "ttft_s": 0.24842295600683428,
+    "itl_ms": 11.912371552898549,
+    "chunks": 256
+   },
+   {
+    "ttft_s": 0.06336429101065733,
+    "itl_ms": 11.744667941136012,
+    "chunks": 256
+   },
+   {
+    "ttft_s": 0.060716425999999046,
+    "itl_ms": 12.502050901964015,
+    "chunks": 256
+   }
+  ],
+  "act_freq": {
+   "/sys/class/drm/card3/device/tile0/gt0/freq0/act_freq": {
+    "samples": 1889,
+    "active_min": 1450,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.012
+   }
+  }
  }
 ]

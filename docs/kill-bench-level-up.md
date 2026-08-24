@@ -679,3 +679,34 @@ microsecond off our flat line moves the crossover left: 10.1 ms beats them at
 
 Dead, replicated in recon: suffix (missing dep), MTP (no tensors), more local
 experts, grouped-at-M=1, FP8 KV, overlap scheduler (core-loop surgery).
+
+## 15. Decode session 1: gap decomposed, spec decode triaged (2026-08-24)
+
+**Gap probe (the decisive number):** decode gap is 146-150 us/layer and
+UNIFORM across layer types (full_attention 145.6/150.7 vs sliding 146.4/149.0
+us). Attention compute contributes nothing measurable at M=1: the gap is 100%
+orchestration (piecewise graph replay + doorbell handshake + glue), ~6.9 ms of
+the 12.1 ms ITL. B70 service sum: 3.2-3.3 ms.
+
+**Spec decode ladder (512 out, prefix-disjoint, TPOT; ptok = measured):**
+
+| arm | ~1.4K | ~13K | ~24K | ~37-60K | ~104-107K | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| baseline PIPELINE=2 | 12.3 | 12.7 | ~12.7 | 13.2-14.2 | ~14 | flat, uniform |
+| ngram k=4 (CPU) | **8.59** | 17.2 | **10.1** | 18.5 | 24.8 | wins short, CPU lookup scales with prompt, loses long |
+| ngram_gpu k=4 | 21.0 | 14.2 | 11.6 | 20.3-26.5 | 30.6 | worse everywhere -- dead |
+| dflash k=15 | 43.8 | 47.2 | 49.7 | 62.0 | 75.5 | **0/7,665 accepted** -- drafter trained on unpruned Laguna-S-2.1, dead on REAP-pruned r15 without a finetuned drafter |
+
+ngram greedy text diverged from the no-spec reference on one prompt -- within
+this rig's measured 9% run-to-run argmax flip rate, but any adoption requires
+the 120-prompt sweep (Bench 26 instrument). dflash also cost 4.7 GiB of KV
+(drafter on the 5090): MML capped at ~62K at util 0.85.
+
+**The lever that survives triage: FULL-graph decode capture** (SGLang's
+default: one host submission per token vs our 47 piecewise replays). The gap
+probe says ~6.9 ms is attackable; success lands flat ITL at ~5-7 ms --
+below the RTX PRO 6000 at EVERY context (their 7.02 @1K -> 11.10 @127K).
+ngram k=4 could stack on top for short-context agentic loops, gated on the
+sweep. Next session: FULL capture experiment.
+
+Matrix state: paused at 16/24 cells; resume with the same MATRIX_ROOT command.

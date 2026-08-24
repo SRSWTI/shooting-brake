@@ -710,3 +710,20 @@ ngram k=4 could stack on top for short-context agentic loops, gated on the
 sweep. Next session: FULL capture experiment.
 
 Matrix state: paused at 16/24 cells; resume with the same MATRIX_ROOT command.
+
+## 16. FULL-graph decode: tried, did not deliver on vLLM 0.27.1 (2026-08-24)
+
+`--compilation-config {"cudagraph_mode":"FULL_AND_PIECEWISE"}` boots clean
+(the plugin's force-PIECEWISE patch requires VLLM_USE_BREAKABLE_CUDAGRAPH=1,
+which the r15 script unsets). Measured: ITL 11.89 ms vs 12.12 baseline
+(inside boot noise), gap 143 vs 146-150 us -- no material change. The 146 us
+orchestration floor is NOT per-segment replay overhead vLLM's FULL mode can
+remove on this stack/version; either the hybrid attention backends downgraded
+the mode or the gap lives in the scheduler/doorbell glue itself.
+
+Decode standings after session 1: baseline 12.1 ms flat; ngram k=4 8.6 ms at
+short ctx (workload flag, quality sweep owed); everything else triaged dead.
+Remaining decode levers, in order: (a) decompose the 143 us further with a
+torch-profiler capture correlated to the doorbell trace -- scheduler glue vs
+replay vs handshake; (b) the 61 us handshake (immediate command lists /
+submission path); (c) ngram behind a workload flag after the 120-prompt sweep.

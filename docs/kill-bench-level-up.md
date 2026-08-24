@@ -510,3 +510,28 @@ at which point cutting bytes below compute is again worth something.
 
 Screen retained as `benchmarks/fp8_wire_numerics.py`; data in
 `benchmarks/results/b70_gemv_audit/fp8_wire_numerics.json`.
+
+---
+
+## 10. Pipelining Phase 1: per-chunk plumbing, gated bit-identical (2026-08-23)
+
+`SHOOTING_BRAKE_B70_PIPELINE=<nchunks>` (default 1). Route-scaled scratch pooled
+with a leading `[nchunks]`; chunk loop still sequential on the one in-order
+queue. Gate: `benchmarks/pipeline_identity_gate.py` -- 15 cells (3 layers x
+M 1/7/33/256/2048), old .so twice for the envelope, new .so at flag unset/1/4.
+
+- **M=2048 (production tile): bitwise identical** across builds, flags, runs --
+  including nchunks=4 sequential.
+- M=256: stable NaN masks identical old-vs-new byte-for-byte; run-to-run
+  low-bit atomic drift (~1e-16 rel) pre-exists in the baseline.
+- nchunks=4 at M=256 drifts <= 1e-9 abs: per-token contribution ORDER changes
+  with chunk composition -- same non-associativity class the baseline already
+  exhibits run-to-run. Rows stay disjoint; the sums have the same terms.
+
+**Open finding (pre-existing, NOT this change):** raw `issue`/`take` at M<=33
+returns unstable garbage (NaNs, 1e38s, varying run-to-run) in the COMMITTED
+build -- A1-vs-A2 shows it with zero new code involved. Grouped cells are clean;
+split/fused small-M cells are not. Production is insulated: decode rides the
+poller ring, prefill chunks are >=256. Repro: the gate harness against
+/tmp/sb_old.so. Investigate before any new consumer uses raw issue/take at
+small M.

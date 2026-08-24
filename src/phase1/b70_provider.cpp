@@ -453,6 +453,14 @@ struct B70Provider::Impl {
   float* g_slot_w = nullptr;           // [routes] slot -> router weight
   std::int32_t* g_atomic = nullptr;    // grouped GEMM persistent work counter
   bool grouped_ready = false;
+  // Pipelining geometry (SHOOTING_BRAKE_B70_PIPELINE=<nchunks>, default 1).
+  // Phase 1 is plumbing only: chunks run sequentially on the one in-order
+  // queue, and nchunks=1 reproduces the old layout exactly -- chunk 0's view
+  // IS the whole pool at offset zero. The second queue is Phase 2.
+  int pipeline_chunks = 1;
+  std::size_t pl_chunk_M = 0;       // row capacity per chunk
+  std::size_t pl_chunk_routes = 0;  // route capacity per chunk
+  std::size_t pl_experts = 0;       // stride basis for hist/offs/cursor/rows
 
   std::optional<sycl::event> dispatch_begin;
   std::optional<sycl::event> kernel_begin;
@@ -1243,7 +1251,24 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     // for NVFP4 -- the int4 bank has a different record layout and its own
     // kernel, so grouping it is a separate exercise.
     if (grouped_requested() && impl_->bank_format != BankFormat::int4) {
-      const std::size_t routes = config.max_batch * config.top_k;
+      {
+        const char* v = std::getenv("SHOOTING_BRAKE_B70_PIPELINE");
+        long n = (v != nullptr) ? std::strtol(v, nullptr, 10) : 1;
+        if (n < 1) n = 1;
+        if (n > 8) n = 8;
+        impl_->pipeline_chunks = static_cast<int>(n);
+      }
+      const std::size_t nchunks =
+          static_cast<std::size_t>(impl_->pipeline_chunks);
+      impl_->pl_chunk_M = (config.max_batch + nchunks - 1) / nchunks;
+      impl_->pl_chunk_routes = impl_->pl_chunk_M * config.top_k;
+      impl_->pl_experts = resident_experts_per_layer;
+      // Route-scaled scratch is pooled with a leading [nchunks] dimension
+      // (one pool + views, not nchunks pointer sets: a missed pointer is
+      // silent garbage, a missed index is the same bug in one place). Views
+      // scale down with M/nchunks, so the pool total stays flat; only the
+      // tiny expert-indexed arrays and the work counter genuinely duplicate.
+      const std::size_t routes = nchunks * impl_->pl_chunk_routes;
       const std::size_t experts = resident_experts_per_layer;
       impl_->g_act = impl_->allocate_device<sycl::half>(routes * g_hidden);
       impl_->g_mid =
@@ -1253,17 +1278,21 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
       impl_->g_outr = impl_->allocate_device<float>(routes * g_hidden);
       // The mainloop applies bias unconditionally, so a null pointer faults
       // inside the kernel and surfaces as a bare SIGSEGV with no diagnostic.
+      // Biases are constant zeros, read-only, and therefore shared across
+      // chunks rather than pooled.
       impl_->g_bias13 =
           impl_->allocate_device<sycl::half>(experts * 2 * g_intermediate);
       impl_->g_bias2 = impl_->allocate_device<sycl::half>(experts * g_hidden);
-      impl_->g_hist = impl_->allocate_device<std::int32_t>(experts + 1);
-      impl_->g_offs = impl_->allocate_device<std::int32_t>(experts + 1);
-      impl_->g_cursor = impl_->allocate_device<std::int32_t>(experts);
-      impl_->g_rows = impl_->allocate_device<std::int32_t>(experts);
+      impl_->g_hist =
+          impl_->allocate_device<std::int32_t>(nchunks * (experts + 1));
+      impl_->g_offs =
+          impl_->allocate_device<std::int32_t>(nchunks * (experts + 1));
+      impl_->g_cursor = impl_->allocate_device<std::int32_t>(nchunks * experts);
+      impl_->g_rows = impl_->allocate_device<std::int32_t>(nchunks * experts);
       impl_->g_slot_row = impl_->allocate_device<std::int32_t>(routes);
       impl_->g_slot_exp = impl_->allocate_device<std::int32_t>(routes);
       impl_->g_slot_w = impl_->allocate_device<float>(routes);
-      impl_->g_atomic = impl_->allocate_device<std::int32_t>(1);
+      impl_->g_atomic = impl_->allocate_device<std::int32_t>(nchunks);
       impl_->queue
           ->memset(impl_->g_bias13, 0,
                    experts * 2 * g_intermediate * sizeof(sycl::half))
@@ -1477,17 +1506,47 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
       // degrades in speed rather than in correctness.
       bool grouped_done = false;
       if (!use_split && impl_->grouped_ready) {
-        grouped_done = sb::xe2::grouped_moe_nvfp4(
-            *impl_->queue, impl_->hidden, impl_->ids, impl_->weights,
-            layer_w13, layer_s13, layer_w13_global, layer_w2, layer_s2,
-            layer_w2_global, impl_->g_act, impl_->g_mid, impl_->g_gated,
-            impl_->g_outr, impl_->g_bias13, impl_->g_bias2, impl_->g_hist,
-            impl_->g_offs, impl_->g_cursor, impl_->g_rows, impl_->g_slot_row,
-            impl_->g_slot_exp, impl_->g_slot_w, impl_->g_atomic,
-            impl_->output, static_cast<int>(M),
-            static_cast<int>(resident_experts),
-            static_cast<int>(impl_->config.top_k), static_cast<int>(g_hidden),
-            static_cast<int>(g_intermediate), 16);
+        // Chunked by token: each token's top_k routes live entirely inside
+        // its own chunk, so chunks write disjoint output rows and the maths
+        // is unchanged. The kernel zeroes exactly its own [Mc, H] output
+        // window, resets its own scratch, and slot_row is chunk-relative on
+        // a chunk-offset output pointer. Phase 1: sequential, one queue.
+        const std::size_t nchunks =
+            static_cast<std::size_t>(impl_->pipeline_chunks);
+        const std::size_t chunk_rows = (M + nchunks - 1) / nchunks;
+        const std::size_t er = impl_->pl_experts;
+        const std::size_t cr = impl_->pl_chunk_routes;
+        // Views are strided off the load-time expert count; a mismatch here
+        // means the config changed under us -- refuse and take the GEMV.
+        grouped_done = resident_experts == er;
+        for (std::size_t c = 0; c < nchunks && grouped_done; ++c) {
+          const std::size_t r0 = c * chunk_rows;
+          if (r0 >= M) {
+            break;
+          }
+          const std::size_t mc = std::min(chunk_rows, M - r0);
+          grouped_done = sb::xe2::grouped_moe_nvfp4(
+              *impl_->queue, impl_->hidden + r0 * g_hidden,
+              impl_->ids + r0 * impl_->config.top_k,
+              impl_->weights + r0 * impl_->config.top_k, layer_w13, layer_s13,
+              layer_w13_global, layer_w2, layer_s2, layer_w2_global,
+              impl_->g_act + c * cr * g_hidden,
+              impl_->g_mid + c * cr * 2 * g_intermediate,
+              impl_->g_gated + c * cr * g_intermediate,
+              impl_->g_outr + c * cr * g_hidden, impl_->g_bias13,
+              impl_->g_bias2, impl_->g_hist + c * (er + 1),
+              impl_->g_offs + c * (er + 1), impl_->g_cursor + c * er,
+              impl_->g_rows + c * er, impl_->g_slot_row + c * cr,
+              impl_->g_slot_exp + c * cr, impl_->g_slot_w + c * cr,
+              impl_->g_atomic + c, impl_->output + r0 * g_hidden,
+              static_cast<int>(mc), static_cast<int>(resident_experts),
+              static_cast<int>(impl_->config.top_k),
+              static_cast<int>(g_hidden), static_cast<int>(g_intermediate),
+              16);
+        }
+        // A refusal mid-loop falls through to the fused GEMV below, which
+        // fully rewrites output[0, M*H) -- correct after partial chunk
+        // success, merely slower.
       }
       if (grouped_done) {
         // The op wrote impl_->output; nothing further for this layer.

@@ -34,6 +34,13 @@
 #include "quixicore/xpu/ops.hpp"
 #include "quixicore/xpu/runtime.hpp"
 
+// Doorbell 2.0: raw Level-Zero interop for command-streamer waits/writes on
+// the provider's own immediate command list. See issue_cs_chain.
+#include <sycl/ext/oneapi/backend/level_zero.hpp>
+#include <level_zero/ze_api.h>
+#include <level_zero/driver_experimental/zex_cmdlist.h>
+#include <level_zero/driver_experimental/zex_common.h>
+
 namespace shooting_brake::phase1 {
 namespace {
 
@@ -465,6 +472,24 @@ struct B70Provider::Impl {
   // H2D/D2H ride the single BCS here and overlap CCS compute via explicit
   // event barriers at the issue site -- ordering is never assumed.
   std::unique_ptr<sycl::queue> copy_queue;
+  // Doorbell 2.0 interop state (lazy init on first issue_cs_chain; a failed
+  // init latches cs_failed so the poller falls back to classic permanently
+  // instead of retrying per dispatch).
+  bool cs_ready = false;
+  bool cs_failed = false;
+  // Provider-OWNED raw in-order immediate list + per-layer input-ready events.
+  // The V2 UR adapter spreads SYCL work across internal lists it rotates and
+  // batches, so appending zex commands to "the queue's list" is building on
+  // sand (measured: two different wedge modes at graph-capture warmup). This
+  // list carries doorbell waits, input/output copies, and completion writes;
+  // SYCL carries only kernels; native L0 events stitch the two orderings.
+  ze_command_list_handle_t cs_ilist = nullptr;
+  ze_event_pool_handle_t cs_pool = nullptr;
+  std::vector<ze_event_handle_t> cs_ev_in;
+  ze_result_t (*cs_wait)(zex_command_list_handle_t, zex_wait_on_mem_desc_t*,
+                         void*, uint32_t, zex_event_handle_t) = nullptr;
+  ze_result_t (*cs_write)(zex_command_list_handle_t, zex_write_to_mem_desc_t*,
+                          void*, uint64_t) = nullptr;
 
   std::optional<sycl::event> dispatch_begin;
   std::optional<sycl::event> kernel_begin;
@@ -593,6 +618,22 @@ struct B70Provider::Impl {
 
       free_pointer(upload_staging);
       free_pointer(copyout_staging);
+      if (cs_ilist != nullptr) {
+        try {
+          zeCommandListHostSynchronize(cs_ilist, UINT64_MAX);
+        } catch (...) {
+        }
+        for (auto ev : cs_ev_in) {
+          zeEventDestroy(ev);
+        }
+        cs_ev_in.clear();
+        if (cs_pool != nullptr) {
+          zeEventPoolDestroy(cs_pool);
+          cs_pool = nullptr;
+        }
+        zeCommandListDestroy(cs_ilist);
+        cs_ilist = nullptr;
+      }
       if (copy_queue) {
         // Drain before ANY device buffer frees -- pending D2H reads out16 /
         // output; freeing first would be a use-after-free on the BCS.
@@ -1951,6 +1992,191 @@ bool B70Provider::register_host_range(const void* ptr,
     return true;
   } catch (...) {
     return false;
+  }
+}
+
+ProviderStatus B70Provider::issue_cs_chain(
+    const std::uint64_t generation, const std::size_t layer,
+    const sycl::half* ring_hidden, const std::int32_t* ring_ids,
+    const float* ring_weights, float* ring_output, const std::size_t M,
+    volatile std::uint32_t* signal, volatile std::uint32_t* completion) {
+  try {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->health.stopped) {
+      return ProviderStatus::shutdown;
+    }
+    if (!impl_->health.loaded || !impl_->queue) {
+      return ProviderStatus::not_loaded;
+    }
+    if (generation != impl_->config.generation) {
+      return ProviderStatus::generation_mismatch;
+    }
+    // GEMV/split shapes only: M > 32 belongs to the grouped+pipelined path
+    // through classic issue/take. int4 banks have their own kernel and no
+    // measured chain qualification -- refuse rather than guess.
+    if (ring_hidden == nullptr || ring_ids == nullptr ||
+        ring_weights == nullptr || ring_output == nullptr ||
+        signal == nullptr || completion == nullptr || M == 0 || M > 32 ||
+        layer >= g_layers || impl_->bank_format == BankFormat::int4) {
+      return ProviderStatus::invalid_argument;
+    }
+
+    if (!impl_->cs_ready) {
+      if (impl_->cs_failed) {
+        return ProviderStatus::device_error;
+      }
+      auto zctx = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+          impl_->queue->get_context());
+      auto zdev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+          impl_->queue->get_device());
+      ze_driver_handle_t drv =
+          sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+              impl_->queue->get_context().get_platform());
+      ze_command_queue_desc_t qd{ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC};
+      qd.ordinal = 0;  // COMPUTE|COPY group (recon: group 0, numQueues=1)
+      qd.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;
+      qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+      ze_event_pool_desc_t pd{ZE_STRUCTURE_TYPE_EVENT_POOL_DESC};
+      pd.count = static_cast<std::uint32_t>(g_layers);
+      if (drv == nullptr ||
+          zeDriverGetExtensionFunctionAddress(
+              drv, "zexCommandListAppendWaitOnMemory",
+              reinterpret_cast<void**>(&impl_->cs_wait)) !=
+              ZE_RESULT_SUCCESS ||
+          zeDriverGetExtensionFunctionAddress(
+              drv, "zexCommandListAppendWriteToMemory",
+              reinterpret_cast<void**>(&impl_->cs_write)) !=
+              ZE_RESULT_SUCCESS ||
+          zeCommandListCreateImmediate(zctx, zdev, &qd, &impl_->cs_ilist) !=
+              ZE_RESULT_SUCCESS ||
+          zeEventPoolCreate(zctx, &pd, 1, &zdev, &impl_->cs_pool) !=
+              ZE_RESULT_SUCCESS) {
+        impl_->cs_failed = true;
+        impl_->set_error(
+            "CS doorbell unavailable: zex entry points or raw list/pool");
+        return ProviderStatus::device_error;
+      }
+      impl_->cs_ev_in.resize(g_layers, nullptr);
+      for (std::uint32_t i = 0; i < g_layers; ++i) {
+        ze_event_desc_t ed{ZE_STRUCTURE_TYPE_EVENT_DESC};
+        ed.index = i;
+        ed.signal = ZE_EVENT_SCOPE_FLAG_DEVICE;
+        ed.wait = ZE_EVENT_SCOPE_FLAG_DEVICE;
+        if (zeEventCreate(impl_->cs_pool, &ed, &impl_->cs_ev_in[i]) !=
+            ZE_RESULT_SUCCESS) {
+          impl_->cs_failed = true;
+          impl_->set_error("CS doorbell: event creation failed");
+          return ProviderStatus::device_error;
+        }
+      }
+      impl_->cs_ready = true;
+    }
+
+    // The chain, ordering owned end to end:
+    //   raw list:  WAIT(signal==M) -> WRITE(signal=0) -> H2D x3 -> signal E_in
+    //   SYCL:      barrier(E_in) -> kernels -> narrow -> D2H -> tail barrier
+    //   raw list:  WAIT(tail) -> WRITE(completion=1)
+    // The raw list is in-order and provider-owned: no UR adapter list
+    // rotation, batching, or compute/copy split can reorder it. E_in and the
+    // tail event are the only cross-runtime seams, both explicit.
+    auto* list = reinterpret_cast<zex_command_list_handle_t>(impl_->cs_ilist);
+    ze_event_handle_t ev_in = impl_->cs_ev_in[layer];
+    // The previous step's chain for this layer fully drained before the CUDA
+    // side could ring this step's signal, so a host reset here is race-free.
+    zeEventHostReset(ev_in);
+
+    zex_wait_on_mem_desc_t wd{};
+    wd.actionFlag = ZEX_WAIT_ON_MEMORY_FLAG_EQUAL;
+    wd.waitScope = ZEX_MEM_ACTION_SCOPE_FLAG_HOST;
+    zex_write_to_mem_desc_t wr{};
+    wr.writeScope = ZEX_MEM_ACTION_SCOPE_FLAG_HOST;
+    const std::size_t route_elements = M * impl_->config.top_k;
+    ze_result_t zr = ZE_RESULT_SUCCESS;
+    auto ok = [&](ze_result_t r) {
+      if (zr == ZE_RESULT_SUCCESS) zr = r;
+      return r == ZE_RESULT_SUCCESS;
+    };
+    ok(impl_->cs_wait(list, &wd, const_cast<std::uint32_t*>(signal),
+                      static_cast<std::uint32_t>(M), nullptr));
+    ok(impl_->cs_write(list, &wr, const_cast<std::uint32_t*>(signal), 0ull));
+    ok(zeCommandListAppendMemoryCopy(
+        impl_->cs_ilist, impl_->hidden, ring_hidden,
+        M * g_hidden * sizeof(sycl::half), nullptr, 0, nullptr));
+    ok(zeCommandListAppendMemoryCopy(impl_->cs_ilist, impl_->ids, ring_ids,
+                                     route_elements * sizeof(std::int32_t),
+                                     nullptr, 0, nullptr));
+    ok(zeCommandListAppendMemoryCopy(impl_->cs_ilist, impl_->weights,
+                                     ring_weights,
+                                     route_elements * sizeof(float), ev_in, 0,
+                                     nullptr));
+    if (zr != ZE_RESULT_SUCCESS) {
+      impl_->cs_failed = true;
+      impl_->set_error("CS doorbell: input-side append failed");
+      return ProviderStatus::device_error;
+    }
+
+    // SYCL side: gate kernels on E_in.
+    sycl::event sev_in = sycl::make_event<sycl::backend::ext_oneapi_level_zero>(
+        {ev_in, sycl::ext::oneapi::level_zero::ownership::keep},
+        impl_->queue->get_context());
+    impl_->queue->ext_oneapi_submit_barrier({sev_in});
+
+    const std::size_t resident_experts = impl_->config.resident_experts.size();
+    const std::size_t first_expert = layer * resident_experts;
+    const std::uint8_t* layer_w13 = impl_->w13 + first_expert * g_w13_bytes;
+    const std::uint8_t* layer_s13 = impl_->s13 + first_expert * g_s13_bytes;
+    const std::uint8_t* layer_w2 = impl_->w2 + first_expert * g_w2_bytes;
+    const std::uint8_t* layer_s2 = impl_->s2 + first_expert * g_s2_bytes;
+    const float* layer_w13_global = impl_->w13_global + first_expert;
+    const float* layer_w2_global = impl_->w2_global + first_expert;
+    quixicore::xpu::ops::nvfp4_moe_split(
+        *impl_->queue, impl_->hidden, impl_->ids, impl_->weights, layer_w13,
+        layer_s13, layer_w13_global, layer_w2, layer_s2, layer_w2_global,
+        impl_->scratch, impl_->output, M, resident_experts,
+        impl_->config.top_k, g_hidden, g_intermediate,
+        quixicore::xpu::DType::f16, true, quixicore::xpu::Variant::sycl,
+        false);
+    const std::size_t n = M * g_hidden;
+    if (impl_->out_fp16) {
+      const float* src = impl_->output;
+      sycl::half* dst = impl_->out16;
+      impl_->queue->parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
+        dst[i] = static_cast<sycl::half>(src[i]);
+      });
+    }
+    sycl::event tail = impl_->queue->ext_oneapi_submit_barrier();
+    ze_event_handle_t ztail =
+        sycl::get_native<sycl::backend::ext_oneapi_level_zero>(tail);
+    if (ztail == nullptr ||
+        !ok(zeCommandListAppendWaitOnEvents(impl_->cs_ilist, 1, &ztail))) {
+      impl_->cs_failed = true;
+      impl_->set_error("CS doorbell: SYCL tail event not native-waitable");
+      return ProviderStatus::device_error;
+    }
+    if (impl_->out_fp16) {
+      ok(zeCommandListAppendMemoryCopy(
+          impl_->cs_ilist, reinterpret_cast<sycl::half*>(ring_output),
+          impl_->out16, n * sizeof(sycl::half), nullptr, 0, nullptr));
+    } else {
+      ok(zeCommandListAppendMemoryCopy(impl_->cs_ilist, ring_output,
+                                       impl_->output, n * sizeof(float),
+                                       nullptr, 0, nullptr));
+    }
+    ok(impl_->cs_write(list, &wr, const_cast<std::uint32_t*>(completion),
+                       1ull));
+    if (zr != ZE_RESULT_SUCCESS) {
+      impl_->cs_failed = true;
+      impl_->set_error("CS doorbell: output-side append failed");
+      return ProviderStatus::device_error;
+    }
+    ++impl_->health.dispatches;
+    return ProviderStatus::ok;
+  } catch (...) {
+    try {
+      impl_->set_current_exception("provider issue_cs_chain failed: ");
+    } catch (...) {
+    }
+    return ProviderStatus::device_error;
   }
 }
 

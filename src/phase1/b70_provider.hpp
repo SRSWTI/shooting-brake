@@ -105,6 +105,29 @@ class B70Provider final {
   ProviderStatus take(std::uint64_t generation, std::uint64_t sequence,
                       float* output, std::size_t output_elements,
                       DispatchResult* result);
+
+  // Doorbell 2.0 (SHOOTING_BRAKE_B70_CS_DOORBELL=1): enqueue one layer's full
+  // dispatch as a command-streamer chain on the in-order queue --
+  //   MI_SEMAPHORE_WAIT(signal==M) -> WRITE(signal=0) -> H2D from the pinned
+  //   ring -> kernels -> narrow -> D2H to the ring -> CCS marker ->
+  //   WRITE(completion=1)
+  // -- so the host leaves the dispatch critical path entirely. Probes
+  // (experiments/b70_cs_doorbell_probe, b70_sycl_zex_interop_probe) measured
+  // the bracket at 7.9-8.7 us against the 61 us host handshake, and caught
+  // the two hazards this signature encodes: the signal self-clear happens on
+  // the CS (no host clear race), and the completion write is ordered behind a
+  // CCS marker kernel because the D2H may ride the BCS.
+  //
+  // Serves the GEMV/split shapes only (M <= 32); larger M returns
+  // invalid_argument and the caller falls back to classic issue/take, which
+  // keeps prefill on the pipelined path. Fire-and-forget: no take(), no
+  // pending bookkeeping; the CUDA side observes completion directly.
+  ProviderStatus issue_cs_chain(std::uint64_t generation, std::size_t layer,
+                                const sycl::half* ring_hidden,
+                                const std::int32_t* ring_ids,
+                                const float* ring_weights, float* ring_output,
+                                std::size_t M, volatile std::uint32_t* signal,
+                                volatile std::uint32_t* completion);
 #ifdef SHOOTING_BRAKE_ENABLE_TEST_FAULTS
   ProviderStatus arm_test_fault(ProviderTestFault fault,
                                 std::uint64_t sequence);

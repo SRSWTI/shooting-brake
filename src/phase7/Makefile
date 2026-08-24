@@ -21,12 +21,14 @@ CXXFLAGS := -std=gnu++20 -O2 -g -fPIC -Wall -fsycl \
             -I$(ROOT) -I$(PHASE1) \
             -I$(QUIXICORE)/include \
             -I/opt/intel/oneapi/compiler/2026.1/include \
-            -I$(NVFP4)
+            -I$(NVFP4) \
+            -I$(ROOT)/../../vendor/compute-runtime/level_zero/include
 LDFLAGS := -L$(QUIXICORE)/build-sycl \
            -lquixicore_xpu -lquixicore_xpu_ops \
            -fsycl \
            -L/opt/intel/oneapi/compiler/2026.1/lib \
-           -L/opt/intel/oneapi/umf/1.1/lib
+           -L/opt/intel/oneapi/umf/1.1/lib \
+           -lze_loader
 
 GROUPED_FLAGS := -DCUTLASS_ENABLE_HEADERS_ONLY -DCUTLASS_ENABLE_SYCL \
                  -DSYCL_INTEL_TARGET -DCUTLASS_VERSIONS_GENERATED \

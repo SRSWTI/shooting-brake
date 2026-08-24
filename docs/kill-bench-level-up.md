@@ -808,3 +808,51 @@ critical path for 46 of 47 layers, no parked-engine hazard across steps
 (the WAIT parks only after the previous layer drains; steps are atomic).
 Measured pieces: transport 8-9 us (probe 1), full chain 7.9-8.7 us (probe 2).
 The ~9.7 ms ITL row stays a PREDICTION until the paired A/B runs.
+
+## 20. Doorbell 2.0 integration: built, BLOCKED on UR-adapter internals (2026-08-24)
+
+`issue_cs_chain` (provider) + CS poller mode (capi) behind
+SHOOTING_BRAKE_B70_CS_DOORBELL=1, default OFF. Three integration variants,
+three boot-time wedges, ~10 min per observation:
+
+1. Cached immediate-list handle from get_native(queue): wedged at graph-capture
+   warmup, pollers parked in urEventWait -- the V2 UR adapter ROTATES lists;
+   appends landed on a retired list that never executes.
+2. Fetch-fresh handles per append: same wedge -- V2 also splits SYCL work
+   across internal compute/copy lists, so "the queue's list" carries no
+   ordering contract for foreign appends at all.
+3. Provider-OWNED raw in-order immediate list (doorbell + copies + completion)
+   stitched to SYCL kernels via native events (make_event in, get_native(tail)
+   out): wedged EARLIER, during initial profiling, frames entirely inside
+   adapter internals.
+
+**Lore correction, load-bearing:** wedged stacks show
+libur_adapter_level_zero_v2.so live in serving despite
+SYCL_UR_USE_LEVEL_ZERO_V2=0 -- that knob is INERT on oneAPI 2026.1. Every
+number this campaign ever shipped ran on the V2 adapter; Bench 23's "V1
+required" note is stale.
+
+**Still proven:** the transport (18/19): 8-9 us CS doorbell round trip vs the
+61 us handshake, CUDA-pinned pages accepted, both cards, full chain shape.
+The blocker is exclusively raw-L0-append x live-V2-adapter interaction.
+
+**Production safety verified:** flag-off boot with the new .so is green; first
+warm ITL 11.65 ms = exact baseline band (later probes 13.8-16.5 = documented
+n=2 rig noise; morning baseline spanned 11.7-14.9 on identical config).
+
+**Unblock plan, in order:**
+1. UR_ADAPTERS_FORCE_LOAD=libur_adapter_level_zero.so.0 (true V1) for the CS
+   arm -- one boot; the design was built for V1's one-stable-list semantics,
+   and V1 has never actually run on this rig.
+2. Standalone repro harness: load the provider .so, poll_register/poll_start
+   with fake CUDA-side signal writes, drive M=1 steps through issue_cs_chain
+   -- seconds per iteration, gdb-visible, no engine on top.
+3. If V2 contract gap confirmed: CS arm ships on V1, A/B'd against V2-classic
+   honestly, or the chain moves to a dedicated CCS-ordinal queue pending
+   NEO guidance.
+
+Projection IF unblocked (prediction, not measurement): ITL 12.1 -> 9.7-10.6 ms
+(47 x ~52 us handshake removal, range covers chain kernel-start cost), decode
+crossover vs the RTX PRO 6000 moves 127K -> ~96K, and two pinned poller cores
+free. Fusion (+~1 ms) and the finetuned drafter (4-6 ms effective, wins at
+every context) stack on the same chain.

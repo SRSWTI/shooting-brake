@@ -155,9 +155,16 @@ class B70Poller {
     std::vector<PollLayer> snapshot;
     size_t known = 0;
     uint64_t sequence = 0;
+    bool cs_disabled = false;
     // Fixed once the bank is loaded, and the poller only starts after
     // that, so read it once rather than per dispatch on the hot path.
     const size_t hidden = hidden_size();
+    const uint32_t total_layers =
+        static_cast<uint32_t>(provider_->capability().num_layers);
+    static const bool cs_env = [] {
+      const char* v = std::getenv("SHOOTING_BRAKE_B70_CS_DOORBELL");
+      return v != nullptr && v[0] == '1' && v[1] == '\0';
+    }();
 
     while (running_.load(std::memory_order_relaxed)) {
       // Refresh only when a new layer appeared, so the steady-state
@@ -166,6 +173,41 @@ class B70Poller {
         std::lock_guard<std::mutex> guard(mutex_);
         snapshot = layers_;
         known = snapshot.size();
+      }
+
+      // Doorbell 2.0 (SHOOTING_BRAKE_B70_CS_DOORBELL=1): once every layer is
+      // registered, decode-shaped steps (M <= 32) ride command-streamer
+      // chains and this thread leaves the dispatch critical path entirely --
+      // the probes measured the CS bracket at ~8 us against this loop's 61 us
+      // round trip. Prefill/mixed steps (M > 32) and the registration warmup
+      // stay on the classic sweep below. Any chain failure latches classic
+      // mode permanently; the failed step is finished by the sweep, which
+      // spins the remaining layers' untouched signals.
+      if (cs_env && !cs_disabled && !snapshot.empty() &&
+          known == total_layers) {
+        const uint32_t M = snapshot[0].signal[0];
+        if (M != 0 && M <= 32) {
+          bool ok = true;
+          for (const PollLayer& entry : snapshot) {
+            if (provider_->issue_cs_chain(
+                    generation_, entry.layer, entry.hidden, entry.ids,
+                    entry.weights, entry.output, M, entry.signal,
+                    entry.completion) !=
+                shooting_brake::phase1::ProviderStatus::ok) {
+              ok = false;
+              cs_disabled = true;
+              errors_.fetch_add(1);
+              break;
+            }
+          }
+          if (ok) {
+            sequence += snapshot.size();
+            dispatches_.fetch_add(snapshot.size());
+            rows_.fetch_add(static_cast<uint64_t>(M) * snapshot.size());
+            m_histogram_[m_bucket(M)].fetch_add(snapshot.size());
+            continue;
+          }
+        }
       }
 
       for (const PollLayer& entry : snapshot) {

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <sycl/ext/oneapi/backend/level_zero.hpp>
 
 namespace quixicore::xpu::kernels {
 namespace {
@@ -392,6 +393,179 @@ sycl::event nvfp4_moe_split_sycl(sycl::queue &q, const void *hidden, const int *
                                   out_f32, M, E, top_k, K, I, multiply_router_weight, output_ready);
   }
   return {};
+}
+
+
+// ---- Baked decode-chain kernels -------------------------------------------
+//
+// FUNCTOR kernels on purpose: their fields ARE the Level-Zero kernel
+// arguments, in declaration order (proven bit-exact by
+// experiments/b70_baked_chain_probe.cpp -- numKernelArgs == field count,
+// zero hidden args). The provider bakes these into pre-recorded per-layer
+// command lists: WAIT(doorbell) -> gate_up -> w2 epilogue -> D2H -> WRITE.
+// Do NOT reorder fields; the raw zeKernelSetArgumentValue replay indexes
+// them positionally.
+//
+// The w2 epilogue is also the fused split-path prototype: row-major register
+// accumulation across a token's routes, no atomics, no output zero-fill, and
+// a direct fp16 write (kills the separate narrow pass).
+
+struct Nvfp4BakedGateUp {
+  const half_t *hidden;         // arg 0
+  const int *ids;               // arg 1
+  const std::uint8_t *w13;      // arg 2
+  const std::uint8_t *s13;      // arg 3
+  const float *w13_global;      // arg 4
+  float *scratch;               // arg 5
+  std::uint32_t E;              // arg 6
+  std::uint32_t K;              // arg 7
+  std::uint32_t I;              // arg 8
+  std::uint32_t top_k;          // arg 9
+  std::uint32_t row_tiles;      // arg 10  == ceil(I / kSubgroups)
+  // 1D: group = pair * row_tiles + tile. No group barriers, so the early
+  // returns are safe.
+  [[sycl::reqd_sub_group_size(kSG)]] void
+  operator()(sycl::nd_item<1> item) const {
+    const std::size_t group = item.get_group(0);
+    const std::size_t pair = group / row_tiles;
+    const std::size_t tile = group % row_tiles;
+    const int expert = ids[pair];
+    if (expert < 0 || static_cast<std::uint32_t>(expert) >= E)
+      return;
+    const std::size_t token = pair / top_k;
+    const sycl::sub_group subgroup = item.get_sub_group();
+    const std::size_t row = tile * kSubgroups + subgroup.get_group_linear_id();
+    if (row >= I)
+      return;
+    const std::size_t e = static_cast<std::size_t>(expert);
+    const float global = w13_global[e] * 4194304.0f;
+    const std::size_t w13_stride = std::size_t(2) * I * (K / 2);
+    const std::size_t s13_stride = std::size_t(2) * I * (K / 16);
+    const std::uint8_t *ew = w13 + e * w13_stride;
+    const std::uint8_t *es = s13 + e * s13_stride;
+    const sycl::vec<float, 2> values = nvfp4_row_dot_pair(
+        subgroup, ew + row * (K / 2), es + row * (K / 16),
+        ew + (row + I) * (K / 2), es + (row + I) * (K / 16), global,
+        hidden + token * K, K);
+    if (subgroup.get_local_linear_id() == 0) {
+      scratch[pair * 2 * I + row] = values[0];
+      scratch[pair * 2 * I + row + I] = values[1];
+    }
+  }
+};
+
+template <int IC, int RowsPerSubgroup> struct Nvfp4BakedW2Out16 {
+  const int *ids;               // arg 0
+  const float *weights;         // arg 1
+  const std::uint8_t *w2;       // arg 2
+  const std::uint8_t *s2;       // arg 3
+  const float *w2_global;       // arg 4
+  const float *scratch;         // arg 5
+  sycl::half *out16;            // arg 6
+  std::uint32_t E;              // arg 7
+  std::uint32_t K;              // arg 8
+  std::uint32_t top_k;          // arg 9
+  std::uint32_t row_tiles;      // arg 10  == ceil(K / (kSubgroups * RPS))
+  std::uint32_t mul_router;     // arg 11
+  // 1D: group = token * row_tiles + tile; each subgroup owns RowsPerSubgroup
+  // rows so the SLM activation fill is amortized (the R=1 version paid 16x
+  // the scratch re-read traffic and lost 50 us/layer to it). NO early
+  // returns: the pair loop holds two uniform group barriers; all divergent
+  // conditions are guarded, never returned from.
+  [[sycl::reqd_sub_group_size(kSG)]] void
+  operator()(sycl::nd_item<1> item) const {
+    constexpr std::size_t kRowsPerGroup =
+        static_cast<std::size_t>(kSubgroups) * RowsPerSubgroup;
+    const std::size_t group = item.get_group(0);
+    const std::size_t token = group / row_tiles;
+    const std::size_t tile = group % row_tiles;
+    const sycl::sub_group subgroup = item.get_sub_group();
+    const std::size_t first_row =
+        tile * kRowsPerGroup + subgroup.get_group_linear_id();
+    auto &activated =
+        *sycl::ext::oneapi::group_local_memory<float[IC]>(item.get_group());
+    const int thread = static_cast<int>(item.get_local_linear_id());
+    const std::size_t w2_stride = static_cast<std::size_t>(K) * (IC / 2);
+    const std::size_t s2_stride = static_cast<std::size_t>(K) * (IC / 16);
+    float acc[RowsPerSubgroup] = {};
+    for (std::uint32_t j = 0; j < top_k; ++j) {
+      const std::size_t pair = token * top_k + j;
+      const int expert = ids[pair];
+      const bool valid = expert >= 0 && static_cast<std::uint32_t>(expert) < E;
+      sycl::group_barrier(item.get_group());
+      if (valid) {
+        const float *gate_up = scratch + pair * 2 * IC;
+        for (std::size_t i = static_cast<std::size_t>(thread); i < IC;
+             i += kWG)
+          activated[i] = silu(gate_up[i]) * gate_up[i + IC];
+      }
+      sycl::group_barrier(item.get_group());
+      if (!valid)
+        continue;
+      const std::size_t e = static_cast<std::size_t>(expert);
+      const float global = w2_global[e] * 4194304.0f;
+      const float router = mul_router != 0u ? weights[pair] : 1.0f;
+#pragma unroll
+      for (int r = 0; r < RowsPerSubgroup; ++r) {
+        const std::size_t row =
+            first_row + static_cast<std::size_t>(r) * kSubgroups;
+        if (row >= K)
+          break;
+        const float value =
+            nvfp4_row_dot(subgroup, w2 + e * w2_stride + row * (IC / 2),
+                          s2 + e * s2_stride + row * (IC / 16), global,
+                          &activated[0], IC);
+        acc[r] += router * value;
+      }
+    }
+    if (subgroup.get_local_linear_id() == 0) {
+#pragma unroll
+      for (int r = 0; r < RowsPerSubgroup; ++r) {
+        const std::size_t row =
+            first_row + static_cast<std::size_t>(r) * kSubgroups;
+        if (row < K)
+          out16[token * K + row] = static_cast<sycl::half>(acc[r]);
+      }
+    }
+  }
+};
+
+constexpr int kBakedRowsPerSubgroup = 2;
+
+// Never called at runtime; forces device-image emission for the baked
+// kernels (a functor that is never a kernel name never gets compiled).
+void nvfp4_baked_instantiate(sycl::queue &q) {
+  q.parallel_for(sycl::nd_range<1>(kWG, kWG), Nvfp4BakedGateUp{});
+  q.parallel_for(sycl::nd_range<1>(kWG, kWG),
+                 Nvfp4BakedW2Out16<512, kBakedRowsPerSubgroup>{});
+  q.parallel_for(sycl::nd_range<1>(kWG, kWG),
+                 Nvfp4BakedW2Out16<1024, kBakedRowsPerSubgroup>{});
+  q.parallel_for(sycl::nd_range<1>(kWG, kWG),
+                 Nvfp4BakedW2Out16<2048, kBakedRowsPerSubgroup>{});
+}
+
+bool nvfp4_baked_handles(sycl::queue &q, std::size_t I, void **gate_up_handle,
+                         void **w2_out16_handle) {
+  try {
+    if (I != 512 && I != 1024 && I != 2048)
+      return false;
+    auto ctx = q.get_context();
+    const sycl::kernel_id gid = sycl::get_kernel_id<Nvfp4BakedGateUp>();
+    constexpr int R = kBakedRowsPerSubgroup;
+    const sycl::kernel_id wid =
+        I == 512    ? sycl::get_kernel_id<Nvfp4BakedW2Out16<512, R>>()
+        : I == 1024 ? sycl::get_kernel_id<Nvfp4BakedW2Out16<1024, R>>()
+                    : sycl::get_kernel_id<Nvfp4BakedW2Out16<2048, R>>();
+    auto bundle = sycl::get_kernel_bundle<sycl::bundle_state::executable>(
+        ctx, {gid, wid});
+    *gate_up_handle = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+        bundle.get_kernel(gid));
+    *w2_out16_handle = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+        bundle.get_kernel(wid));
+    return *gate_up_handle != nullptr && *w2_out16_handle != nullptr;
+  } catch (...) {
+    return false;
+  }
 }
 
 } // namespace quixicore::xpu::kernels

@@ -156,6 +156,7 @@ class B70Poller {
     size_t known = 0;
     uint64_t sequence = 0;
     bool cs_disabled = false;
+    bool baked_ready = false;
     // Fixed once the bank is loaded, and the poller only starts after
     // that, so read it once rather than per dispatch on the hot path.
     const size_t hidden = hidden_size();
@@ -168,6 +169,7 @@ class B70Poller {
       if (v == nullptr || v[0] == '\0' || v[1] != '\0') return 0;
       if (v[0] == '1') return 1;
       if (v[0] == '2') return 2;
+      if (v[0] == '3') return 3;
       return 0;
     }();
 
@@ -180,6 +182,48 @@ class B70Poller {
         known = snapshot.size();
       }
 
+      // Mode 3 (baked): one pre-recorded command list per layer, one
+      // ExecuteCommandLists per M=1 step. Record lazily once every layer is
+      // registered; any failure latches classic mode permanently.
+      if (cs_mode == 3 && !cs_disabled && !snapshot.empty() &&
+          known == total_layers) {
+        if (!baked_ready) {
+          bool recorded = true;
+          for (const PollLayer& entry : snapshot) {
+            if (provider_->baked_record_layer(
+                    generation_, entry.layer, entry.hidden, entry.ids,
+                    entry.weights, entry.output, entry.signal,
+                    entry.completion) !=
+                shooting_brake::phase1::ProviderStatus::ok) {
+              recorded = false;
+              cs_disabled = true;
+              errors_.fetch_add(1);
+              break;
+            }
+          }
+          baked_ready = recorded;
+        }
+        if (baked_ready && snapshot[0].signal[0] == 1) {
+          if (provider_->baked_execute_step() ==
+              shooting_brake::phase1::ProviderStatus::ok) {
+            sequence += snapshot.size();
+            dispatches_.fetch_add(snapshot.size());
+            rows_.fetch_add(snapshot.size());
+            m_histogram_[m_bucket(1)].fetch_add(snapshot.size());
+            continue;
+          }
+          // Baked signal clears for layers 1+ are DEVICE scope: before the
+          // classic sweep may run again, wipe every signal host-side or the
+          // sweep steals stale doorbells (the kill-bench 22 race, revived).
+          for (const PollLayer& entry : snapshot) {
+            entry.signal[0] = 0;
+          }
+          std::atomic_thread_fence(std::memory_order_seq_cst);
+          cs_disabled = true;
+          errors_.fetch_add(1);
+        }
+      }
+
       // Doorbell 2.0 (SHOOTING_BRAKE_B70_CS_DOORBELL=1|2): once every layer
       // registered, decode-shaped steps (M <= 32) ride command-streamer
       // chains and this thread leaves the dispatch critical path entirely --
@@ -188,7 +232,8 @@ class B70Poller {
       // stay on the classic sweep below. Any chain failure latches classic
       // mode permanently; the failed step is finished by the sweep, which
       // spins the remaining layers' untouched signals.
-      if (cs_mode != 0 && !cs_disabled && !snapshot.empty() &&
+      if ((cs_mode == 1 || cs_mode == 2) && !cs_disabled &&
+          !snapshot.empty() &&
           known == total_layers) {
         const uint32_t M = snapshot[0].signal[0];
         if (M != 0 && M <= 32) {

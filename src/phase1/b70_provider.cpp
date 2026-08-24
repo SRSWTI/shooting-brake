@@ -492,6 +492,14 @@ struct B70Provider::Impl {
   ze_result_t (*cs_write)(zex_command_list_handle_t, zex_write_to_mem_desc_t*,
                           void*, uint64_t) = nullptr;
 
+  // Baked decode chain (mode 3): provider-owned raw queue plus one CLOSED
+  // command list per layer, recorded at registration, replayed per step.
+  bool baked_failed = false;
+  void* bk_gate_up = nullptr;  // ze_kernel_handle_t from quixicore interop
+  void* bk_w2 = nullptr;
+  ze_command_queue_handle_t baked_queue = nullptr;
+  std::vector<ze_command_list_handle_t> baked_lists;
+
   std::optional<sycl::event> dispatch_begin;
   std::optional<sycl::event> kernel_begin;
   std::optional<sycl::event> kernel_end;
@@ -599,6 +607,17 @@ struct B70Provider::Impl {
   }
 
   void release_resources_locked(const bool mark_stopped) noexcept {
+    if (baked_queue != nullptr) {
+      // Best-effort drain; the poller is stopped before shutdown in orderly
+      // teardown, so this returns immediately unless a step was in flight.
+      zeCommandQueueSynchronize(baked_queue, 1'000'000'000ull);
+      for (ze_command_list_handle_t l : baked_lists) {
+        if (l != nullptr) zeCommandListDestroy(l);
+      }
+      baked_lists.clear();
+      zeCommandQueueDestroy(baked_queue);
+      baked_queue = nullptr;
+    }
     if (queue) {
       try {
         queue->wait_and_throw();
@@ -2365,6 +2384,269 @@ ProviderStatus B70Provider::issue_cs_ride(
   } catch (...) {
     try {
       impl_->set_current_exception("provider issue_cs_ride failed: ");
+    } catch (...) {
+    }
+    return ProviderStatus::device_error;
+  }
+}
+
+ProviderStatus B70Provider::baked_record_layer(
+    const std::uint64_t generation, const std::size_t layer,
+    const sycl::half* ring_hidden, const std::int32_t* ring_ids,
+    const float* ring_weights, float* ring_output,
+    volatile std::uint32_t* signal, volatile std::uint32_t* completion) {
+  try {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->health.stopped) {
+      return ProviderStatus::shutdown;
+    }
+    if (!impl_->health.loaded || !impl_->queue) {
+      return ProviderStatus::not_loaded;
+    }
+    if (generation != impl_->config.generation) {
+      return ProviderStatus::generation_mismatch;
+    }
+    if (impl_->baked_failed) {
+      return ProviderStatus::device_error;
+    }
+    if (ring_hidden == nullptr || ring_ids == nullptr ||
+        ring_weights == nullptr || ring_output == nullptr ||
+        signal == nullptr || completion == nullptr || layer >= g_layers ||
+        impl_->bank_format == BankFormat::int4 || !impl_->out_fp16) {
+      return ProviderStatus::invalid_argument;
+    }
+    auto fail = [&](const char* message) {
+      impl_->baked_failed = true;
+      impl_->set_error(message);
+      return ProviderStatus::device_error;
+    };
+    if (impl_->cs_wait == nullptr || impl_->cs_write == nullptr) {
+      ze_driver_handle_t drv =
+          sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+              impl_->queue->get_context().get_platform());
+      if (drv == nullptr ||
+          zeDriverGetExtensionFunctionAddress(
+              drv, "zexCommandListAppendWaitOnMemory",
+              reinterpret_cast<void**>(&impl_->cs_wait)) !=
+              ZE_RESULT_SUCCESS ||
+          zeDriverGetExtensionFunctionAddress(
+              drv, "zexCommandListAppendWriteToMemory",
+              reinterpret_cast<void**>(&impl_->cs_write)) !=
+              ZE_RESULT_SUCCESS) {
+        return fail("baked: zex entry points unavailable");
+      }
+    }
+    if (impl_->bk_gate_up == nullptr &&
+        !quixicore::xpu::ops::nvfp4_moe_baked_handles(
+            *impl_->queue, g_intermediate, &impl_->bk_gate_up,
+            &impl_->bk_w2)) {
+      return fail("baked: kernel handle extraction failed (unsupported I?)");
+    }
+    auto zctx = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+        impl_->queue->get_context());
+    auto zdev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+        impl_->queue->get_device());
+    if (impl_->baked_queue == nullptr) {
+      ze_command_queue_desc_t qd{ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC};
+      qd.ordinal = 0;
+      qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+      if (zeCommandQueueCreate(zctx, zdev, &qd, &impl_->baked_queue) !=
+          ZE_RESULT_SUCCESS) {
+        return fail("baked: raw queue create failed");
+      }
+      impl_->baked_lists.assign(g_layers, nullptr);
+    }
+    if (impl_->baked_lists[layer] != nullptr) {
+      return ProviderStatus::ok;  // idempotent re-registration
+    }
+
+    // Geometry. 256/8 mirror quixicore's kWG/kSubgroups: the baked kernels
+    // hard-code 8 subgroups of 32; row_tiles must agree or rows are skipped.
+    constexpr std::uint32_t kBakedWG = 256;
+    constexpr std::uint32_t kBakedSubgroups = 8;
+    const auto K = static_cast<std::uint32_t>(g_hidden);
+    const auto I = static_cast<std::uint32_t>(g_intermediate);
+    const auto top_k = static_cast<std::uint32_t>(impl_->config.top_k);
+    const auto E =
+        static_cast<std::uint32_t>(impl_->config.resident_experts.size());
+    const std::uint32_t gu_tiles = (I + kBakedSubgroups - 1) / kBakedSubgroups;
+    // Must match quixicore's kBakedRowsPerSubgroup (nvfp4_moe.sycl.cpp).
+    constexpr std::uint32_t kBakedRows = 2;
+    const std::uint32_t w2_tiles =
+        (K + kBakedSubgroups * kBakedRows - 1) / (kBakedSubgroups * kBakedRows);
+    const std::size_t first_expert = layer * E;
+    const std::uint8_t* w13L = impl_->w13 + first_expert * g_w13_bytes;
+    const std::uint8_t* s13L = impl_->s13 + first_expert * g_s13_bytes;
+    const std::uint8_t* w2L = impl_->w2 + first_expert * g_w2_bytes;
+    const std::uint8_t* s2L = impl_->s2 + first_expert * g_s2_bytes;
+    const float* w13gL = impl_->w13_global + first_expert;
+    const float* w2gL = impl_->w2_global + first_expert;
+
+    ze_result_t zr = ZE_RESULT_SUCCESS;
+    auto ok = [&](ze_result_t r) {
+      if (zr == ZE_RESULT_SUCCESS) zr = r;
+      return r == ZE_RESULT_SUCCESS;
+    };
+    const auto gu = reinterpret_cast<ze_kernel_handle_t>(impl_->bk_gate_up);
+    const auto w2k = reinterpret_cast<ze_kernel_handle_t>(impl_->bk_w2);
+    auto set_ptr = [&](ze_kernel_handle_t k, std::uint32_t i, const void* p) {
+      ok(zeKernelSetArgumentValue(k, i, sizeof(void*), &p));
+    };
+    auto set_u32 = [&](ze_kernel_handle_t k, std::uint32_t i,
+                       std::uint32_t v) {
+      ok(zeKernelSetArgumentValue(k, i, sizeof(std::uint32_t), &v));
+    };
+    ze_command_list_desc_t ld{ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC};
+    ld.commandQueueGroupOrdinal = 0;
+    ze_command_list_handle_t list{};
+    if (zeCommandListCreate(zctx, zdev, &ld, &list) != ZE_RESULT_SUCCESS) {
+      return fail("baked: list create failed");
+    }
+    auto* xl = reinterpret_cast<zex_command_list_handle_t>(list);
+    zex_wait_on_mem_desc_t wd{};
+    wd.actionFlag = ZEX_WAIT_ON_MEMORY_FLAG_EQUAL;
+    wd.waitScope = ZEX_MEM_ACTION_SCOPE_FLAG_HOST;
+    zex_write_to_mem_desc_t wr{};
+    wr.writeScope = ZEX_MEM_ACTION_SCOPE_FLAG_HOST;
+    // Layer 0's signal gates the poller (a HOST read), so its clear must
+    // flush to host scope. Layers 1+ signals are only ever re-read by the
+    // NEXT step's CS WAIT -- device scope skips 46 per-step DC flushes. The
+    // fallback sweep is kept safe by the capi failure path, which host-wipes
+    // every signal before latching classic mode.
+    zex_write_to_mem_desc_t wr_clear{};
+    wr_clear.writeScope = layer == 0 ? ZEX_MEM_ACTION_SCOPE_FLAG_HOST
+                                     : ZEX_MEM_ACTION_SCOPE_FLAG_DEVICE;
+    // Arguments are snapshot at APPEND time, so the two shared kernel
+    // handles can bake 47 different per-layer argument sets safely.
+    ok(impl_->cs_wait(xl, &wd, const_cast<std::uint32_t*>(signal), 1u,
+                      nullptr));
+    ok(impl_->cs_write(xl, &wr_clear, const_cast<std::uint32_t*>(signal),
+                       0ull));
+    // REGULAR lists do not order commands implicitly: without this barrier
+    // the H2D copies race ahead of the doorbell WAIT and stomp the shared
+    // device staging while the previous layer still computes (found as
+    // all-47-layers-garbage in the harness parity gate).
+    ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
+    ok(zeCommandListAppendMemoryCopy(list, impl_->hidden, ring_hidden,
+                                     g_hidden * sizeof(sycl::half), nullptr,
+                                     0, nullptr));
+    ok(zeCommandListAppendMemoryCopy(list, impl_->ids, ring_ids,
+                                     top_k * sizeof(std::int32_t), nullptr, 0,
+                                     nullptr));
+    ok(zeCommandListAppendMemoryCopy(list, impl_->weights, ring_weights,
+                                     top_k * sizeof(float), nullptr, 0,
+                                     nullptr));
+    ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
+    set_ptr(gu, 0, impl_->hidden);
+    set_ptr(gu, 1, impl_->ids);
+    set_ptr(gu, 2, w13L);
+    set_ptr(gu, 3, s13L);
+    set_ptr(gu, 4, w13gL);
+    set_ptr(gu, 5, impl_->scratch);
+    set_u32(gu, 6, E);
+    set_u32(gu, 7, K);
+    set_u32(gu, 8, I);
+    set_u32(gu, 9, top_k);
+    set_u32(gu, 10, gu_tiles);
+    ok(zeKernelSetGroupSize(gu, kBakedWG, 1, 1));
+    ze_group_count_t gc_gu{top_k * gu_tiles, 1, 1};
+    ok(zeCommandListAppendLaunchKernel(list, gu, &gc_gu, nullptr, 0, nullptr));
+    ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
+    set_ptr(w2k, 0, impl_->ids);
+    set_ptr(w2k, 1, impl_->weights);
+    set_ptr(w2k, 2, w2L);
+    set_ptr(w2k, 3, s2L);
+    set_ptr(w2k, 4, w2gL);
+    set_ptr(w2k, 5, impl_->scratch);
+    set_ptr(w2k, 6, impl_->out16);
+    set_u32(w2k, 7, E);
+    set_u32(w2k, 8, K);
+    set_u32(w2k, 9, top_k);
+    set_u32(w2k, 10, w2_tiles);
+    set_u32(w2k, 11, 1u);
+    ok(zeKernelSetGroupSize(w2k, kBakedWG, 1, 1));
+    ze_group_count_t gc_w2{w2_tiles, 1, 1};  // M = 1
+    ok(zeCommandListAppendLaunchKernel(list, w2k, &gc_w2, nullptr, 0,
+                                       nullptr));
+    ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
+    ok(zeCommandListAppendMemoryCopy(
+        list, reinterpret_cast<sycl::half*>(ring_output), impl_->out16,
+        g_hidden * sizeof(sycl::half), nullptr, 0, nullptr));
+    // Order the completion strictly after the D2H: without this the writer
+    // can observe completion==1 while the output copy is still in flight.
+    ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
+    ok(impl_->cs_write(xl, &wr, const_cast<std::uint32_t*>(completion), 1ull));
+    ok(zeCommandListClose(list));
+    if (zr != ZE_RESULT_SUCCESS) {
+      zeCommandListDestroy(list);
+      return fail("baked: layer record failed");
+    }
+    impl_->baked_lists[layer] = list;
+    return ProviderStatus::ok;
+  } catch (...) {
+    try {
+      impl_->set_current_exception("provider baked_record_layer failed: ");
+    } catch (...) {
+    }
+    return ProviderStatus::device_error;
+  }
+}
+
+ProviderStatus B70Provider::baked_execute_step() {
+  try {
+    ze_command_queue_handle_t zq = nullptr;
+    ze_command_list_handle_t* lists = nullptr;
+    std::uint32_t count = 0;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      if (impl_->health.stopped) {
+        return ProviderStatus::shutdown;
+      }
+      if (!impl_->health.loaded) {
+        return ProviderStatus::not_loaded;
+      }
+      if (impl_->baked_failed || impl_->baked_queue == nullptr ||
+          impl_->baked_lists.size() != g_layers) {
+        return ProviderStatus::device_error;
+      }
+      for (ze_command_list_handle_t l : impl_->baked_lists) {
+        if (l == nullptr) {
+          return ProviderStatus::device_error;
+        }
+      }
+      zq = impl_->baked_queue;
+      lists = impl_->baked_lists.data();
+      count = static_cast<std::uint32_t>(impl_->baked_lists.size());
+    }
+    if (zeCommandQueueExecuteCommandLists(zq, count, lists, nullptr) !=
+        ZE_RESULT_SUCCESS) {
+      impl_->baked_failed = true;
+      impl_->set_error("baked: step submit failed");
+      return ProviderStatus::device_error;
+    }
+    // Park until the step drains. Scanning mid-step is exactly the
+    // signal-steal race of kill-bench 22; the protocol serializes layers by
+    // construction (layer L+1's WAIT can only fire after the consumer takes
+    // layer L's completion), so there is nothing useful to do here anyway.
+    for (;;) {
+      const ze_result_t r = zeCommandQueueSynchronize(zq, 5'000'000ull);
+      if (r == ZE_RESULT_SUCCESS) {
+        break;
+      }
+      if (r != ZE_RESULT_NOT_READY) {
+        impl_->baked_failed = true;
+        impl_->set_error("baked: step synchronize failed");
+        return ProviderStatus::device_error;
+      }
+      if (impl_->health.stopped) {
+        return ProviderStatus::shutdown;
+      }
+    }
+    impl_->health.dispatches += g_layers;
+    return ProviderStatus::ok;
+  } catch (...) {
+    try {
+      impl_->set_current_exception("provider baked_execute_step failed: ");
     } catch (...) {
     }
     return ProviderStatus::device_error;

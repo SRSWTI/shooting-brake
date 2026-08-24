@@ -25,6 +25,14 @@ sycl::event nvfp4_moe_split_sycl(sycl::queue &q, const void *hidden, const int *
                                  bool multiply_router_weight, DType act_dt,
                                  const sycl::event &output_ready);
 
+// Baked decode-chain support: native Level-Zero kernel handles (as void*)
+// for the pre-recorded per-layer command lists. `I` selects the compiled
+// SLM instantiation of the w2 epilogue (512/1024/2048); returns false for
+// unsupported I or if handle extraction fails. Kernel argument order is the
+// functor field order documented at the definitions in nvfp4_moe.sycl.cpp.
+bool nvfp4_baked_handles(sycl::queue &q, std::size_t I, void **gate_up_handle,
+                         void **w2_out16_handle);
+
 // Grouped form: routes are sorted by expert, then each expert's rows run as a
 // DPAS GEMM whose dequantized weight tiles are reused across 32 rows. Wins
 // once tokens actually share experts (roughly M*top_k/E >= 8); at decode

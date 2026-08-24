@@ -295,6 +295,16 @@ void nvfp4_moe_split(sycl::queue &q, const void *hidden, const int *topk_ids,
                      std::size_t M, std::size_t E, std::size_t top_k, std::size_t K, std::size_t I,
                      DType act_dt, bool multiply_router_weight = true,
                      Variant variant = Variant::sycl, bool blocking = true);
+
+// Baked decode chain: native Level-Zero kernel handles for pre-recording
+// WAIT -> gate_up -> w2-epilogue(fp16) -> D2H -> WRITE per-layer command
+// lists (the only doorbell shape that survived measurement; see
+// kill-bench-level-up 22/23). gate_up args: hidden(half*), ids, w13, s13,
+// w13_global, scratch, then u32 E, K, I, top_k, row_tiles. w2 args: ids,
+// weights, w2, s2, w2_global, scratch, out16(half*), then u32 E, K, top_k,
+// row_tiles, mul_router. Returns false when I has no compiled instantiation.
+bool nvfp4_moe_baked_handles(sycl::queue &q, std::size_t I,
+                             void **gate_up_handle, void **w2_out16_handle);
 // Decode-oriented routed MoE with AutoGPTQ int4 grouped weights. Projection
 // qweights are [reduction/8,output] int32 (eight consecutive reduction values
 // per word); scales are [reduction/group_size,output] fp16 and may be

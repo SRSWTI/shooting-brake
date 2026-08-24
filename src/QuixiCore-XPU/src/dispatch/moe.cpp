@@ -50,6 +50,11 @@ void nvfp4_moe_split(sycl::queue &q, const void *hidden, const int *topk_ids,
   if (blocking)
     event.wait();
 }
+
+bool nvfp4_moe_baked_handles(sycl::queue &q, std::size_t I,
+                             void **gate_up_handle, void **w2_out16_handle) {
+  return kernels::nvfp4_baked_handles(q, I, gate_up_handle, w2_out16_handle);
+}
 void int4_moe_split(
     sycl::queue &q, const void *hidden, const int *topk_ids,
     const float *topk_weights, const std::int32_t *gate_qweight,

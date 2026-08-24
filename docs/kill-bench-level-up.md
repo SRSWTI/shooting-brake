@@ -949,3 +949,36 @@ kernel-name classes out of the anonymous namespace (get_kernel_id needs
 visibility) or export a handle-getter from that TU; (b) provider bakes 47
 per-layer lists at bank load (M=1 first, per-M variants later); (c) identity
 gate + ITL A/B through the harness before any serving flag.
+
+## 24. Baked chains (mode 3): CORRECT end to end; 138 vs classic 119 us/layer (2026-08-24)
+
+Full pipeline landed behind SHOOTING_BRAKE_B70_CS_DOORBELL=3:
+- quixicore exports named FUNCTOR kernels (Nvfp4BakedGateUp, Nvfp4BakedW2Out16
+  <I,R>) + nvfp4_moe_baked_handles() -- same-TU handle extraction, field-order
+  arg ABI (u32 scalars separately probe-proven: b70_u32_abi_probe.cpp).
+- provider baked_record_layer(): ONE closed regular command list per layer --
+  WAIT(sig==1) -> clear -> barrier -> H2D x3 -> gate_up -> fused w2 epilogue
+  (rowmajor, register accumulation, no atomics, no zero-fill, direct fp16)
+  -> D2H -> barrier -> WRITE(comp=1). baked_execute_step(): one
+  ExecuteCommandLists for all 47 + synchronize (fence semantics).
+- **Parity PASS: worst max-rel 9.4e-4 across 47 layers** vs the classic split
+  path, real bank, real pinned rings, 30-step replay.
+
+The bisection that got there (kill-bench discipline, seven discriminators):
+kernels bit-exact (b70_baked_kernel_ab.cpp stages 1-2), pinned-ring copies
+clean (stage 3), u32 ABI clean, ring import irrelevant, zero-hidden/zero-
+weights/neg-ids all prove inputs land... and the actual bug was THE GATE:
+the harness's torch RNG was unseeded, so cross-process parity compared
+different INPUTS, not different modes. Instrument rule, now enforced in the
+harness: parity gates must be deterministic before they may accuse anything.
+
+**Speed: 138.1 us/layer (R=2, device-scope clears for layers 1+) vs classic
+119.5.** Correct but not yet a win; NOT flag-ready. The ~19 us decomposes to
+(a) ~12-command list structural overhead (~20 us measured in the baked probe)
+and (b) the token-major epilogue's SLM activation refills (pairs x row_tiles
+fills; 7.7 MB/layer at R=2 vs quixicore's 1 MB at R=16-atomic). Next levers,
+profiling-led: per-command timestamps on the baked list, epilogue refill
+restructure (global-activation kernel fusion into gate_up, or pair-major
+tiles with a token-major reduction), fold the ids+weights H2D into one copy,
+and re-testing R in {2,4} after the refill fix. Target stays ~90 us -> ITL
+12.1 -> ~10.6-11.0 ms; the vLLM SLO A/B runs the day the harness beats 119.

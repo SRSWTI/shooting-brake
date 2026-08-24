@@ -148,6 +148,24 @@ class B70Provider final {
                                std::size_t M, volatile std::uint32_t* signal,
                                volatile std::uint32_t* completion);
 
+  // Baked decode chain (mode 3, SHOOTING_BRAKE_B70_CS_DOORBELL=3): each layer
+  // gets ONE pre-recorded raw command list -- WAIT(signal==1) ->
+  // WRITE(signal=0) -> H2D x3 -> gate_up -> fused w2 epilogue (direct fp16)
+  // -> D2H -> WRITE(completion=1) -- recorded once at registration, replayed
+  // per step with a single ExecuteCommandLists. No live appends (the 80-95 us
+  // per-bracket trap, kill-bench 22), no UR adapter involvement, no event
+  // seams (kill-bench 23). M=1 decode and out_fp16 only; everything else
+  // stays on the classic sweep.
+  ProviderStatus baked_record_layer(std::uint64_t generation,
+                                    std::size_t layer,
+                                    const sycl::half* ring_hidden,
+                                    const std::int32_t* ring_ids,
+                                    const float* ring_weights,
+                                    float* ring_output,
+                                    volatile std::uint32_t* signal,
+                                    volatile std::uint32_t* completion);
+  ProviderStatus baked_execute_step();
+
   ProviderStatus issue_cs_chain(std::uint64_t generation, std::size_t layer,
                                 const sycl::half* ring_hidden,
                                 const std::int32_t* ring_ids,

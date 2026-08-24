@@ -49,6 +49,9 @@ def main() -> int:
                     help="ring all layers up front, then collect completions"
                          " -- separates chain execution rate from the serial"
                          " writer's per-layer round-trip latency")
+    ap.add_argument("--dump-out", default=None,
+                    help="save every layer's output row 0 (fp16) for "
+                         "cross-mode numerical parity checks")
     a = ap.parse_args()
 
     if a.classic:
@@ -62,6 +65,9 @@ def main() -> int:
 
     import numpy as np
     import torch  # torch pin_memory == cudaHostAlloc == production lane memory
+    torch.manual_seed(7)  # parity gates compare ACROSS PROCESSES: rings
+    # must be identical or the gate compares different inputs, not modes
+    # (cost one full afternoon of kernel-side bisection to find).
 
     sys.path.insert(0, str(REPO / "src/phase4/src"))
     from shooting_brake_vllm.b70_binding import B70ProviderClient
@@ -91,6 +97,15 @@ def main() -> int:
                               pin_memory=True),
             w=torch.rand(2048, K, dtype=torch.float32, pin_memory=True),
         )
+        if os.environ.get("HARNESS_ZERO_HIDDEN"):
+            t["hid"].zero_()  # correct math must then emit EXACTLY zero
+        if os.environ.get("HARNESS_ZERO_WEIGHTS"):
+            t["w"].zero_()  # router weights 0 -> output must be exactly 0
+        if os.environ.get("HARNESS_NEG_IDS"):
+            t["ids"].fill_(-1)  # all routes invalid -> output must be 0
+        if os.environ.get("HARNESS_UNIFORM"):
+            t["ids"].fill_(7)   # uniform routing: isolates per-pair indexing
+            t["w"].fill_(0.1)
         t["out"] = torch.zeros(2048, H, dtype=torch.float16, pin_memory=True)
         r = lib.sb_b70_poll_register(
             poller, ctypes.c_size_t(layer),
@@ -172,6 +187,10 @@ def main() -> int:
     print(f"[harness] min = {st[0]:.2f} ms, max = {st[-1]:.2f} ms")
     print("[harness] classic-poller reference for this shape: ~61 us/layer "
           "handshake + ~68 us service")
+    if a.dump_out:
+        np.savez(a.dump_out,
+                 **{f"l{i}": lanes[i]["out"][0].numpy() for i in range(L)})
+        print(f"[harness] outputs dumped -> {a.dump_out}")
     lib.sb_b70_poll_stop(poller)
     lib.sb_b70_poll_destroy(poller)
     c.shutdown()

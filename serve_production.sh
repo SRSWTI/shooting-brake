@@ -30,6 +30,17 @@ BOOT_TIMEOUT_S="${SB_BOOT_TIMEOUT_S:-900}"
 # load-bearing choices explicitly. Measured here: 139x on repeated prompts.
 export SB_EXTRA_ARGS="--enable-prefix-caching ${SB_EXTRA_ARGS:-}"
 
+# KV pool: claim the engine's own "fully utilize" figure instead of the 0.85
+# utilization heuristic -- 8.29 -> 10.69 GiB (+29%), 131K-request concurrency
+# 1.25x -> 1.61x, ITL guard 11.78 ms (baseline band 11.7-12.5). KV cannot go
+# on the B70s: attention lives on the 5090 (per-token PCIe reads would blow
+# ITL) and B70 allocations shadow host RAM 1:1 (kill-bench, the 47 GiB find).
+# CHECKPOINT-SPECIFIC: re-derive from the boot log advisory
+# ("--kv-cache-memory=... to fully utilize") whenever weights/MML/util change;
+# an oversized value fails the boot loudly, it never silently degrades.
+SB_KV_BYTES="${SB_KV_BYTES:-11473444352}"
+export SB_EXTRA_ARGS="--kv-cache-memory=${SB_KV_BYTES} ${SB_EXTRA_ARGS}"
+
 echo "[serve] stopping any previous server..."
 pkill -TERM -f 'vllm serve' 2>/dev/null
 for _ in $(seq 1 10); do pgrep -f 'VLLM::EngineCore' >/dev/null || break; sleep 1; done
@@ -55,7 +66,7 @@ done
 MODELS_JSON="$(curl -fsS "${BASE}/v1/models")"
 SERVED_ID="$(printf '%s' "${MODELS_JSON}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')"
 CTX="$(printf '%s' "${MODELS_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"][0]; print(d.get("max_model_len", "unknown"))')"
-KV_LINE="$(grep -a "Available KV cache memory" "${LOG}" | tail -1 | sed 's/.*\] //')"
+KV_LINE="$(grep -aoE "GPU KV cache size: [0-9,]+ tokens|Available KV cache memory: [0-9.]+ GiB|Maximum concurrency for [0-9,]+ tokens per request: [0-9.]+x" "${LOG}" | tail -2 | paste -sd '; ' -)"
 PREFIX_STATE="$(grep -ao "enable_prefix_caching=[A-Za-z]*" "${LOG}" | tail -1)"
 CAPTURE_LINE="$(grep -a "Graph capturing finished" "${LOG}" | tail -1 | sed 's/.*\] //')"
 

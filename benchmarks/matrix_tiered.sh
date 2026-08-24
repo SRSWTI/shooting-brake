@@ -50,6 +50,7 @@ start_server() {
   SHOOTING_BRAKE_B70_MAX_BATCH=2048 \
   SHOOTING_BRAKE_B70_OUT_FP16=1 \
   SB_MNBT=2048 SB_MNS=6 SYCL_UR_USE_LEVEL_ZERO_V2=0 \
+  SHOOTING_BRAKE_B70_PIPELINE="${SHOOTING_BRAKE_B70_PIPELINE:-1}" \
     setsid nohup benchmarks/serve_jota_r15_dual.sh > /tmp/sb_matrix_serve.log 2>&1 < /dev/null &
   disown
   for _ in $(seq 1 100); do

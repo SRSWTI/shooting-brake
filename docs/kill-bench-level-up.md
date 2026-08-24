@@ -568,3 +568,45 @@ paired A/B (1K-127K, 3 repeats) where the plugin's real buffers apply --
 the standalone harness is disqualified as a speed instrument until suspect 1
 is resolved. Tenth mechanism lesson: the probe's conditions are part of the
 claim.
+
+## 12. Pipelining lands: +5-6% at 16K-127K, mechanism confirmed (2026-08-24)
+
+Registration re-measure (`sb_b70_register_host`, commit `318d146c`): the
+Phase-3 regression was entirely the pageable-host staging path. Registered,
+standalone nchunks=2 is 17.97 vs 18.18 ms serial.
+
+Phase 4 paired A/B (3 repeats/arm, cold, prefix-disjoint, same session,
+MML=163840, quality gate green on all runs):
+
+| ctx | baseline | PIPELINE=2 | speedup | ranges overlap? |
+|---|---:|---:|---:|---|
+| 1K | 0.439 s | 0.445 s | 0.99x | yes (wash) |
+| 8K | 3.281 s | 3.374 s | 0.97x | yes (wash) |
+| 16K | 6.513 s | 6.122 s | **1.064x** | no |
+| 32K | 13.449 s | 12.696 s | **1.059x** | no |
+| 64K | 28.689 s | 27.045 s | **1.061x** | no |
+| 96K | 45.755 s | 43.652 s | **1.048x** | no |
+| 127K | 62.432 s | 59.449 s | **1.050x** | no |
+
+Aggregate 460 -> 438 us/token (1.047x). 32K production band: 410 -> 387
+us/token, **4.40x** vs the 1,705 baseline. 127K: 59.45 s vs the RTX PRO 6000's
+18.93 s -> **3.14x** (was 3.30x).
+
+- **Trace cross-check passed:** per-dispatch service at M=2048 fell
+  13.04 -> 12.16 ms (d0) and 15.16 -> 14.06 ms (d1) with bytes/dispatch
+  constant at 25.33 MB. Service down, bytes flat = the overlap is physical.
+  Gen3 hides more absolute time, as its slower transfers predict.
+- **1K/8K wash is the tile-policy crossover:** single-dispatch prompts chunk
+  to 512-1024 rows -> 60 rows/expert -> small-tile regime eats the overlap.
+  A rows-per-expert floor on the pipelined arm would recover 8K; parked.
+- **The 1.29x prediction was wrong; the probe's heavy-kernel row (1.10x) was
+  right.** The max(transfer, compute) model ignored that the CCS also runs
+  the narrow passes and barriers, and that only the copy engine overlaps.
+  Eleventh mechanism lesson, same shape as the first ten.
+- **Phase 0 answered en passant:** shared-uplink duty during a C=1 ladder is
+  ~36% average (2.3 of 6.44 GB/s). Not saturated; FP8 stays retired.
+- Decode untouched by construction (M=1 takes the split path, pipelined=false).
+
+Phase 5 running detached: `bench-matrix/jota_r15_pipeline2` via matrix_tiered
+(PIPELINE=2 passed through tier reboots, one root per arm; baseline surface is
+the banked `jota_r15_c6` grid). Monitor: `benchmarks/matrix_progress.sh`.

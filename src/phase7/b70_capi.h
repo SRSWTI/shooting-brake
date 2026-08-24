@@ -130,6 +130,14 @@ int sb_b70_take(sb_b70_provider_t* provider, uint64_t generation,
  * environment -- a mismatch produces garbage, not an error. */
 int sb_b70_out_fp16(sb_b70_provider_t* provider);
 
+/* Import a caller-owned host range into the device runtime so H2D/D2H DMA
+ * directly instead of staging through the driver. Call once per long-lived
+ * buffer after load; the provider unregisters everything on teardown.
+ * Returns 0 on success, -1 otherwise (failure is a speed problem, never a
+ * correctness one -- copies still work unregistered). */
+int sb_b70_register_host(sb_b70_provider_t* provider, const void* ptr,
+                         size_t bytes);
+
 size_t sb_b70_num_resident(sb_b70_provider_t* provider);
 
 /**

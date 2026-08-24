@@ -377,6 +377,18 @@ int sb_b70_out_fp16(sb_b70_provider_t* provider) {
   return p->capability().output_fp16 ? 1 : 0;
 }
 
+int sb_b70_register_host(sb_b70_provider_t* provider, const void* ptr,
+                         const size_t bytes) {
+  // Imports a caller-owned host range into the device runtime
+  // (prepare_for_device_copy) so H2D/D2H DMA directly instead of staging.
+  // The poller rings already get this at registration; this export extends it
+  // to the issue/take prefill path, whose buffers were previously CUDA-pinned
+  // but Level-Zero-unknown. Unregistered on provider teardown.
+  if (provider == nullptr || ptr == nullptr || bytes == 0) return -1;
+  auto* p = reinterpret_cast<B70Provider*>(provider);
+  return p->register_host_range(ptr, bytes) ? 0 : -1;
+}
+
 size_t sb_b70_num_resident(sb_b70_provider_t* provider) {
   if (!provider) return 0;
   auto* p = reinterpret_cast<B70Provider*>(provider);

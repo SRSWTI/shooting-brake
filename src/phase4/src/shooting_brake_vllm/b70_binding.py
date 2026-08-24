@@ -371,6 +371,27 @@ class B70ProviderClient:
             )
         return seq
 
+    def register_host(self, array: "np.ndarray") -> bool:
+        """Import a long-lived host buffer into the device runtime (DMA-able).
+
+        The poller rings get this at registration; issue/take buffers
+        historically did not, so prefill H2D/D2H staged through the driver.
+        Best-effort by design: providers without the symbol, or runtimes that
+        refuse the import, leave copies on the staged path -- slower, never
+        wrong. Call once per buffer after load(); the provider unregisters on
+        teardown, so the array must outlive the provider.
+        """
+        fn = getattr(self._lib, "sb_b70_register_host", None)
+        if fn is None or not self._handle or not self._loaded:
+            return False
+        fn.restype = ctypes.c_int
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        return fn(
+            self._handle,
+            array.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_size_t(array.nbytes),
+        ) == 0
+
     @property
     def out_dtype(self) -> "np.dtype":
         """Element type take() writes -- asked of the provider, never guessed.

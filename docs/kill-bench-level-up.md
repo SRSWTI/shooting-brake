@@ -727,3 +727,30 @@ Remaining decode levers, in order: (a) decompose the 143 us further with a
 torch-profiler capture correlated to the doorbell trace -- scheduler glue vs
 replay vs handshake; (b) the 61 us handshake (immediate command lists /
 submission path); (c) ngram behind a workload flag after the 120-prompt sweep.
+
+## 17. Decode verdict + production defaults locked (2026-08-24)
+
+**Remaining decode systems levers: parked, with the arithmetic on record.**
+Handshake work (47 x 61 us, maybe halvable -> ~1.4 ms) plus norm/router kernel
+fusion (~1-1.9 ms) land at best ~9.5 ms ITL after weeks of gated C++/CUDA --
+moving the PRO 6000 crossover from 127K to ~64K and never touching their
+short-context numbers. 83 vs 100 tok/s is invisible to a single user. Not the
+efficient path; revisit only with nothing better to do.
+
+**The decode roadmap is a training artifact:** finetune Laguna-S-2.1-DFlash on
+r15's own generations. Serving integration is proven end-to-end (k=15 boots,
+verifies, M<=128 doorbell fits); acceptance is the only broken piece (0/7,665
+because the drafter never saw the pruned target). At normal DFlash acceptance
+that is 4-6 ms effective decode -- past the PRO 6000 at EVERY context.
+
+**ngram k=4 is a WORKLOAD FLAG, never a default.** It WAS tested at long
+context: 8.6 ms TPOT at ~1.4K ctx but 17-25 ms at 13K-107K -- the CPU lookup
+scales with prompt length and inverts our flat-line advantage exactly where we
+are strongest. Flag: SB_SPEC on the serve script. Any adoption for short-ctx
+agent loops still owes the 120-prompt argmax sweep.
+
+**Production defaults now equal the verified best arm** (serve script + tier
+driver): GROUPED=1, OUT_FP16=1, MAX_BATCH=2048, PIPELINE=2, MNBT=2048, MNS=6.
+Everything else in the tree from the decode session is instruments and docs;
+the two negative-result prototypes (FP8 wire, FULL-graph) are reverted /
+config-only. Session-end state: what ships IS what was measured best.

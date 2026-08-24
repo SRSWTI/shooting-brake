@@ -95,7 +95,18 @@ export SHOOTING_BRAKE_B70_BANKS="${SHOOTING_BRAKE_B70_BANKS:-$PWD/src/phase1/exp
 export SHOOTING_BRAKE_B70_SELECTORS="${SHOOTING_BRAKE_B70_SELECTORS:-0000:15:00.0,0000:11:00.0}"
 export SHOOTING_BRAKE_B70_POLL_CPUS="${SHOOTING_BRAKE_B70_POLL_CPUS:-5,6}"
 export SHOOTING_BRAKE_B70_LIB="$PWD/src/phase7/libsb_b70_provider.so"
-export SHOOTING_BRAKE_B70_MAX_BATCH="${SHOOTING_BRAKE_B70_MAX_BATCH:-256}"
+# --- Production defaults = the verified best arm (2026-08-24) ---------------
+# grouped NVFP4 GEMM + fp16 result wire + prefetch_dist=1 (baked in the .so) +
+# two-chunk copy/compute pipelining. 1,705 -> 387 us/token at the 32K band
+# (4.40x), quality gates green (Bench 26 sweep + Phase 4 A/B + 36/36 interim
+# SLO rows). Every knob stays overridable for A/B work.
+export SHOOTING_BRAKE_B70_GROUPED="${SHOOTING_BRAKE_B70_GROUPED:-1}"
+export SHOOTING_BRAKE_B70_OUT_FP16="${SHOOTING_BRAKE_B70_OUT_FP16:-1}"
+export SHOOTING_BRAKE_B70_MAX_BATCH="${SHOOTING_BRAKE_B70_MAX_BATCH:-2048}"
+export SHOOTING_BRAKE_B70_PIPELINE="${SHOOTING_BRAKE_B70_PIPELINE:-2}"
+# SB_SPEC stays a WORKLOAD FLAG, never a default: ngram k=4 measured 8.6 ms
+# TPOT at short context but 24.8 ms at 107K (CPU lookup scales with prompt);
+# dflash accepts 0% on the REAP-pruned target. See kill-bench-level-up 15/17.
 # ROUTE_TRACE stages topk_ids D2H inside the routed-expert forward, which is
 # not capture-safe: with it set, graph capture dies with
 # cudaErrorStreamCaptureUnsupported before the engine ever serves.
@@ -114,9 +125,9 @@ exec .venv/bin/vllm serve srswti/axe-superveloce-jota-118b-r15-nvfp4 \
   --trust-remote-code \
   --moe-backend "${SB_MOE_BACKEND:-cutlass}" \
   --max-model-len "${SB_MML:-131072}" \
-  --max-num-batched-tokens "${SB_MNBT:-512}" \
+  --max-num-batched-tokens "${SB_MNBT:-2048}" \
   --gpu-memory-utilization "${SB_GPU_UTIL:-0.85}" \
-  --max-num-seqs "${SB_MNS:-4}" \
+  --max-num-seqs "${SB_MNS:-6}" \
   --reasoning-parser poolside_v1 \
   ${SB_SPEC:+--speculative-config "$SB_SPEC"} \
   --enable-auto-tool-choice \

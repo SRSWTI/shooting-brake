@@ -665,5 +665,245 @@
     "idle_fraction": 0.011
    }
   }
+ },
+ {
+  "label": "cs-off-r1",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r15",
+  "n": 2,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 11.697481278451068,
+  "ttft_s_mean_excl_first": 0.06072994999703951,
+  "requests": [
+   {
+    "ttft_s": 0.18074938000063412,
+    "itl_ms": 11.628254188233804,
+    "chunks": 256
+   },
+   {
+    "ttft_s": 0.06072994999703951,
+    "itl_ms": 11.697481278451068,
+    "chunks": 256
+   }
+  ],
+  "act_freq": {
+   "/sys/class/drm/card3/device/tile0/gt0/freq0/act_freq": {
+    "samples": 1218,
+    "active_min": 2000,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.007
+   }
+  }
+ },
+ {
+  "label": "cs-off-r2",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r15",
+  "n": 2,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 14.885831729089656,
+  "ttft_s_mean_excl_first": 0.059490899002412334,
+  "requests": [
+   {
+    "ttft_s": 0.06190167699242011,
+    "itl_ms": 12.24462454763217,
+    "chunks": 253
+   },
+   {
+    "ttft_s": 0.059490899002412334,
+    "itl_ms": 14.885831729089656,
+    "chunks": 252
+   }
+  ],
+  "act_freq": {
+   "/sys/class/drm/card3/device/tile0/gt0/freq0/act_freq": {
+    "samples": 1367,
+    "active_min": 2300,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.018
+   }
+  }
+ },
+ {
+  "label": "cs-off-r3",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r15",
+  "n": 2,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 12.077617572561163,
+  "ttft_s_mean_excl_first": 0.12925710198760498,
+  "requests": [
+   {
+    "ttft_s": 0.06784897499892395,
+    "itl_ms": 17.410721168647907,
+    "chunks": 256
+   },
+   {
+    "ttft_s": 0.12925710198760498,
+    "itl_ms": 12.077617572561163,
+    "chunks": 256
+   }
+  ],
+  "act_freq": {
+   "/sys/class/drm/card3/device/tile0/gt0/freq0/act_freq": {
+    "samples": 1518,
+    "active_min": 2000,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.027
+   }
+  }
+ },
+ {
+  "label": "cs-off-sanity",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r15",
+  "n": 2,
+  "out_tokens": 128,
+  "itl_ms_mean_excl_first": 18.321903496036512,
+  "ttft_s_mean_excl_first": 0.0607209640002111,
+  "requests": [
+   {
+    "ttft_s": 0.25767833199643064,
+    "itl_ms": 12.275794543317652,
+    "chunks": 128
+   },
+   {
+    "ttft_s": 0.0607209640002111,
+    "itl_ms": 18.321903496036512,
+    "chunks": 128
+   }
+  ],
+  "act_freq": {
+   "/sys/class/drm/card3/device/tile0/gt0/freq0/act_freq": {
+    "samples": 826,
+    "active_min": 1000,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.01
+   }
+  }
+ },
+ {
+  "label": "sanity-warm-r1",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r15",
+  "n": 2,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 11.648669007848309,
+  "ttft_s_mean_excl_first": 0.060631729997112416,
+  "requests": [
+   {
+    "ttft_s": 0.2584023520030314,
+    "itl_ms": 11.603775584280454,
+    "chunks": 256
+   },
+   {
+    "ttft_s": 0.060631729997112416,
+    "itl_ms": 11.648669007848309,
+    "chunks": 256
+   }
+  ],
+  "act_freq": {
+   "/sys/class/drm/card3/device/tile0/gt0/freq0/act_freq": {
+    "samples": 1230,
+    "active_min": 850,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.008
+   }
+  }
+ },
+ {
+  "label": "sanity-warm-r2",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r15",
+  "n": 2,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 13.966074886311795,
+  "ttft_s_mean_excl_first": 0.06225758499931544,
+  "requests": [
+   {
+    "ttft_s": 0.06322593499498907,
+    "itl_ms": 25.868397513712647,
+    "chunks": 256
+   },
+   {
+    "ttft_s": 0.06225758499931544,
+    "itl_ms": 13.966074886311795,
+    "chunks": 256
+   }
+  ],
+  "act_freq": {
+   "/sys/class/drm/card3/device/tile0/gt0/freq0/act_freq": {
+    "samples": 2022,
+    "active_min": 2450,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.018
+   }
+  }
+ },
+ {
+  "label": "sanity-warm-r3",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r15",
+  "n": 2,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 16.463842325531147,
+  "ttft_s_mean_excl_first": 0.06099210400134325,
+  "requests": [
+   {
+    "ttft_s": 0.06190986200817861,
+    "itl_ms": 11.999352188990818,
+    "chunks": 255
+   },
+   {
+    "ttft_s": 0.06099210400134325,
+    "itl_ms": 16.463842325531147,
+    "chunks": 256
+   }
+  ],
+  "act_freq": {
+   "/sys/class/drm/card3/device/tile0/gt0/freq0/act_freq": {
+    "samples": 1450,
+    "active_min": 2400,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.026
+   }
+  }
+ },
+ {
+  "label": "sanity-warm-r4",
+  "url": "http://127.0.0.1:8017/v1/chat/completions",
+  "model": "shooting-brake-jota-r15",
+  "n": 2,
+  "out_tokens": 256,
+  "itl_ms_mean_excl_first": 13.842594643139426,
+  "ttft_s_mean_excl_first": 0.059727713000029325,
+  "requests": [
+   {
+    "ttft_s": 0.06198073500127066,
+    "itl_ms": 12.120304851023498,
+    "chunks": 256
+   },
+   {
+    "ttft_s": 0.059727713000029325,
+    "itl_ms": 13.842594643139426,
+    "chunks": 256
+   }
+  ],
+  "act_freq": {
+   "/sys/class/drm/card3/device/tile0/gt0/freq0/act_freq": {
+    "samples": 1327,
+    "active_min": 2500,
+    "active_max": 2800,
+    "active_median": 2800,
+    "idle_fraction": 0.034
+   }
+  }
  }
 ]

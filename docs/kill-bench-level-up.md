@@ -783,3 +783,28 @@ Integration path (next): per-layer pre-recorded WAIT(seq) -> kernels ->
 WRITE(done) chains in the provider, DeepEP parity protocol (two buffers,
 monotonic counters, release-publish). Kernel handles via SYCL native interop
 or the raw-L0 side path. Gate: identity harness, then ITL probe, then smoke.
+
+## 19. Doorbell 2.0 probe #2: the ride-along chain works, 7.9-8.7 us (2026-08-24)
+
+`experiments/b70_sycl_zex_interop_probe.cpp` validates the integration design
+that needs NO kernel-handle extraction: zex WAIT/WRITE appended directly on the
+provider-shaped in-order SYCL queue (which IS an L0 immediate command list on
+this stack), bracketing ordinary SYCL kernel + memcpy submissions.
+
+  ring -> [WAIT -> kernel -> D2H -> WRITE] -> host sees completion
+  Gen4: p50 7.86 us (p99 9.99)   Gen3: p50 8.67 us (p99 11.09)   vs 61 us poller
+
+One production-grade hazard caught by the probe, not by users: the D2H memcpy
+rides the BCS while zex commands order only within the CCS immediate list --
+the completion fired BEFORE the payload landed. Fix: a marker kernel after the
+copy joins SYCL's cross-engine event chain on the CCS; WRITE goes after it.
+Ordering + payload visibility verified CORRECT on both cards after the fix.
+
+Integration blueprint (next, behind SHOOTING_BRAKE_B70_CS_DOORBELL=1):
+per step, layer 0 rides the host poller as today (M becomes known); the poller
+then pre-enqueues layers 1..46 as [WAIT(signal_L==seq) -> H2D -> kernels ->
+D2H -> marker -> WRITE(completion_L)] on the SYCL queue -- host leaves the
+critical path for 46 of 47 layers, no parked-engine hazard across steps
+(the WAIT parks only after the previous layer drains; steps are atomic).
+Measured pieces: transport 8-9 us (probe 1), full chain 7.9-8.7 us (probe 2).
+The ~9.7 ms ITL row stays a PREDICTION until the paired A/B runs.

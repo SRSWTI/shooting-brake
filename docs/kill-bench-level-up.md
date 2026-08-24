@@ -630,3 +630,52 @@ The wire hierarchy, final: fp32 -> fp16 was 10x BETTER than the bf16 leg
 (shipped, Bench 26); fp16 -> 8-bit is 11.5x worse for ~5%; 4-bit is terminal.
 fp16 is the knee. Transfer work below fp16 belongs to topology (dedicated
 PCIe lanes on the product), not precision.
+
+---
+
+## 14. Decode campaign: prepped, queued behind the Phase-5 matrix (2026-08-24)
+
+Target: beat the RTX PRO 6000's decode curve (7.02 ms @1K -> 11.10 @127K; ours
+11.40 flat) at most or all contexts, then hold it across concurrency. Every
+microsecond off our flat line moves the crossover left: 10.1 ms beats them at
+96K+, 9.0 at 64K+, 8.0 at 32K+.
+
+### Recon results (SglangDecodeScout, VllmSpecWiring -- full cites in agents)
+
+- **Spec decode is plumbing-compatible end to end.** The doorbell path has no
+  M==1 assumption: staging slices [:M] up to max_batch=128, the poller forwards
+  M unchanged, the provider accepts 0<M<=max_batch. Verification rows are
+  num_seqs*(1+k): ngram k=4 at MNS=6 -> 30 rows; dflash k=15 -> 96. Both fit.
+  GDN and linear-attention backends explicitly size for k. The poolside_v1
+  parser is post-generation only. CUDA-graph keys become token-row sizes --
+  padding may replay 2/4/8/16-row graphs; our M-scaling is sublinear (measured
+  M=2 105 us, M=7 285 us), so verification is cheap.
+- **Copy-ready configs** (serve script now takes SB_SPEC):
+  - ngram: `{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":2,"prompt_lookup_max":5}`
+    (V1 runner only -- V2 rejects ngram; surfaces at boot if it bites)
+  - dflash: `{"method":"dflash","model":"poolside/Laguna-S-2.1-DFlash","num_speculative_tokens":15}`
+    (installed vLLM ships DFlashLagunaForCausalLM; drafter downloading;
+    trained against UNPRUNED Laguna-S-2.1 -- acceptance on r15 is the unknown)
+  - suffix: DEAD here -- validator requires arctic-inference, not installed.
+- **SGLang recon:** strongest transferable idea is full-forward decode graphs
+  (their default); their overlap scheduler is a core-engine-loop change, not
+  portable to a plugin; their only no-weight proposer is the same ngram; a
+  Laguna-eligible fused sigmoid router exists (minor, µs-scale).
+
+### Session plan (server frees when the matrix banks its last cell)
+
+1. `benchmarks/decode_gap_probe.py` -- decompose the 211 us gap by layer index
+   using the architecture itself as the instrument: linear vs full attention
+   layers alternate through identical orchestration, so the linear-layer floor
+   IS the orchestration cost and the full-linear delta IS attention compute.
+2. ngram arm: `SB_SPEC='{"method":"ngram",...}'`, ITL probe + acceptance rate
+   + quality gate. Prediction: effective decode beats the PRO 6000 curve at
+   every context if acceptance >= ~50% on code/prose.
+3. dflash arm: same gate, k=15. Prediction withheld -- acceptance on the
+   REAP-pruned target is unmeasurable from the armchair.
+4. Concurrency surface: guidellm concurrent profiles vs the PRO 6000 bundle's
+   own concurrent results (benchmarks/results/rtx_pro_6000_r15_slo) at matched
+   contexts and rates.
+
+Dead, replicated in recon: suffix (missing dep), MTP (no tensors), more local
+experts, grouped-at-M=1, FP8 KV, overlap scheduler (core-loop surgery).

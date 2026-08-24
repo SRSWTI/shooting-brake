@@ -118,6 +118,7 @@ exec .venv/bin/vllm serve srswti/axe-superveloce-jota-118b-r15-nvfp4 \
   --gpu-memory-utilization "${SB_GPU_UTIL:-0.85}" \
   --max-num-seqs "${SB_MNS:-4}" \
   --reasoning-parser poolside_v1 \
+  ${SB_SPEC:+--speculative-config "$SB_SPEC"} \
   --enable-auto-tool-choice \
   --tool-call-parser poolside_v1 \
   --default-chat-template-kwargs "${SB_TEMPLATE_KWARGS:-{\"enable_thinking\": true, \"thinking\": true\}}" ${SB_EXTRA_ARGS}

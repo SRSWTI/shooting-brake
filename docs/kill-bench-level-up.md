@@ -856,3 +856,14 @@ Projection IF unblocked (prediction, not measurement): ITL 12.1 -> 9.7-10.6 ms
 crossover vs the RTX PRO 6000 moves 127K -> ~96K, and two pinned poller cores
 free. Fusion (+~1 ms) and the finetuned drafter (4-6 ms effective, wins at
 every context) stack on the same chain.
+
+**Unblock path 1 result (2026-08-24): V1-forced boot wedges identically**
+(UR_ADAPTERS_FORCE_LOAD=libur_adapter_level_zero.so.0, CS arm on). Same hang
+at the first M<=32 activity around graph-memory profiling. Verdict: the
+blocker is the chain design x live-engine interaction, NOT V2-vs-V1 list
+management -- which also retires the "ship on V1" escape hatch. The
+standalone poller harness (path 2) is now the only next vehicle, and the
+right one: the wedge point VARIES across variants (before profiling, at
+capture-memory), which smells like a race my probes' single-threaded shape
+never exposes -- the harness can run the poller thread + fake CUDA writer
+concurrently under gdb in seconds per iteration.

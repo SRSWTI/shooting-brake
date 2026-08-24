@@ -535,3 +535,36 @@ split/fused small-M cells are not. Production is insulated: decode rides the
 poller ring, prefill chunks are >=256. Repro: the gate harness against
 /tmp/sb_old.so. Investigate before any new consumer uses raw issue/take at
 small M.
+
+## 11. Pipelining Phases 2-3: correct under concurrency, NOT yet faster (2026-08-24)
+
+Phase 2 (committed `67b5fdcc`): dedicated in-order copy queue, per-chunk RAW
+barriers, one WAR barrier against the previous dispatch, per-chunk D2H behind
+chunk markers. Gate at real concurrency: **M=2048 bitwise identical** at
+nchunks 2 and 4; M=256 <= 4.4e-16 with equal NaN masks -- the baseline's own
+atomic class. A missed hazard would read 1e38, not 1e-16.
+
+Phase 3 standalone (1 card, M=2048, warm p50, issue/take):
+
+| nchunks | p50 ms | vs serial |
+|---|---:|---:|
+| 1 | 18.27 | 1.00x |
+| 2 | 19.42 | **0.94x -- SLOWER** |
+| 4 | 23.29 | 0.78x -- much slower |
+
+The prediction (~1.36x) did NOT survive contact. Two suspects before any
+conclusion, both testable:
+1. **Pageable-host contamination.** The harness feeds plain numpy memory; the
+   dual-queue probe that measured 1.26-1.5x overlap used pinned malloc_host,
+   and production passes registered ranges. Pageable H2D stages through the
+   runtime and can serialize -- the standalone number may be measuring the
+   staging path, not the design.
+2. **nchunks=4 crosses the tile policy.** 241 -> 60 rows/expert lands in the
+   small-tile regime; that cost is real and bounds nchunks at 2 for this M.
+
+Status: flag default-off, nothing shipped regressed, correctness fully gated.
+NEXT: re-measure with registered/pinned host buffers, then Phase 4 in-situ
+paired A/B (1K-127K, 3 repeats) where the plugin's real buffers apply --
+the standalone harness is disqualified as a speed instrument until suspect 1
+is resolved. Tenth mechanism lesson: the probe's conditions are part of the
+claim.

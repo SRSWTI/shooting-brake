@@ -982,3 +982,34 @@ restructure (global-activation kernel fusion into gate_up, or pair-major
 tiles with a token-major reduction), fold the ids+weights H2D into one copy,
 and re-testing R in {2,4} after the refill fix. Target stays ~90 us -> ITL
 12.1 -> ~10.6-11.0 ms; the vLLM SLO A/B runs the day the harness beats 119.
+
+## 25. Baked chains: harness floor found, vLLM capture wedge found, PARKED (2026-08-24)
+
+In-list timestamp profiling (SHOOTING_BRAKE_B70_BAKED_PROFILE=1) settled the
+"138 vs 119" question: H2D 5.3 + gate_up 63.5 + w2 56.9 + D2H 2.0 = 127.7 us
+-- the kernels ARE the time, and they are bandwidth physics: 10 routes x
+5.3 MB = 53 MB/layer at this card's GB/s = ~115 us. The harness classic
+baseline (119.5) is the SAME physics + a ~5 us spin: the harness's tight
+C-loop writer has NO 61-us-class host handshake to remove, so the doorbell's
+prize is invisible there BY CONSTRUCTION. Both arms sit on the bandwidth
+floor; baked pays ~18 us of brackets. Instrument lesson #13: know what your
+baseline is made of before you race it.
+
+Live vLLM A/B (the only terrain that can show the win):
+- Arm A (classic): ITL 12.49 ms, TTFT 0.080 s -- healthy, matches the 12.1-
+  12.5 band.
+- Arm B (SHOOTING_BRAKE_B70_CS_DOORBELL=3): WEDGED at CUDA graph capture 3/4,
+  8+ minutes. Root cause class: baked_execute_step is all-47-or-block --
+  vLLM's warmup/capture dummy passes (partial sweeps; recorded-not-executed
+  signal writes) violate that contract and park the poller in
+  zeCommandQueueSynchronize. The classic sweep tolerates partial steps by
+  construction. The harness cannot reproduce this (its writer always
+  completes steps).
+
+**PARKED per the agreed stop-loss.** State: parity-correct (9.4e-4), fully
+instrumented, capture-unsafe documented, flag default-off, classic path
+untouched and re-verified live (arm A). To revive: (1) arm mode 3 only after
+capture completes (first-real-step latch), (2) bounded execute with partial-
+step recovery, (3) re-run this exact A/B. Expected prize remains the host-hop
+share of the 211 us inter-dispatch gap; the drafter finetune (4-6 ms
+effective) outranks it and is the next lever.

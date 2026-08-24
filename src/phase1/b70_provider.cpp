@@ -499,6 +499,7 @@ struct B70Provider::Impl {
   void* bk_w2 = nullptr;
   ze_command_queue_handle_t baked_queue = nullptr;
   std::vector<ze_command_list_handle_t> baked_lists;
+  std::uint64_t* baked_ts = nullptr;  // [g_layers x 5] in-list timestamps
 
   std::optional<sycl::event> dispatch_begin;
   std::optional<sycl::event> kernel_begin;
@@ -611,6 +612,36 @@ struct B70Provider::Impl {
       // Best-effort drain; the poller is stopped before shutdown in orderly
       // teardown, so this returns immediately unless a step was in flight.
       zeCommandQueueSynchronize(baked_queue, 1'000'000'000ull);
+      if (baked_ts != nullptr && queue) {
+        // Last step's per-segment device times. timerResolution is Hz on
+        // this L0 version when large, ns-per-tick when small -- sanity-pick.
+        try {
+          auto zdev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+              queue->get_device());
+          ze_device_properties_t dp{ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES};
+          zeDeviceGetProperties(zdev, &dp);
+          const double ns_per_tick = dp.timerResolution > 1000000
+                                         ? 1e9 / static_cast<double>(
+                                                     dp.timerResolution)
+                                         : static_cast<double>(
+                                               dp.timerResolution);
+          double seg[4] = {0, 0, 0, 0};
+          for (std::size_t l = 0; l < g_layers; ++l) {
+            const std::uint64_t* t = baked_ts + l * 5;
+            for (int s = 0; s < 4; ++s) {
+              seg[s] += static_cast<double>(t[s + 1] - t[s]) * ns_per_tick /
+                        1000.0 / static_cast<double>(g_layers);
+            }
+          }
+          std::fprintf(stderr,
+                       "[sb_b70] baked profile (last step, mean/layer us): "
+                       "H2D=%.1f gate_up=%.1f w2=%.1f D2H=%.1f total=%.1f "
+                       "(tick=%.2fns)\n",
+                       seg[0], seg[1], seg[2], seg[3],
+                       seg[0] + seg[1] + seg[2] + seg[3], ns_per_tick);
+        } catch (...) {
+        }
+      }
       for (ze_command_list_handle_t l : baked_lists) {
         if (l != nullptr) zeCommandListDestroy(l);
       }
@@ -2527,6 +2558,21 @@ ProviderStatus B70Provider::baked_record_layer(
     // device staging while the previous layer still computes (found as
     // all-47-layers-garbage in the harness parity gate).
     ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
+    // Profiling (SHOOTING_BRAKE_B70_BAKED_PROFILE=1): timestamps baked INTO
+    // the list -- zero live appends, read at teardown from the last step.
+    static const bool baked_profile = [] {
+      const char* v = std::getenv("SHOOTING_BRAKE_B70_BAKED_PROFILE");
+      return v != nullptr && v[0] == '1' && v[1] == '\0';
+    }();
+    std::uint64_t* ts = nullptr;
+    if (baked_profile) {
+      if (impl_->baked_ts == nullptr) {
+        impl_->baked_ts = impl_->allocate_host<std::uint64_t>(g_layers * 5);
+      }
+      ts = impl_->baked_ts + layer * 5;
+      ok(zeCommandListAppendWriteGlobalTimestamp(list, ts + 0, nullptr, 0,
+                                                 nullptr));
+    }
     ok(zeCommandListAppendMemoryCopy(list, impl_->hidden, ring_hidden,
                                      g_hidden * sizeof(sycl::half), nullptr,
                                      0, nullptr));
@@ -2536,6 +2582,11 @@ ProviderStatus B70Provider::baked_record_layer(
     ok(zeCommandListAppendMemoryCopy(list, impl_->weights, ring_weights,
                                      top_k * sizeof(float), nullptr, 0,
                                      nullptr));
+    if (ts != nullptr) {
+      ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
+      ok(zeCommandListAppendWriteGlobalTimestamp(list, ts + 1, nullptr, 0,
+                                                 nullptr));
+    }
     ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
     set_ptr(gu, 0, impl_->hidden);
     set_ptr(gu, 1, impl_->ids);
@@ -2552,6 +2603,10 @@ ProviderStatus B70Provider::baked_record_layer(
     ze_group_count_t gc_gu{top_k * gu_tiles, 1, 1};
     ok(zeCommandListAppendLaunchKernel(list, gu, &gc_gu, nullptr, 0, nullptr));
     ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
+    if (ts != nullptr) {
+      ok(zeCommandListAppendWriteGlobalTimestamp(list, ts + 2, nullptr, 0,
+                                                 nullptr));
+    }
     set_ptr(w2k, 0, impl_->ids);
     set_ptr(w2k, 1, impl_->weights);
     set_ptr(w2k, 2, w2L);
@@ -2569,12 +2624,20 @@ ProviderStatus B70Provider::baked_record_layer(
     ok(zeCommandListAppendLaunchKernel(list, w2k, &gc_w2, nullptr, 0,
                                        nullptr));
     ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
+    if (ts != nullptr) {
+      ok(zeCommandListAppendWriteGlobalTimestamp(list, ts + 3, nullptr, 0,
+                                                 nullptr));
+    }
     ok(zeCommandListAppendMemoryCopy(
         list, reinterpret_cast<sycl::half*>(ring_output), impl_->out16,
         g_hidden * sizeof(sycl::half), nullptr, 0, nullptr));
     // Order the completion strictly after the D2H: without this the writer
     // can observe completion==1 while the output copy is still in flight.
     ok(zeCommandListAppendBarrier(list, nullptr, 0, nullptr));
+    if (ts != nullptr) {
+      ok(zeCommandListAppendWriteGlobalTimestamp(list, ts + 4, nullptr, 0,
+                                                 nullptr));
+    }
     ok(impl_->cs_write(xl, &wr, const_cast<std::uint32_t*>(completion), 1ull));
     ok(zeCommandListClose(list));
     if (zr != ZE_RESULT_SUCCESS) {

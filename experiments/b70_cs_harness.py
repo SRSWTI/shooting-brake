@@ -45,6 +45,10 @@ def main() -> int:
     ap.add_argument("--timeout-s", type=float, default=10.0)
     ap.add_argument("--classic", action="store_true",
                     help="force classic poller (unset CS env)")
+    ap.add_argument("--burst", action="store_true",
+                    help="ring all layers up front, then collect completions"
+                         " -- separates chain execution rate from the serial"
+                         " writer's per-layer round-trip latency")
     a = ap.parse_args()
 
     if a.classic:
@@ -113,20 +117,39 @@ def main() -> int:
     wedged = False
     for step in range(a.steps):
         t0 = time.perf_counter()
-        for layer in range(L):
-            comp_views[layer][0] = 0
-            sig_views[layer][0] = M  # ring the doorbell (host store ~= DMA)
+        if a.burst:
+            for layer in range(L):
+                comp_views[layer][0] = 0
+            for layer in range(L):
+                sig_views[layer][0] = M
             deadline = time.perf_counter() + a.timeout_s
-            while comp_views[layer][0] != 1:
-                if time.perf_counter() > deadline:
-                    print(f"[harness] WEDGE: step {step} layer {layer}: "
-                          f"signal={sig_views[layer][0]} completion=0 after "
-                          f"{a.timeout_s}s. Process left alive for gdb "
-                          f"(pid {os.getpid()}).", flush=True)
-                    wedged = True
+            for layer in range(L):
+                while comp_views[layer][0] != 1:
+                    if time.perf_counter() > deadline:
+                        print(f"[harness] WEDGE: step {step} layer {layer}: "
+                              f"signal={sig_views[layer][0]} completion=0 "
+                              f"(burst) after {a.timeout_s}s. Process left "
+                              f"alive for gdb (pid {os.getpid()}).",
+                              flush=True)
+                        wedged = True
+                        break
+                if wedged:
                     break
-            if wedged:
-                break
+        else:
+            for layer in range(L):
+                comp_views[layer][0] = 0
+                sig_views[layer][0] = M  # ring the doorbell (host store ~= DMA)
+                deadline = time.perf_counter() + a.timeout_s
+                while comp_views[layer][0] != 1:
+                    if time.perf_counter() > deadline:
+                        print(f"[harness] WEDGE: step {step} layer {layer}: "
+                              f"signal={sig_views[layer][0]} completion=0 after "
+                              f"{a.timeout_s}s. Process left alive for gdb "
+                              f"(pid {os.getpid()}).", flush=True)
+                        wedged = True
+                        break
+                if wedged:
+                    break
         if wedged:
             break
         step_times.append((time.perf_counter() - t0) * 1e3)

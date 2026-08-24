@@ -896,3 +896,27 @@ for serving, (2) re-run design A (ride-along) in the harness under V1 --
 prediction: ~120 us/layer classic -> ~75-85 us/layer (handshake replaced,
 seams zero because everything rides ONE list), (3) then the vLLM ITL A/B.
 Flag remains default-off; classic path untouched and verified.
+
+## 22. Doorbell 2.0 CLOSED: dead by measurement, three designs deep (2026-08-24)
+
+Mode 2 (`issue_cs_ride`, design A ride-along: brackets on the SYCL queue's own
+immediate list, zero event seams) built, gated, and measured against mode 1 and
+classic in the harness. Correctness clean everywhere. Speed ladder (us/layer,
+M=1, 47 layers, burst-verified writer-independent):
+  classic 120 | design C 383-418 | design A 436-454.
+Bisect attribution (SHOOTING_BRAKE_B70_RIDE_BISECT): satisfied WAIT ~80 us,
+each HOST-scope WRITE ~95 us, markers ~15 us each, wait/write SCOPE irrelevant,
+copy-engine irrelevant, burst (pre-armed signals) irrelevant. Fully stripped
+chain still 252 vs classic 120.
+
+**The mechanism lesson (12th of the campaign): the probe's 8 us bracket was a
+pre-recorded 2-command list replayed on an idle engine. Live zex appends
+interleaved with real kernels pay ~10x -- per-append submission granularity
+against an executing immediate list. Probe conditions are part of the claim.**
+
+Minimum bracket pair ~175 us > the 61 us host handshake it would replace.
+Per-layer live-append doorbells are DEAD on this silicon. Only surviving shape:
+fully pre-recorded per-layer command lists (DeepEP-style), blocked on kernel
+handle extraction from quixicore's SYCL RTC path -- a separate project.
+Flag stays default-off; classic poller keeps the crown. Decode stands at
+12.1 ms; the next lever in the gate order is w2 fusion.

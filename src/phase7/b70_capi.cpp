@@ -161,9 +161,14 @@ class B70Poller {
     const size_t hidden = hidden_size();
     const uint32_t total_layers =
         static_cast<uint32_t>(provider_->capability().num_layers);
-    static const bool cs_env = [] {
+    // 0 = off, 1 = provider-owned raw list (design C, event seams),
+    // 2 = ride-along on the SYCL queue's own immediate list (design A).
+    static const int cs_mode = [] {
       const char* v = std::getenv("SHOOTING_BRAKE_B70_CS_DOORBELL");
-      return v != nullptr && v[0] == '1' && v[1] == '\0';
+      if (v == nullptr || v[0] == '\0' || v[1] != '\0') return 0;
+      if (v[0] == '1') return 1;
+      if (v[0] == '2') return 2;
+      return 0;
     }();
 
     while (running_.load(std::memory_order_relaxed)) {
@@ -175,7 +180,7 @@ class B70Poller {
         known = snapshot.size();
       }
 
-      // Doorbell 2.0 (SHOOTING_BRAKE_B70_CS_DOORBELL=1): once every layer is
+      // Doorbell 2.0 (SHOOTING_BRAKE_B70_CS_DOORBELL=1|2): once every layer
       // registered, decode-shaped steps (M <= 32) ride command-streamer
       // chains and this thread leaves the dispatch critical path entirely --
       // the probes measured the CS bracket at ~8 us against this loop's 61 us
@@ -183,17 +188,23 @@ class B70Poller {
       // stay on the classic sweep below. Any chain failure latches classic
       // mode permanently; the failed step is finished by the sweep, which
       // spins the remaining layers' untouched signals.
-      if (cs_env && !cs_disabled && !snapshot.empty() &&
+      if (cs_mode != 0 && !cs_disabled && !snapshot.empty() &&
           known == total_layers) {
         const uint32_t M = snapshot[0].signal[0];
         if (M != 0 && M <= 32) {
           bool ok = true;
           for (const PollLayer& entry : snapshot) {
-            if (provider_->issue_cs_chain(
-                    generation_, entry.layer, entry.hidden, entry.ids,
-                    entry.weights, entry.output, M, entry.signal,
-                    entry.completion) !=
-                shooting_brake::phase1::ProviderStatus::ok) {
+            const auto st =
+                (cs_mode == 2)
+                    ? provider_->issue_cs_ride(
+                          generation_, entry.layer, entry.hidden, entry.ids,
+                          entry.weights, entry.output, M, entry.signal,
+                          entry.completion)
+                    : provider_->issue_cs_chain(
+                          generation_, entry.layer, entry.hidden, entry.ids,
+                          entry.weights, entry.output, M, entry.signal,
+                          entry.completion);
+            if (st != shooting_brake::phase1::ProviderStatus::ok) {
               ok = false;
               cs_disabled = true;
               errors_.fetch_add(1);

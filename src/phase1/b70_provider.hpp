@@ -134,6 +134,20 @@ class B70Provider final {
   // before the last completion because the consumer is sequential.
   ProviderStatus cs_step_fence();
 
+  // Doorbell 2.0 "ride-along" (mode 2, SHOOTING_BRAKE_B70_CS_DOORBELL=2):
+  // the WAIT/WRITE brackets append onto the SYCL queue's OWN immediate
+  // command list (fetched fresh per call), so brackets, copies, and kernels
+  // ride ONE in-order list -- zero cross-runtime event seams. Marker kernels
+  // join raw list-order into SYCL's event chain across the BCS/CCS split
+  // (probe #2: full chain 7.9-8.7 us). Requires one-list-per-queue
+  // semantics: the V1 UR adapter, or a V2 that has not rotated the list.
+  ProviderStatus issue_cs_ride(std::uint64_t generation, std::size_t layer,
+                               const sycl::half* ring_hidden,
+                               const std::int32_t* ring_ids,
+                               const float* ring_weights, float* ring_output,
+                               std::size_t M, volatile std::uint32_t* signal,
+                               volatile std::uint32_t* completion);
+
   ProviderStatus issue_cs_chain(std::uint64_t generation, std::size_t layer,
                                 const sycl::half* ring_hidden,
                                 const std::int32_t* ring_ids,

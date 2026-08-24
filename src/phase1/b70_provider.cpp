@@ -39,6 +39,7 @@
 #include <sycl/ext/oneapi/backend/level_zero.hpp>
 #include <level_zero/ze_api.h>
 #include <level_zero/driver_experimental/zex_cmdlist.h>
+#include <variant>
 #include <level_zero/driver_experimental/zex_common.h>
 
 namespace shooting_brake::phase1 {
@@ -2197,6 +2198,173 @@ ProviderStatus B70Provider::issue_cs_chain(
   } catch (...) {
     try {
       impl_->set_current_exception("provider issue_cs_chain failed: ");
+    } catch (...) {
+    }
+    return ProviderStatus::device_error;
+  }
+}
+
+ProviderStatus B70Provider::issue_cs_ride(
+    const std::uint64_t generation, const std::size_t layer,
+    const sycl::half* ring_hidden, const std::int32_t* ring_ids,
+    const float* ring_weights, float* ring_output, const std::size_t M,
+    volatile std::uint32_t* signal, volatile std::uint32_t* completion) {
+  try {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->health.stopped) {
+      return ProviderStatus::shutdown;
+    }
+    if (!impl_->health.loaded || !impl_->queue) {
+      return ProviderStatus::not_loaded;
+    }
+    if (generation != impl_->config.generation) {
+      return ProviderStatus::generation_mismatch;
+    }
+    if (ring_hidden == nullptr || ring_ids == nullptr ||
+        ring_weights == nullptr || ring_output == nullptr ||
+        signal == nullptr || completion == nullptr || M == 0 || M > 32 ||
+        layer >= g_layers || impl_->bank_format == BankFormat::int4) {
+      return ProviderStatus::invalid_argument;
+    }
+
+    // Mode 2 needs only the zex entry points -- no raw list, no event pool.
+    if (impl_->cs_wait == nullptr || impl_->cs_write == nullptr) {
+      if (impl_->cs_failed) {
+        return ProviderStatus::device_error;
+      }
+      ze_driver_handle_t drv =
+          sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+              impl_->queue->get_context().get_platform());
+      if (drv == nullptr ||
+          zeDriverGetExtensionFunctionAddress(
+              drv, "zexCommandListAppendWaitOnMemory",
+              reinterpret_cast<void**>(&impl_->cs_wait)) !=
+              ZE_RESULT_SUCCESS ||
+          zeDriverGetExtensionFunctionAddress(
+              drv, "zexCommandListAppendWriteToMemory",
+              reinterpret_cast<void**>(&impl_->cs_write)) !=
+              ZE_RESULT_SUCCESS) {
+        impl_->cs_failed = true;
+        impl_->set_error("CS ride: zex entry points unavailable");
+        return ProviderStatus::device_error;
+      }
+    }
+
+    // Fetch FRESH each call: the queue's own immediate list. Under V1 this
+    // is one stable list; fetching fresh keeps the handle honest if the
+    // runtime ever swaps it between steps (a rotated-away handle then shows
+    // up as a bracket landing on a list the kernels no longer use).
+    auto native =
+        sycl::get_native<sycl::backend::ext_oneapi_level_zero>(*impl_->queue);
+    ze_command_list_handle_t il{};
+    if (auto* pl = std::get_if<ze_command_list_handle_t>(&native)) {
+      il = *pl;
+    } else {
+      impl_->cs_failed = true;
+      impl_->set_error("CS ride: queue is not immediate-list backed");
+      return ProviderStatus::device_error;
+    }
+    auto* list = reinterpret_cast<zex_command_list_handle_t>(il);
+
+    // The chain, ONE in-order list end to end:
+    //   WAIT(signal==M) -> WRITE(signal=0) -> marker#1 -> H2D x3 -> kernels
+    //   -> narrow -> D2H -> marker#2 -> WRITE(completion=1)
+    // marker#1 joins the raw WAIT into SYCL's in-order event chain so the
+    // H2D copies (which may ride the BCS) cannot start before the WAIT
+    // fires; marker#2 orders the completion WRITE after the possibly-BCS
+    // D2H (probe #2's shipping-grade bug, fixed the same way).
+    // DIAGNOSTIC ONLY (SHOOTING_BRAKE_B70_RIDE_BISECT, bit flags): attribute
+    // the measured chain overhead. bit0: signal-clear WRITE at DEVICE scope
+    // (skips the DC-flush publication); bit1: skip both marker kernels
+    // (breaks cross-engine ordering guarantees -- timing only); bit2: skip
+    // the signal-clear WRITE entirely. Never set in production.
+    static const int bisect = [] {
+      const char* v = std::getenv("SHOOTING_BRAKE_B70_RIDE_BISECT");
+      return v != nullptr ? std::atoi(v) : 0;
+    }();
+    zex_wait_on_mem_desc_t wd{};
+    wd.actionFlag = ZEX_WAIT_ON_MEMORY_FLAG_EQUAL;
+    // bit3: WAIT at DEVICE scope (drops the per-wait acquire/invalidate);
+    // bit4: skip the WAIT entirely (burst-only diagnostic).
+    wd.waitScope = (bisect & 8) ? ZEX_MEM_ACTION_SCOPE_FLAG_DEVICE
+                                : ZEX_MEM_ACTION_SCOPE_FLAG_HOST;
+    zex_write_to_mem_desc_t wr{};
+    wr.writeScope = ZEX_MEM_ACTION_SCOPE_FLAG_HOST;
+    zex_write_to_mem_desc_t wr_clear{};
+    wr_clear.writeScope = (bisect & 1) ? ZEX_MEM_ACTION_SCOPE_FLAG_DEVICE
+                                       : ZEX_MEM_ACTION_SCOPE_FLAG_HOST;
+    ze_result_t zr = ZE_RESULT_SUCCESS;
+    auto ok = [&](ze_result_t r) {
+      if (zr == ZE_RESULT_SUCCESS) zr = r;
+      return r == ZE_RESULT_SUCCESS;
+    };
+    if (!(bisect & 16)) {
+      ok(impl_->cs_wait(list, &wd, const_cast<std::uint32_t*>(signal),
+                        static_cast<std::uint32_t>(M), nullptr));
+    }
+    if (!(bisect & 4)) {
+      ok(impl_->cs_write(list, &wr_clear, const_cast<std::uint32_t*>(signal),
+                         0ull));
+    }
+    if (zr != ZE_RESULT_SUCCESS) {
+      impl_->cs_failed = true;
+      impl_->set_error("CS ride: input-side bracket append failed");
+      return ProviderStatus::device_error;
+    }
+    if (!(bisect & 2)) {
+      impl_->queue->single_task([]() {});  // marker #1
+    }
+
+    const std::size_t route_elements = M * impl_->config.top_k;
+    impl_->queue->memcpy(impl_->hidden, ring_hidden,
+                         M * g_hidden * sizeof(sycl::half));
+    impl_->queue->memcpy(impl_->ids, ring_ids,
+                         route_elements * sizeof(std::int32_t));
+    impl_->queue->memcpy(impl_->weights, ring_weights,
+                         route_elements * sizeof(float));
+
+    const std::size_t resident_experts = impl_->config.resident_experts.size();
+    const std::size_t first_expert = layer * resident_experts;
+    const std::uint8_t* layer_w13 = impl_->w13 + first_expert * g_w13_bytes;
+    const std::uint8_t* layer_s13 = impl_->s13 + first_expert * g_s13_bytes;
+    const std::uint8_t* layer_w2 = impl_->w2 + first_expert * g_w2_bytes;
+    const std::uint8_t* layer_s2 = impl_->s2 + first_expert * g_s2_bytes;
+    const float* layer_w13_global = impl_->w13_global + first_expert;
+    const float* layer_w2_global = impl_->w2_global + first_expert;
+    quixicore::xpu::ops::nvfp4_moe_split(
+        *impl_->queue, impl_->hidden, impl_->ids, impl_->weights, layer_w13,
+        layer_s13, layer_w13_global, layer_w2, layer_s2, layer_w2_global,
+        impl_->scratch, impl_->output, M, resident_experts,
+        impl_->config.top_k, g_hidden, g_intermediate,
+        quixicore::xpu::DType::f16, true, quixicore::xpu::Variant::sycl,
+        false);
+    const std::size_t n = M * g_hidden;
+    if (impl_->out_fp16) {
+      const float* src = impl_->output;
+      sycl::half* dst = impl_->out16;
+      impl_->queue->parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
+        dst[i] = static_cast<sycl::half>(src[i]);
+      });
+      impl_->queue->memcpy(reinterpret_cast<sycl::half*>(ring_output),
+                           impl_->out16, n * sizeof(sycl::half));
+    } else {
+      impl_->queue->memcpy(ring_output, impl_->output, n * sizeof(float));
+    }
+    if (!(bisect & 2)) {
+      impl_->queue->single_task([]() {});  // marker #2
+    }
+    ok(impl_->cs_write(list, &wr, const_cast<std::uint32_t*>(completion),
+                       1ull));
+    if (zr != ZE_RESULT_SUCCESS) {
+      impl_->cs_failed = true;
+      impl_->set_error("CS ride: completion bracket append failed");
+      return ProviderStatus::device_error;
+    }
+    ++impl_->health.dispatches;
+    return ProviderStatus::ok;
+  } catch (...) {
+    try {
+      impl_->set_current_exception("provider issue_cs_ride failed: ");
     } catch (...) {
     }
     return ProviderStatus::device_error;

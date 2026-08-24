@@ -610,3 +610,23 @@ us/token, **4.40x** vs the 1,705 baseline. 127K: 59.45 s vs the RTX PRO 6000's
 Phase 5 running detached: `bench-matrix/jota_r15_pipeline2` via matrix_tiered
 (PIPELINE=2 passed through tier reboots, one root per arm; baseline surface is
 the banked `jota_r15_c6` grid). Monitor: `benchmarks/matrix_progress.sh`.
+
+## 13. The result wire stays fp16 -- 8-bit and 4-bit both closed (2026-08-24)
+
+Prototyped an 8-bit result wire ([M*H u8][M f32 per-token scales], both D2H
+paths, flag-gated). Measured SLOWER than fp16 at M=2048 (Gen4 17.94 -> 20.31,
+Gen3 20.56 -> 22.24 ms): the quantize pass costs more than the 1.9 ms of D2H
+it saves unless written as a proper parallel reduction, and the projected
+ceiling even then is ~1.10x -- against a wire error already screened at 11.5x
+the shipped leg. Reverted and removed per the bad-results rule (prototype
+preserved in history at `ef94db4a` for the record).
+
+An NVFP4-format wire is closed by the same screen without building it: e2m1
+carries 1 mantissa bit against e4m3's 3, and 4-bit activations measured 0.82
+cosine (terminal) in the W4A4 qualification. The checkpoint's NVFP4 is a
+WEIGHT format; the wire carries activations, a different sensitivity class.
+
+The wire hierarchy, final: fp32 -> fp16 was 10x BETTER than the bf16 leg
+(shipped, Bench 26); fp16 -> 8-bit is 11.5x worse for ~5%; 4-bit is terminal.
+fp16 is the knee. Transfer work below fp16 belongs to topology (dedicated
+PCIe lanes on the product), not precision.

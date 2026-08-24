@@ -920,3 +920,32 @@ fully pre-recorded per-layer command lists (DeepEP-style), blocked on kernel
 handle extraction from quixicore's SYCL RTC path -- a separate project.
 Flag stays default-off; classic poller keeps the crown. Decode stands at
 12.1 ms; the next lever in the gate order is w2 fusion.
+
+## 23. Kernel-handle extraction SOLVED: baked chains are buildable (2026-08-24)
+
+`experiments/b70_cs_harness.py`'s verdict said only pre-recorded lists survive.
+`experiments/b70_baked_chain_probe.cpp` proves they are buildable, all three
+blockers in one run on the B70:
+1. **Handles**: named SYCL FUNCTOR kernels -> get_kernel_id -> kernel_bundle
+   -> get_native yields real ze_kernel_handle_t. No runtime internals.
+2. **Arg ABI**: functor fields ARE the kernel args, in declaration order --
+   zeKernelGetProperties reports numKernelArgs == field count (6 and 7, zero
+   hidden args), and the raw zeKernelSetArgumentValue launch is **BIT-EXACT**
+   against the SYCL launch of the same functor (identity gate, 300 replays).
+3. **Speed**: baked WAIT -> gate_up -> w2_epilogue -> D2H -> WRITE replays at
+   186 us vs 178 us for live SYCL submit+wait of the same kernels -- bracket
+   machinery in a BAKED list costs ~20 us over pure device work, vs 61 us
+   host handshake, vs 175 us live-append brackets (kill-bench 22).
+
+The probe's w2 kernel is ALSO the fusion prototype: rowmajor register
+accumulation across routes, no atomics, no zero-fill memset, direct fp16
+write -- two levers converged into one kernel.
+
+**Projection (labeled)**: real quixicore kernels are ~68 us device work at
+M=1, so a baked per-layer chain lands ~88-95 us vs the classic poller's 120
+-> ITL 12.1 -> ~10.6-11.0 ms, plus one ExecuteCommandLists per STEP replacing
+47 handshakes. Remaining engineering, next session: (a) hoist quixicore's
+kernel-name classes out of the anonymous namespace (get_kernel_id needs
+visibility) or export a handle-getter from that TU; (b) provider bakes 47
+per-layer lists at bank load (M=1 first, per-M variants later); (c) identity
+gate + ITL A/B through the harness before any serving flag.

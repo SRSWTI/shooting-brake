@@ -754,3 +754,32 @@ driver): GROUPED=1, OUT_FP16=1, MAX_BATCH=2048, PIPELINE=2, MNBT=2048, MNS=6.
 Everything else in the tree from the decode session is instruments and docs;
 the two negative-result prototypes (FP8 wire, FULL-graph) are reverted /
 config-only. Session-end state: what ships IS what was measured best.
+
+## 18. Doorbell 2.0 silicon probe: GREEN, 7.5x faster than the host poller (2026-08-24)
+
+`experiments/b70_cs_doorbell_probe.cpp` -- pre-recorded L0 command list:
+MI_SEMAPHORE_WAIT on a shared host word, then PIPE_CONTROL host-scope write.
+No host thread in the loop, either direction. Round trip (2000 iters):
+
+| ring source | Gen4 p50 | Gen3 p50 | p99 |
+|---|---:|---:|---:|
+| host store | 4.71 us | 5.61 us | 6.5-7.0 |
+| **5090 DMA write (cudaMemset on pinned page)** | **8.12 us** | **9.15 us** | ~85 |
+
+vs the 61 us host-poller handshake: **7.5x**. Projected decode: 47 x ~52 us
+saved = ~2.4 ms/token -> ITL 12.1 -> ~9.7 ms, plus two pinned poller cores
+freed.
+
+Three driver facts the probe established (each would have cost a debug week):
+1. `appendWaitOnMemory` REJECTS external-sysmem-imported pages on this driver
+   (every action/scope combo -> INVALID_ARGUMENT) but accepts plain L0 host
+   USM and -- decisively -- **CUDA-pinned pages directly** (cudaHostAlloc,
+   end-to-end verified with bounded-spin trap detection; 0/2100 timeouts).
+2. cudaHostRegister of L0 host-USM pages fails (file-backed VMA) -- the
+   composition must be CUDA-allocates, CS-waits.
+3. The accepted wait desc is act=EQUAL, waitScope=HOST(4); write scope HOST.
+
+Integration path (next): per-layer pre-recorded WAIT(seq) -> kernels ->
+WRITE(done) chains in the provider, DeepEP parity protocol (two buffers,
+monotonic counters, release-publish). Kernel handles via SYCL native interop
+or the raw-L0 side path. Gate: identity harness, then ITL probe, then smoke.

@@ -122,6 +122,18 @@ class B70Provider final {
   // invalid_argument and the caller falls back to classic issue/take, which
   // keeps prefill on the pipelined path. Fire-and-forget: no take(), no
   // pending bookkeeping; the CUDA side observes completion directly.
+  // Blocks until every enqueued CS chain for the current step has drained
+  // its SYCL portion. The poller MUST call this after enqueueing a step's
+  // chains: its scan loop otherwise races the chains for the very signals
+  // they wait on -- the classic sweep steals-and-clears a later layer's
+  // signal before that layer's MI_SEMAPHORE_WAIT fires, deadlocking the
+  // in-order queue (found via experiments/b70_cs_harness.py, step 1 layer 14,
+  // poller parked in take()'s wait_and_throw). Safe resume window: by the
+  // time the SYCL tail drains, every chain has consumed its signal, so the
+  // sweep finds nothing to steal; the next step's signal0 cannot arrive
+  // before the last completion because the consumer is sequential.
+  ProviderStatus cs_step_fence();
+
   ProviderStatus issue_cs_chain(std::uint64_t generation, std::size_t layer,
                                 const sycl::half* ring_hidden,
                                 const std::int32_t* ring_ids,

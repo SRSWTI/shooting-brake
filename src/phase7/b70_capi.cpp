@@ -201,6 +201,15 @@ class B70Poller {
             }
           }
           if (ok) {
+            // MANDATORY: park until the step drains. Scanning while chains
+            // are in flight lets the classic sweep steal a later layer's
+            // signal before its hardware WAIT fires -- instant deadlock
+            // (harness-reproduced: step 1, layer 14).
+            if (provider_->cs_step_fence() !=
+                shooting_brake::phase1::ProviderStatus::ok) {
+              cs_disabled = true;
+              errors_.fetch_add(1);
+            }
             sequence += snapshot.size();
             dispatches_.fetch_add(snapshot.size());
             rows_.fetch_add(static_cast<uint64_t>(M) * snapshot.size());

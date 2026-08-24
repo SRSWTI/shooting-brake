@@ -1995,6 +1995,29 @@ bool B70Provider::register_host_range(const void* ptr,
   }
 }
 
+ProviderStatus B70Provider::cs_step_fence() {
+  try {
+    sycl::event tail;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      if (!impl_->health.loaded || !impl_->queue) {
+        return ProviderStatus::not_loaded;
+      }
+      tail = impl_->queue->ext_oneapi_submit_barrier();
+    }
+    // Wait OUTSIDE the lock: the queue drains at silicon speed regardless,
+    // and holding the mutex here would block a concurrent shutdown.
+    tail.wait_and_throw();
+    return ProviderStatus::ok;
+  } catch (...) {
+    try {
+      impl_->set_current_exception("provider cs_step_fence failed: ");
+    } catch (...) {
+    }
+    return ProviderStatus::device_error;
+  }
+}
+
 ProviderStatus B70Provider::issue_cs_chain(
     const std::uint64_t generation, const std::size_t layer,
     const sycl::half* ring_hidden, const std::int32_t* ring_ids,

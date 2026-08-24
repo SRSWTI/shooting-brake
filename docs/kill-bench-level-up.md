@@ -867,3 +867,32 @@ right one: the wedge point VARIES across variants (before profiling, at
 capture-memory), which smells like a race my probes' single-threaded shape
 never exposes -- the harness can run the poller thread + fake CUDA writer
 concurrently under gdb in seconds per iteration.
+
+## 21. Doorbell 2.0: wedge FOUND AND FIXED via harness; design C too slow (2026-08-24)
+
+`experiments/b70_cs_harness.py` reproduced the four-boot wedge in 20 seconds:
+a RACE -- after enqueueing a step's chains the poller kept scanning, and the
+classic sweep STOLE-AND-CLEARED a later layer's signal before its hardware
+WAIT fired, deadlocking the in-order queue (step 1, layer 14, poller parked in
+take()'s wait_and_throw). Fix: cs_step_fence() -- the poller parks on a SYCL
+tail barrier until the step drains (it has nothing else to do mid-step).
+50 steps clean after the fix. Every vLLM wedge signature is explained by this
+race (timing-dependent wedge points included).
+
+**But measured speed says design C loses:** 381 us/layer round trip vs the
+classic poller's 118 us. The provider-owned raw list pays FOUR cross-runtime
+event seams per layer (raw->ev_in->SYCL barrier; SYCL tail->get_native->
+WaitOnEvents->raw), each tens of us on this stack. The 8 us transport is
+intact; the stitching eats it.
+
+**Also decisive:** the harness process runs the V1 adapter
+(libur_adapter_level_zero.so.0 in the stacks) -- SYCL_UR_USE_LEVEL_ZERO_V2=0
+WORKS in a plain process; something in the vLLM environment overrides it to
+V2. Design A (ride-along zex on the queue's own immediate list, 7.9 us in
+probe #2) is stable under V1's one-list-per-queue semantics.
+
+**Next iteration, exactly:** (1) find what forces V2 under vLLM and pin V1
+for serving, (2) re-run design A (ride-along) in the harness under V1 --
+prediction: ~120 us/layer classic -> ~75-85 us/layer (handshake replaced,
+seams zero because everything rides ONE list), (3) then the vLLM ITL A/B.
+Flag remains default-off; classic path untouched and verified.

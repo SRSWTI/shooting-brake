@@ -461,6 +461,10 @@ struct B70Provider::Impl {
   std::size_t pl_chunk_M = 0;       // row capacity per chunk
   std::size_t pl_chunk_routes = 0;  // route capacity per chunk
   std::size_t pl_experts = 0;       // stride basis for hist/offs/cursor/rows
+  // Phase 2: dedicated in-order copy queue (null unless pipeline_chunks > 1).
+  // H2D/D2H ride the single BCS here and overlap CCS compute via explicit
+  // event barriers at the issue site -- ordering is never assumed.
+  std::unique_ptr<sycl::queue> copy_queue;
 
   std::optional<sycl::event> dispatch_begin;
   std::optional<sycl::event> kernel_begin;
@@ -589,6 +593,15 @@ struct B70Provider::Impl {
 
       free_pointer(upload_staging);
       free_pointer(copyout_staging);
+      if (copy_queue) {
+        // Drain before ANY device buffer frees -- pending D2H reads out16 /
+        // output; freeing first would be a use-after-free on the BCS.
+        try {
+          copy_queue->wait();
+        } catch (...) {
+        }
+        copy_queue.reset();
+      }
       free_pointer(out16);
       free_pointer(copyout_staging16);
       free_pointer(output);
@@ -1293,6 +1306,13 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
       impl_->g_slot_exp = impl_->allocate_device<std::int32_t>(routes);
       impl_->g_slot_w = impl_->allocate_device<float>(routes);
       impl_->g_atomic = impl_->allocate_device<std::int32_t>(nchunks);
+      if (nchunks > 1) {
+        // Phase 2: the copy queue exists only when chunking is armed, so the
+        // flag-off build cannot even construct the new machinery.
+        impl_->copy_queue = std::make_unique<sycl::queue>(
+            impl_->queue->get_context(), impl_->queue->get_device(),
+            sycl::property::queue::in_order{});
+      }
       impl_->queue
           ->memset(impl_->g_bias13, 0,
                    experts * 2 * g_intermediate * sizeof(sycl::half))
@@ -1450,12 +1470,53 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
       }
     }
 
-    sycl::event first = impl_->queue->memcpy(
-        impl_->hidden, hidden, M * g_hidden * sizeof(sycl::half));
-    impl_->queue->memcpy(impl_->ids, ids,
-                         route_elements * sizeof(std::int32_t));
-    impl_->queue->memcpy(impl_->weights, weights,
-                         route_elements * sizeof(float));
+    // Phase 2 (SHOOTING_BRAKE_B70_PIPELINE > 1): inputs ride the dedicated
+    // in-order copy queue so the single BCS can stream chunk c+1's slices
+    // while the single CCS computes chunk c. Event barriers express the only
+    // real hazards: RAW (chunk kernels after their slices) and WAR (this
+    // dispatch's H2D after the previous dispatch's kernels, which read the
+    // same device input buffers).
+    const std::size_t nchunks_pl =
+        static_cast<std::size_t>(impl_->pipeline_chunks);
+    const bool pipelined = nchunks_pl > 1 && impl_->copy_queue != nullptr &&
+                           impl_->bank_format != BankFormat::int4 &&
+                           impl_->grouped_ready && M > 32 &&
+                           resident_experts == impl_->pl_experts;
+    const std::size_t pl_rows = (M + nchunks_pl - 1) / nchunks_pl;
+    std::vector<sycl::event> pl_h2d;   // per chunk: last input-slice copy
+    std::vector<sycl::event> pl_mark;  // per chunk: kernels(+narrow) done
+    bool pl_done = false;
+    sycl::event first;
+    if (pipelined) {
+      sycl::event prior = impl_->queue->ext_oneapi_submit_barrier();
+      impl_->copy_queue->ext_oneapi_submit_barrier({prior});
+      const auto* hidden_h = static_cast<const sycl::half*>(hidden);
+      for (std::size_t c = 0; c * pl_rows < M; ++c) {
+        const std::size_t r0 = c * pl_rows;
+        const std::size_t mc = std::min(pl_rows, M - r0);
+        sycl::event eh = impl_->copy_queue->memcpy(
+            impl_->hidden + r0 * g_hidden, hidden_h + r0 * g_hidden,
+            mc * g_hidden * sizeof(sycl::half));
+        if (c == 0) {
+          first = eh;
+        }
+        impl_->copy_queue->memcpy(
+            impl_->ids + r0 * impl_->config.top_k,
+            ids + r0 * impl_->config.top_k,
+            mc * impl_->config.top_k * sizeof(std::int32_t));
+        pl_h2d.emplace_back(impl_->copy_queue->memcpy(
+            impl_->weights + r0 * impl_->config.top_k,
+            weights + r0 * impl_->config.top_k,
+            mc * impl_->config.top_k * sizeof(float)));
+      }
+    } else {
+      first = impl_->queue->memcpy(impl_->hidden, hidden,
+                                   M * g_hidden * sizeof(sycl::half));
+      impl_->queue->memcpy(impl_->ids, ids,
+                           route_elements * sizeof(std::int32_t));
+      impl_->queue->memcpy(impl_->weights, weights,
+                           route_elements * sizeof(float));
+    }
     if (impl_->profiling) {
       impl_->dispatch_begin.emplace(std::move(first));
       impl_->kernel_begin.emplace(impl_->queue->single_task([] {}));
@@ -1525,6 +1586,12 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
             break;
           }
           const std::size_t mc = std::min(chunk_rows, M - r0);
+          if (pipelined) {
+            // RAW: this chunk's kernels read its input slices from the copy
+            // queue. An in-order-queue barrier costs ~us and keeps
+            // grouped_moe_nvfp4 itself queue-agnostic.
+            impl_->queue->ext_oneapi_submit_barrier({pl_h2d[c]});
+          }
           grouped_done = sb::xe2::grouped_moe_nvfp4(
               *impl_->queue, impl_->hidden + r0 * g_hidden,
               impl_->ids + r0 * impl_->config.top_k,
@@ -1543,7 +1610,27 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
               static_cast<int>(impl_->config.top_k),
               static_cast<int>(g_hidden), static_cast<int>(g_intermediate),
               16);
+          if (pipelined && grouped_done) {
+            if (impl_->out_fp16) {
+              // Narrow this chunk's rows now so its D2H can leave the card
+              // while the next chunk computes.
+              const std::size_t n = mc * g_hidden;
+              const float* src = impl_->output + r0 * g_hidden;
+              sycl::half* dst = impl_->out16 + r0 * g_hidden;
+              impl_->queue->parallel_for(
+                  sycl::range<1>(n), [=](sycl::id<1> i) {
+                    dst[i] = static_cast<sycl::half>(src[i]);
+                  });
+            }
+            pl_mark.emplace_back(impl_->queue->ext_oneapi_submit_barrier());
+          }
         }
+        if (pipelined && !grouped_done && !pl_h2d.empty()) {
+          // Refusal falls to the fused GEMV, which reads every input row:
+          // gate it on the last copy (in-order queue: last implies all).
+          impl_->queue->ext_oneapi_submit_barrier({pl_h2d.back()});
+        }
+        pl_done = grouped_done;
         // A refusal mid-loop falls through to the fused GEMV below, which
         // fully rewrites output[0, M*H) -- correct after partial chunk
         // success, merely slower.
@@ -1578,7 +1665,27 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
     // submitting it here keeps its latency off the critical path —
     // take() would otherwise wait for the kernel, only then submit the
     // copy, and wait again.
-    if (impl_->out_fp16) {
+    if (pipelined && pl_done) {
+      // Per-chunk D2H on the copy queue, each gated on its chunk's marker:
+      // chunk c's result leaves the card while chunk c+1 computes. copy_out
+      // keeps the LAST event; the copy queue is in-order, so waiting on the
+      // last chunk's D2H implies every earlier one.
+      for (std::size_t c = 0; c < pl_mark.size(); ++c) {
+        const std::size_t r0 = c * pl_rows;
+        const std::size_t mc = std::min(pl_rows, M - r0);
+        impl_->copy_queue->ext_oneapi_submit_barrier({pl_mark[c]});
+        if (impl_->out_fp16) {
+          impl_->copy_out.emplace(impl_->copy_queue->memcpy(
+              impl_->copyout_staging16 + r0 * g_hidden,
+              impl_->out16 + r0 * g_hidden,
+              mc * g_hidden * sizeof(sycl::half)));
+        } else {
+          impl_->copy_out.emplace(impl_->copy_queue->memcpy(
+              impl_->copyout_staging + r0 * g_hidden,
+              impl_->output + r0 * g_hidden, mc * g_hidden * sizeof(float)));
+        }
+      }
+    } else if (impl_->out_fp16) {
       // Narrow on the device. Widening on the host instead would put ~4 ms of
       // CPU conversion on take()'s critical path and hand the PCIe saving
       // straight back; this pass is ~0.08 ms of VRAM traffic.

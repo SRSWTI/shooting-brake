@@ -1013,3 +1013,23 @@ capture completes (first-real-step latch), (2) bounded execute with partial-
 step recovery, (3) re-run this exact A/B. Expected prize remains the host-hop
 share of the 211 us inter-dispatch gap; the drafter finetune (4-6 ms
 effective) outranks it and is the next lever.
+
+## 26. Production-KV bridge: banked grid stays quotable (2026-08-24)
+
+The 16-cell pipeline2 grid was banked at KV=8.29 GiB; production now runs
+10.69 GiB (+29%). Re-ran ctx=32768 (all three profiles) and 65536/synchronous
+under the production config into `bench-matrix/jota_r15_prod_kv` as a bridge
+control. 10 comparable cells, zero errors both sides:
+- **C=1..4: -1.1% to +1.7% ITL, throughput flat** -> the banked grid remains
+  quotable for the single-user / small-team range.
+- **C=5,6 at 32K: ITL +33.7% / +59.6%, aggregate tok/s -7.9% / +0.5%.** Not
+  noise -- MECHANISM: at 8.29 GiB the scheduler QUEUED those requests; at
+  10.69 GiB they fit KV simultaneously and truly batch. Queueing became
+  batching. Per-request ITL rises, aggregate throughput does not, because the
+  box is already saturated at 32K x C>=5. More KV buys capacity and
+  prefix-cache retention, NOT throughput, at contexts this long.
+- 65536/synchronous +8.3% ITL on a single stream (one data point, above the
+  ~4% boot band; unexplained, flagged not explained).
+Remaining 98K/127K concurrency cells cancelled deliberately: at 127K the KV
+pool admits 1.61 concurrent, so those cells measure queueing, and the capacity
+figure (211,083 tokens, 1.61x) already states that.

@@ -1,0 +1,10 @@
+{
+  "context_tokens": 65536,
+  "finished_at": 1787619621.2828,
+  "metrics_path": "/home/shooting-brake007/srswti/shooting-brake/bench-matrix/jota_r15_prod_kv/shooting-brake-jota-r15/ctx_65536/synchronous/vllm_metrics.jsonl",
+  "profile": "synchronous",
+  "return_code": 0,
+  "started_at": 1787618890.30789,
+  "stderr_path": "/home/shooting-brake007/srswti/shooting-brake/bench-matrix/jota_r15_prod_kv/shooting-brake-jota-r15/ctx_65536/synchronous/guidellm_stderr.log",
+  "stdout_path": "/home/shooting-brake007/srswti/shooting-brake/bench-matrix/jota_r15_prod_kv/shooting-brake-jota-r15/ctx_65536/synchronous/guidellm_stdout.log"
+}

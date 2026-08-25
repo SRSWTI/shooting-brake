@@ -1077,3 +1077,35 @@ Gate 1 = does f4 route to the optimized GPU path on Xe2 or fall to ref;
 runner: `experiments/b70_onednn_nvfp4_bench.sh` (fill ladder 30/120/244 x 85
 groups, both GEMM shapes; bars: ours 23.6 @120, sycl-tla bf16 38-48 @120;
 "ref" impl name = disqualified). Prefill-only lever by construction.
+
+## 28. Bake-off corrections + handoff to the parallel session (2026-08-24)
+
+A parallel session re-ran the brief deeper and corrected 27 in three places
+(verified reasoning, accepted):
+1. **sycl-tla port is dead on BYTE PHYSICS, not just fill**: bf16 weights are
+   1.6 GB/layer -> 2.66 ms floor at the 603 GB/s ceiling -> can never beat our
+   shipped 2.355 ms. TFLOP/s across dtypes was the wrong metric; ms/layer with
+   byte accounting is the honest one. 4-bit IS the speed advantage.
+2. **Matched-fill correction**: at 30 rows/expert x 85 groups exact geometry,
+   sycl-tla bf16 = 13-14 TFLOP/s / 3.58 ms vs ours 20.5 / 2.355 ms -- we lead
+   the Intel reference at matched fill. Any "20.5 vs 73-84" framing is
+   cross-fill and overstates Intel; do not present it uncorrected.
+3. **New bake-off winner [measured in parallel session, re-verify at
+   integration]: vllm-xpu-kernels Xe2 MXFP4 grouped GEMM** -- 1.025 ms/layer
+   @30 rows, ~2.99 @120, ~2.3x our shipped kernel at production fill, numerics
+   8/8 pytest + 5.4e-4 vs fp32 dequant oracle on this card. Same E2M1
+   elements; delta is scale plumbing only (e8m0/32 vs our e4m3/16 + alpha).
+   Adoption fork: Option B (port OUR scale path into their mainloop,
+   checkpoint bit-identical) over Option A (requantize scales = the B12x trap).
+   Decode framing sharpened: perfect decode kernel recovers <=5-15 us/layer
+   ~= 2% end-to-end (9.9 of 12.1 ms is host-side gap) -> decode stays CLOSED.
+
+Ownership: the parallel session carries the kernel campaign (vllm-xpu Option B
+port vs oneDNN NVFP4-grouped, decided on benchdnn evidence; duplicate oneDNN
+build here cancelled). Promotion contract for ANY winner: numerics oracle at
+our scale format -> flag-gated integration, bank bit-identical -> identity
+harness + 120-prompt sweep -> FULL SLO revalidation vs the banked grids
+(cold-TTFT ladder 1K->127K, ITL probe, matrix bridge) -> ledger + scorecard.
+No default flips before the SLO step is green. Dependency-shape prior:
+vendored kernel we own > library boundary for the serving hot path
+(FlashInfer sm_120 lesson; fusion surface stays open).

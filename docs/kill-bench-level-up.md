@@ -1033,3 +1033,47 @@ control. 10 comparable cells, zero errors both sides:
 Remaining 98K/127K concurrency cells cancelled deliberately: at 127K the KV
 pool admits 1.61 concurrent, so those cells measure queueing, and the capacity
 figure (211,083 tokens, 1.61x) already states that.
+
+## 27. Vendor kernel bake-off: fill-rate verdict + the oneDNN NVFP4 lead (2026-08-24)
+
+**Test 0 -- bandwidth ceiling.** membw pure-read stream: **603.5 GB/s** flat
+across 512 MiB..4 GiB working sets (old "~510" note was low). Our split GEMV:
+545 GB/s at M=1 = **90.3% of ceiling** -> the ESIMD decode-port lever is
+**DEAD by measurement** (<=10% recoverable at M=1, ~0 at M>=2). Intel's ESIMD
+MoE kernels (llm-scaler) stay unqualified-but-moot for decode.
+
+**Test 1 -- Intel sycl-tla (cutlass-sycl) grouped MoE GEMM at OUR shapes**
+(binary: vendor/intel-xpu/sycl-tla/build-sycl/examples/12_...; MOE_ROWS env
+patch added to sweep uniform rows/expert; n=1024,k=3072 reproduces our
+gate/up [.,2048,3072] + w2 [.,3072,1024] pair):
+
+| rows/expert | Intel bf16 gate/up | Intel bf16 w2 | ours NVFP4+dequant |
+|---|---|---|---|
+| 30  | 9.9 TFLOP/s | 12.9 | **20.5** |
+| 120 | 38.0 | 48.4 | ~23.6 |
+| 244 | 54-62 | 72 | -- |
+
+The "3.3x pipeline gap" was mostly FILL RATE, not pipeline quality: at thin
+fill we BEAT Intel's tuned bf16 reference on their own silicon while paying
+NVFP4 dequant; at production fill (~120) they lead up to 2x on the GEMM leg.
+Corrections banked: (a) our production grouped kernel is already cute/
+cutlass-sycl DPAS (TiledMMA) -- "systolic array unused" applied only to the
+split/GEMV decode path; (b) quixicore's in-tree `grouped` variant is the
+experimental loser (its own profitable() returns false), NOT the production
+kernel (sb::xe2::grouped_moe_nvfp4, 2.355 ms/layer standalone).
+
+**Dequant analysis:** E2M1 magnitudes x2 = {0,1,2,3,4,6,8,12} -- EXACT int8
+re-encode exists (fold /2 into the E4M3 scale), zero quality change. s4 does
+NOT fit (12 > 7). Options ladder: LUT decode (cheap), hoist+overlap dequant in
+mainloop prologue (the real fix), int8-DPAS W4A8-int (needs activation-quant
+numerics screen first).
+
+**The lead that supersedes all of it: oneDNN v3.13 experimental grouped
+matmul with the NVFP4 scheme** -- f4_e2m1 weights + f8_e4m3 group-16 scales +
+global-scale post-op, grouped (= MoE-shaped, variable rows/expert), with a
+dedicated Intel-GPU implementation (src/gpu/intel/matmul/grouped_micro_gemm
+.cpp) and benchdnn support. Vendored copy is current (synced 2026-08-24).
+Gate 1 = does f4 route to the optimized GPU path on Xe2 or fall to ref;
+runner: `experiments/b70_onednn_nvfp4_bench.sh` (fill ladder 30/120/244 x 85
+groups, both GEMM shapes; bars: ours 23.6 @120, sycl-tla bf16 38-48 @120;
+"ref" impl name = disqualified). Prefill-only lever by construction.

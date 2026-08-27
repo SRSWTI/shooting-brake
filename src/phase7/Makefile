@@ -15,6 +15,8 @@ QUIXICORE := $(ROOT)/../QuixiCore-XPU
 NVFP4 := $(ROOT)/xe2_nvfp4
 VKERN := $(ROOT)/../../vendor/intel-xpu/vllm-xpu/vllm-xpu-kernels
 CUTLASS_SYCL := $(VKERN)/.deps/cutlass-sycl-src
+ONEDNN := $(ROOT)/../../vendor/oneDNN
+ONEDNN_LIB := $(ONEDNN)/build/src
 
 CXX := icpx
 CXXFLAGS := -std=gnu++20 -O2 -g -fPIC -Wall -fsycl \
@@ -28,7 +30,9 @@ LDFLAGS := -L$(QUIXICORE)/build-sycl \
            -fsycl \
            -L/opt/intel/oneapi/compiler/2026.1/lib \
            -L/opt/intel/oneapi/umf/1.1/lib \
-           -lze_loader
+           -lze_loader \
+           -L$(ONEDNN_LIB) -ldnnl \
+           -Wl,--disable-new-dtags -Wl,-rpath,$(ONEDNN_LIB)
 
 GROUPED_FLAGS := -DCUTLASS_ENABLE_HEADERS_ONLY -DCUTLASS_ENABLE_SYCL \
                  -DSYCL_INTEL_TARGET -DCUTLASS_VERSIONS_GENERATED \
@@ -56,14 +60,29 @@ b70: $(TARGET)
 
 cpu: $(CPU_TARGET)
 
-$(ROOT)/grouped_moe.o: $(NVFP4)/grouped_moe.cpp $(NVFP4)/grouped_moe.hpp
+# The xe_2 headers ARE the kernel: gemm_xe2.hpp carries the mainloop and the
+# dequant path, so leaving them out of the prerequisites means editing the
+# kernel silently relinks a stale object. That produced a bogus "native
+# disagrees with oneDNN" result once; do not drop them again.
+KERNEL_HDRS := $(wildcard $(NVFP4)/xe_2/*.hpp)
+
+$(ROOT)/grouped_moe.o: $(NVFP4)/grouped_moe.cpp $(NVFP4)/grouped_moe.hpp \
+                       $(NVFP4)/grouped_moe_onednn.hpp $(KERNEL_HDRS)
 	$(CXX) $(CXXFLAGS) $(GROUPED_FLAGS) $(SPIRV_EXT) -c -o $@ $(NVFP4)/grouped_moe.cpp
+
+# oneDNN grouped backend: separate TU so dnnl.hpp stays out of the cutlass
+# compile and the SPIR-V extension flags stay off this object.
+$(ROOT)/grouped_moe_onednn.o: $(NVFP4)/grouped_moe_onednn.cpp \
+                              $(NVFP4)/grouped_moe_onednn.hpp
+	$(CXX) $(CXXFLAGS) -I$(ONEDNN)/include -I$(ONEDNN)/build/include \
+	    -c -o $@ $(NVFP4)/grouped_moe_onednn.cpp
 
 $(TARGET): b70_capi.cpp b70_capi.h \
            $(PHASE1)/b70_provider.cpp $(PHASE1)/b70_provider.hpp \
-           $(ROOT)/grouped_moe.o
+           $(ROOT)/grouped_moe.o $(ROOT)/grouped_moe_onednn.o
 	$(CXX) $(CXXFLAGS) $(SPIRV_EXT) -shared -o $(ROOT)/$(TARGET) \
 	    b70_capi.cpp $(PHASE1)/b70_provider.cpp $(ROOT)/grouped_moe.o \
+	    $(ROOT)/grouped_moe_onednn.o \
 	    $(LDFLAGS)
 
 $(CPU_TARGET): cpu_expert_capi.cpp cpu_expert_capi.h
@@ -71,4 +90,5 @@ $(CPU_TARGET): cpu_expert_capi.cpp cpu_expert_capi.h
 	    cpu_expert_capi.cpp
 
 clean:
-	rm -f $(ROOT)/$(TARGET) $(ROOT)/$(CPU_TARGET) $(ROOT)/grouped_moe.o
+	rm -f $(ROOT)/$(TARGET) $(ROOT)/$(CPU_TARGET) $(ROOT)/grouped_moe.o \
+	    $(ROOT)/grouped_moe_onednn.o

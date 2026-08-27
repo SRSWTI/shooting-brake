@@ -333,7 +333,11 @@ CUTE_DEVICE void xe_gemm_4bits(
   auto pAgA = thr_prefetch_A.partition_S(gA);
   auto pBgB = thr_prefetch_B.partition_S(gB);
 
-  const int prefetch_dist = 1;  // measured: 1 beats Intel's 6 by 15.7% at tile_k=16
+  // measured: 1 beats Intel's 6 by 15.7% at tile_k=16. Also measured: raising
+  // this to 4 on THIS layout costs +2.0% at M=512 and +4.4% at M=2048. A deeper
+  // prefetch only paid off in combination with a canonical [K/gs, N] scale
+  // plane, and that layout is ruled out by the decode kernel (see below).
+  const int prefetch_dist = 1;
 
   constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
 
@@ -441,9 +445,16 @@ CUTE_DEVICE void xe_gemm_4bits(
               // bit manipulation and lands in the same registers.
               //
               // Indexing is identical to the MX path -- [N, K/group_size] per
-              // expert, row-major -- and our SBEXP001 bank already stores
+              // expert, row-major -- and the bank already stores
               // compressed-tensors scales in exactly that layout, so no
               // rearrangement happens anywhere.
+              //
+              // Do NOT switch this to a canonical [K/group_size, N] plane to
+              // suit oneDNN's grouped matmul. The decode kernel (quixicore
+              // nvfp4_moe_split) walks K per output row and reads this plane
+              // contiguously; canonical costs it >=1.78x scale traffic on a
+              // leg already at 83.6% of the bandwidth ceiling, and its lane
+              // dimension is the K chunk, so canonical de-coalesces it.
               uint8_t bits =
                   Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num +
                          group_idx];

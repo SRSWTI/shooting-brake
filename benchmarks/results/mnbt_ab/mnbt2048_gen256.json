@@ -1,0 +1,46 @@
+{
+ "label": "mnbt2048_gen256",
+ "recorded_at": "2026-08-27T11:05:57",
+ "url": "http://127.0.0.1:8017",
+ "model": "shooting-brake-jota-r15",
+ "requests_per_cell": 2,
+ "max_tokens": 256,
+ "cells": [
+  {
+   "ok": 4,
+   "failed": 0,
+   "errors": [],
+   "ttft_s_min": 3.763662024999576,
+   "ttft_s_mean": 5.405091980249836,
+   "ttft_s_max": 6.628600701999858,
+   "tpot_ms_mean": 18.820736475489706,
+   "itl_p50_ms": 14.337360999888915,
+   "itl_p99_ms": 243.54489100005594,
+   "e2e_s_mean": 10.20437978149971,
+   "tokens_total": 1024,
+   "wall_s": 20.448369004000597,
+   "cell_tok_per_s": 50.077343567091376,
+   "context": 8192,
+   "concurrency": 2,
+   "rounds": 2
+  },
+  {
+   "ok": 8,
+   "failed": 0,
+   "errors": [],
+   "ttft_s_min": 3.766447774999506,
+   "ttft_s_mean": 8.542694229499944,
+   "ttft_s_max": 13.06722327999978,
+   "tpot_ms_mean": 37.79256797009727,
+   "itl_p50_ms": 19.568141625086355,
+   "itl_p99_ms": 812.084574000437,
+   "e2e_s_mean": 18.179799061874746,
+   "tokens_total": 2048,
+   "wall_s": 36.530883760000506,
+   "cell_tok_per_s": 56.062153148412406,
+   "context": 8192,
+   "concurrency": 4,
+   "rounds": 2
+  }
+ ]
+}

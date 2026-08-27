@@ -1,0 +1,38 @@
+diff --git a/examples/12_xe20_moe_gemm_cute_interface/12_xe20_moe_gemm_cute_interface.cpp b/examples/12_xe20_moe_gemm_cute_interface/12_xe20_moe_gemm_cute_interface.cpp
+index 030e9376..520c3bfb 100644
+--- a/examples/12_xe20_moe_gemm_cute_interface/12_xe20_moe_gemm_cute_interface.cpp
++++ b/examples/12_xe20_moe_gemm_cute_interface/12_xe20_moe_gemm_cute_interface.cpp
+@@ -42,6 +42,7 @@
+ 
+ #include <cute/tensor.hpp>
+ #include <random>
++#include <cstdlib>
+ 
+ #include <cute/util/compat.hpp>
+ #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
+@@ -419,7 +420,10 @@ int main(int argc, const char **argv) {
+     return 0;
+   }
+ 
+-  constexpr int num_experts = 32;
++  // Shooting Brake bake-off: 85 experts/card (r15 geometry). The hardcoded
++  // per-layer tables below only fill the first 32 entries; the remainder
++  // zero-init, so thin-shape runs must set MOE_ROWS to overwrite all 85.
++  constexpr int num_experts = 85;
+   constexpr int max_layers = 24;
+ 
+   if (options.num_layers > max_layers) {
+@@ -494,6 +498,13 @@ int main(int argc, const char **argv) {
+        0, 7,  190, 4,  1700, 6, 434, 1886, 0, 14, 28, 8,  30,   25,   18},
+       {5,  27, 1442, 18, 0,  6, 0, 73,  6,    781, 0,  1915, 291, 649, 98,  4,
+        33, 77, 6,    22, 73, 9, 8, 587, 1486, 32,  10, 244,  37,  0,   100, 9}};
++  // Shooting Brake fill-rate probe: uniform rows/expert via env.
++  if (const char* rv = std::getenv("MOE_ROWS")) {
++    const int r = std::atoi(rv);
++    for (int l = 0; l < max_layers; ++l)
++      for (int e = 0; e < num_experts; ++e)
++        total_rows_for_each_expert[l][e] = r;
++  }
+ 
+   int num_layers = std::min(options.num_layers, max_layers);
+   

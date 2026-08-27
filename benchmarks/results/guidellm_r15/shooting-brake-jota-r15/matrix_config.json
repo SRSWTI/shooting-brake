@@ -1,0 +1,37 @@
+{
+  "concurrent_rates": [
+    1,
+    2,
+    4
+  ],
+  "contexts": [
+    128,
+    1024,
+    8192
+  ],
+  "cooldown": "0.1",
+  "disable_console": true,
+  "max_errors": 2,
+  "max_requests": 24,
+  "max_seconds": 90.0,
+  "metrics_url": "http://127.0.0.1:8017/metrics",
+  "model": "shooting-brake-jota-r15",
+  "output_root": "benchmarks/results/guidellm_r15",
+  "output_tokens": 256,
+  "outputs": [
+    "json",
+    "csv"
+  ],
+  "profiles": [
+    "concurrent"
+  ],
+  "rampup": 10.0,
+  "random_seed": 42,
+  "request_format": "/v1/chat/completions",
+  "sample_interval": 2.0,
+  "skip_existing": false,
+  "sweep_steps": 6,
+  "target": "http://127.0.0.1:8017",
+  "tokenizer_model": "srswti/axe-superveloce-jota-118b-r15-nvfp4",
+  "warmup": "0.1"
+}

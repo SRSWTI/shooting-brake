@@ -1,0 +1,40 @@
+{
+  "concurrent_rates": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "contexts": [
+    127000
+  ],
+  "cooldown": "0",
+  "disable_console": true,
+  "max_errors": 60,
+  "max_requests": 20,
+  "max_seconds": 180.0,
+  "metrics_url": "http://127.0.0.1:8017/metrics",
+  "model": "shooting-brake-jota-r15",
+  "output_root": "/home/shooting-brake007/srswti/shooting-brake/bench-matrix/jota_r15_c6",
+  "output_tokens": 512,
+  "outputs": [
+    "json",
+    "csv"
+  ],
+  "profiles": [
+    "synchronous",
+    "concurrent",
+    "sweep"
+  ],
+  "rampup": 10.0,
+  "random_seed": 42,
+  "request_format": "/v1/chat/completions",
+  "sample_interval": 5.0,
+  "skip_existing": true,
+  "sweep_steps": 3,
+  "target": "http://127.0.0.1:8017",
+  "tokenizer_model": "srswti/axe-superveloce-jota-118b-r15-nvfp4",
+  "warmup": "0"
+}

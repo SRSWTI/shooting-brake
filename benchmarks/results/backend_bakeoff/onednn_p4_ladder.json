@@ -1,0 +1,80 @@
+[
+  {
+    "label": "onednn_p4_s20",
+    "recorded_at": "2026-08-25T11:28:40",
+    "baseline_us_per_token": 1705.0,
+    "gate": {
+      "ok": true,
+      "status": 200,
+      "text": "60, 61, 62, ",
+      "logprobs_finite": true
+    },
+    "cells": [
+      {
+        "context": 1024,
+        "prompt_tokens": 1023,
+        "cold_s": 0.7029578630008473,
+        "warm_s": 0.06415510199985874,
+        "us_per_token": 687.1533362667128,
+        "vs_baseline": 2.481251141503908,
+        "warm_speedup": 10.957162269064666
+      },
+      {
+        "context": 8192,
+        "prompt_tokens": 8193,
+        "cold_s": 4.324126301999968,
+        "warm_s": 0.02708467299999029,
+        "us_per_token": 527.7830223361367,
+        "vs_baseline": 3.2304942141812822,
+        "warm_speedup": 159.65215094166055
+      },
+      {
+        "context": 16384,
+        "prompt_tokens": 16384,
+        "cold_s": 6.763809195999784,
+        "warm_s": 0.08194409400039149,
+        "us_per_token": 412.83015112303366,
+        "vs_baseline": 4.1300277980226,
+        "warm_speedup": 82.54175335647093
+      },
+      {
+        "context": 32768,
+        "prompt_tokens": 32769,
+        "cold_s": 15.183939626999745,
+        "warm_s": 0.05744607199994789,
+        "us_per_token": 463.36292309804224,
+        "vs_baseline": 3.6796211241943535,
+        "warm_speedup": 264.31641186909206
+      },
+      {
+        "context": 65536,
+        "prompt_tokens": 65520,
+        "cold_s": 29.795310704000258,
+        "warm_s": 0.14745520900032716,
+        "us_per_token": 454.7513843711883,
+        "vs_baseline": 3.7493013954374312,
+        "warm_speedup": 202.06346663503865
+      },
+      {
+        "context": 98304,
+        "prompt_tokens": 98303,
+        "cold_s": 47.351804478000304,
+        "warm_s": 0.20354843899986008,
+        "us_per_token": 481.6923642004853,
+        "vs_baseline": 3.5396035451588794,
+        "warm_speedup": 232.63162670597956
+      },
+      {
+        "context": 127000,
+        "prompt_tokens": 126998,
+        "cold_s": 63.73675027700028,
+        "warm_s": 0.2310185590004039,
+        "us_per_token": 501.87207890675666,
+        "vs_baseline": 3.3972800473659617,
+        "warm_speedup": 275.8945019516326
+      }
+    ],
+    "aggregate_us_per_token": 480.7087787365079,
+    "aggregate_speedup": 3.546845981222585
+  }
+]

@@ -1,0 +1,32 @@
+{
+  "command": [
+    "/home/shooting-brake007/srswti/shooting-brake/.venv/bin/python",
+    "-m",
+    "guidellm",
+    "run",
+    "--backend",
+    "kind=openai_http,target=http://127.0.0.1:8017,model=shooting-brake-jota-r15,request_format=/v1/chat/completions",
+    "--tokenizer",
+    "kind=huggingface_auto,model=srswti/axe-superveloce-jota-118b-r15-nvfp4,load_kwargs.trust_remote_code=true",
+    "--profile",
+    "kind=concurrent,warmup=0.1,cooldown=0.1,rampup_duration=10.0",
+    "--data",
+    "kind=synthetic_text,prompt_tokens=128,output_tokens=256",
+    "--seed",
+    "kind=static,value=42",
+    "--override",
+    "profile.streams",
+    "1,2,4",
+    "--constraint",
+    "kind=max_duration,seconds=90",
+    "--constraint",
+    "kind=max_requests,count=24",
+    "--constraint",
+    "kind=max_errors,count=2",
+    "--output",
+    "kind=json,path=benchmarks/results/guidellm_r15/shooting-brake-jota-r15/ctx_128/concurrent/report.json",
+    "--output",
+    "kind=csv,path=benchmarks/results/guidellm_r15/shooting-brake-jota-r15/ctx_128/concurrent/report.csv",
+    "--disable-console"
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "chunk_size": 2048,
+  "placement": "all-cuda",
+  "points": [
+    {
+      "prompt_tokens": 1153,
+      "ttft_ms": 42.74855433338113,
+      "ttft_ms_min": 42.04436400004852,
+      "prefill_tok_per_s": 26971.67232856937,
+      "dispatches_per_layer": 1,
+      "target_tokens": 1536
+    },
+    {
+      "prompt_tokens": 3123,
+      "ttft_ms": 86.27311033334688,
+      "ttft_ms_min": 86.05265500000314,
+      "prefill_tok_per_s": 36198.99627975829,
+      "dispatches_per_layer": 2,
+      "target_tokens": 4096
+    }
+  ],
+  "workers": [
+    {
+      "hybrid_layers": 40,
+      "eager_partition": {
+        "steps": 0,
+        "remote_steps": 0,
+        "expected_remote_steps": 0,
+        "expected_provider_dispatches": 0,
+        "all_cuda_route_steps": 0,
+        "remote_routes": 0
+      },
+      "poller": {
+        "available": false,
+        "reason": "unavailable on this arm"
+      },
+      "kv_cache": {
+        "num_gpu_blocks": 197,
+        "block_size": 2096,
+        "max_tokens": "unavailable for hybrid cache"
+      },
+      "cuda_memory": {
+        "allocated_gib": 27.405941009521484,
+        "reserved_gib": 27.884765625,
+        "peak_allocated_gib": 27.661723613739014,
+        "peak_reserved_gib": 28.427734375,
+        "load_peak_allocated_gib": 22.500110149383545,
+        "free_gib": 1.874267578125,
+        "total_gib": 31.35540771484375
+      },
+      "synchronous_provider": {
+        "available": false,
+        "reason": "unavailable on this arm"
+      },
+      "host_memory": {
+        "rss_gib": 4.7130889892578125,
+        "peak_rss_gib": 7.577888488769531
+      },
+      "cuda_power": {
+        "watts": 274.893,
+        "limit_watts": 600.0,
+        "temperature_c": 57
+      }
+    }
+  ]
+}

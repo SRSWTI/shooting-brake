@@ -2,9 +2,13 @@
 
 # --- vendored third-party clones -------------------------------------------
 # Each of these keeps its own .git so we can pull upstream changes. We do NOT
-# track their contents here - only the fact that vendor/ exists. Re-clone with
-# vendor/README.md if the tree is fresh.
-vendor/
+# track their contents here. `vendor/*` rather than `vendor/` so the two files
+# that document and drive the tree stay under version control: git will not
+# descend into an ignored DIRECTORY, so a negation inside `vendor/` would never
+# match.
+vendor/*
+!vendor/README.md
+!vendor/vendor_pull_report.sh
 
 # --- large binary artifacts -------------------------------------------------
 # Expert banks are generated, not authored. Regenerate:
@@ -25,6 +29,30 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+
+# Compiled probes. Each has a .cpp sibling and is rebuilt by its own build
+# script; none is authored. They carry no extension, so the rules above miss
+# them and they have to be named.
+experiments/b13_doorbell_flag_probe
+experiments/b13_sweep_probe
+experiments/b13_wait_probe
+experiments/b5_fused_h2d_probe
+experiments/b70_b70_dmabuf_control
+experiments/b70_baked_chain_probe
+experiments/b70_baked_kernel_ab
+experiments/b70_cs_doorbell_probe
+experiments/b70_dual_queue_probe
+experiments/b70_hostflag_spin_probe
+experiments/b70_mem_topology_probe
+experiments/b70_sycl_zex_interop_probe
+experiments/b70_u32_abi_probe
+experiments/rbar_dmabuf_probe
+experiments/xvendor_p2p_probe
+experiments/repro/device_usm_host_shadow
+experiments/repro/l0v2_memset_crash
+src/phase7/xe2_probe/grouped_backend_verify
+src/phase7/xe2_probe/onednn_grouped_probe
+src/phase7/xe2_probe/xe2_nvfp4_verify
 
 # --- environments -----------------------------------------------------------
 .venv/
@@ -47,3 +75,16 @@ benchmarks/matrix/**/*.html
 # 154 MB of guidellm results.json from the RTX PRO 6000 reference run; CSVs +
 # DERIVED_SUMMARY.json are tracked, raw JSONs are re-downloadable from HF.
 benchmarks/results/rtx_pro_6000_r15_slo/**/results.json
+
+# --- generated training / research trees ------------------------------------
+# 60 GB of captured hidden states, features and checkpoints. Regenerate with
+# experiments/drafter_train/train.sh; the source under experiments/drafter_train
+# IS tracked.
+experiments/drafter_train/work/
+experiments/drafter_train/cache/
+
+# 6.7 GB of third-party research clones, two of which carry their own .git.
+experiments/sparse-memory/
+
+# Nested clone with its own .git.
+mirage/

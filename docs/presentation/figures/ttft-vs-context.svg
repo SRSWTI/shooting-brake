@@ -1,0 +1,27 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="951" height="372" viewBox="0 0 951 372" role="img" aria-label="Prompt processing time versus context">
+  <rect x="0" y="0" width="951" height="372" fill="#fbfbf9"/>
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">TIME TO PROCESS THE PROMPT, COLD, NO CACHE ON EITHER SIDE</text>
+    <line x1="62" y1="290" x2="862" y2="290" stroke="#cdccc7"/>
+    <line x1="62" y1="40" x2="62" y2="290" stroke="#cdccc7"/>
+    <g font-size="11" fill="#9d9da7" text-anchor="end">
+      <text x="54" y="294">0</text><text x="54" y="211">20 s</text>
+      <text x="54" y="127">40 s</text><text x="54" y="44">60 s</text>
+    </g>
+    <g font-size="11.5" fill="#6e6e79" text-anchor="middle">
+      <text x="142" y="310">8K</text><text x="342" y="310">32K</text>
+      <text x="542" y="310">64K</text><text x="802" y="310">127K tokens of prompt</text>
+    </g>
+    <polyline points="142,276 342,237 542,177 802,42" fill="none" stroke="#b4552d" stroke-width="2.5"/>
+    <g fill="#b4552d"><circle cx="142" cy="276" r="4"/><circle cx="342" cy="237" r="4"/>
+      <circle cx="542" cy="177" r="4"/><circle cx="802" cy="42" r="4"/></g>
+    <text x="700" y="32" font-size="12.5" fill="#b4552d" font-weight="600" text-anchor="middle">ours, 59.4 s</text>
+    <polyline points="142,288 342,280 542,264 802,211" fill="none" stroke="#2f6f4e" stroke-width="2.5"/>
+    <g fill="#2f6f4e"><circle cx="142" cy="288" r="4"/><circle cx="342" cy="280" r="4"/>
+      <circle cx="542" cy="264" r="4"/><circle cx="802" cy="211" r="4"/></g>
+    <text x="806" y="203" font-size="12.5" fill="#2f6f4e" font-weight="600">RTX PRO 6K, 18.9 s</text>
+    <text x="150" y="74" font-size="13" fill="#17171b">the RTX PRO 6K curve bends upward. attention cost grows with</text>
+    <text x="150" y="93" font-size="13" fill="#17171b">the square of the prompt, so it worsens faster than ours.</text>
+    <text x="150" y="118" font-size="13" fill="#17171b">ours is nearly a straight line. we are limited by a link,</text>
+    <text x="150" y="137" font-size="13" fill="#17171b">and a link does not care how long the prompt is.</text>
+    <text x="150" y="166" font-size="13.5" fill="#17171b" font-weight="600">so the gap collapses: 8.1&#215; &#8594; 5.4&#215; &#8594; 4.3&#215; &#8594; 3.14&#215;</text>
+  </svg>

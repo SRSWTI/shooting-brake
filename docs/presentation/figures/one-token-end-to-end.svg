@@ -1,0 +1,53 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" role="img" aria-label="Full token path">
+  <rect x="0" y="0" width="900" height="420" fill="#fbfbf9"/>
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">ONE LAYER OF 47. ALL OF THIS, FORTY SEVEN TIMES, PER TOKEN.</text>
+    <rect x="0" y="34" width="326" height="232" rx="10" fill="#f2f6f2" stroke="#3d6b3d"/>
+    <text x="16" y="56" font-size="12.5" fill="#3d6b3d" font-weight="700">RTX 5090</text>
+    <g font-size="12.8" fill="#17171b">
+      <rect x="16" y="66" width="294" height="34" rx="6" fill="#fff" stroke="#dbe4db"/>
+      <text x="28" y="88">1. attention, reading the whole KV cache</text>
+      <rect x="16" y="106" width="294" height="34" rx="6" fill="#fff" stroke="#dbe4db"/>
+      <text x="28" y="128">2. router scores 218, keeps 10</text>
+      <rect x="16" y="146" width="294" height="34" rx="6" fill="#fff" stroke="#dbe4db"/>
+      <text x="28" y="168">3. runs the shared and local expert itself</text>
+      <rect x="16" y="186" width="294" height="34" rx="6" fill="#fff" stroke="#dbe4db"/>
+      <text x="28" y="208">4. rings the doorbell, then waits</text>
+      <rect x="16" y="226" width="294" height="30" rx="6" fill="#eef3ee" stroke="#c9d8c9"/>
+      <text x="28" y="246">7. adds up every partial answer</text>
+    </g>
+    <rect x="356" y="96" width="152" height="116" rx="10" fill="#fdfbf4" stroke="#c9b98a"/>
+    <text x="370" y="118" font-size="11.5" fill="#8a6d1f" font-weight="700">PINNED HOST PAGE</text>
+    <g font-size="12.2" fill="#2e2e35">
+      <text x="370" y="138">signal word</text>
+      <text x="370" y="156">completion word</text>
+      <text x="370" y="174">token, ids, weights</text>
+      <text x="370" y="192">result buffers</text>
+      <text x="370" y="207" font-size="11" fill="#8a6d1f">2 cores spinning here</text>
+    </g>
+    <rect x="556" y="34" width="344" height="104" rx="10" fill="#eff4f7" stroke="#2a5d7c"/>
+    <text x="572" y="56" font-size="12.5" fill="#2a5d7c" font-weight="700">Arc Pro B70 #1, Gen3 &#215;4</text>
+    <text x="572" y="79" font-size="12.8" fill="#17171b">5. looks up its 5 experts, does the math</text>
+    <text x="572" y="99" font-size="12" fill="#6e6e79">85 experts resident, 603.5 GB/s local</text>
+    <text x="572" y="119" font-size="12" fill="#6e6e79">unpacks 4-bit into its matrix engines</text>
+    <rect x="556" y="150" width="344" height="104" rx="10" fill="#eff4f7" stroke="#2a5d7c"/>
+    <text x="572" y="172" font-size="12.5" fill="#2a5d7c" font-weight="700">Arc Pro B70 #2, Gen4 &#215;4</text>
+    <text x="572" y="195" font-size="12.8" fill="#17171b">5. the same, at the same time</text>
+    <text x="572" y="215" font-size="12" fill="#6e6e79">85 experts resident, 603.5 GB/s local</text>
+    <text x="572" y="235" font-size="12" fill="#6e6e79">6. writes results, sets completion</text>
+    <defs><marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L7,3 z" fill="#6e6e79"/></marker></defs>
+    <path d="M326,150 L352,150" fill="none" stroke="#6e6e79" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M508,126 L552,92" fill="none" stroke="#6e6e79" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M508,180 L552,206" fill="none" stroke="#6e6e79" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M552,128 L512,160" fill="none" stroke="#2f6f4e" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M552,244 L512,196" fill="none" stroke="#2f6f4e" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M356,200 C300,246 300,240 216,240" fill="none" stroke="#2f6f4e" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M56,272 C56,300 844,300 844,266" fill="none" stroke="#17171b" stroke-width="1.2"
+          stroke-dasharray="4 4" opacity=".4" marker-end="url(#a2)"/>
+    <text x="330" y="322" font-size="12.8" fill="#17171b">&#215; 47, strictly in order. layer 12 cannot start until layer 11 is done.</text>
+    <line x1="0" y1="348" x2="900" y2="348" stroke="#e7e6e1"/>
+    <text x="0" y="374" font-size="13.5" font-weight="600" fill="#17171b">61 &#181;s</text>
+    <text x="60" y="374" font-size="12.5" fill="#6e6e79">per layer just for the handshake. proven possible in hardware at 8 to 9.</text>
+    <text x="0" y="398" font-size="13.5" font-weight="600" fill="#17171b">25.33 MB</text>
+    <text x="80" y="398" font-size="12.5" fill="#6e6e79">crosses PCIe per dispatch, constant, verified in traces. the two Arcs share that window.</text>
+  </svg>

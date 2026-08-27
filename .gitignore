@@ -64,6 +64,9 @@ lib64
 # Results are evidence of record and ARE tracked (benchmarks/results,
 # benchmarks/matrix). Raw logs and HTML dumps are not.
 *.html
+# ...except the deck, which the README links to and which is the source the
+# figures in docs/presentation/figures/ were extracted from.
+!docs/presentation/index.html
 *.log
 benchmarks/matrix/**/guidellm_std*.log
 benchmarks/matrix/**/*.html

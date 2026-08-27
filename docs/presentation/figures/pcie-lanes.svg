@@ -1,0 +1,13 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="900" height="218" viewBox="0 0 900 218" role="img" aria-label="PCIe link allocation today">
+  <rect x="0" y="0" width="900" height="218" fill="#fbfbf9"/>
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">WHAT EACH CARD ACTUALLY GETS, MEASURED</text>
+    <rect x="0" y="30" width="760" height="32" rx="4" fill="#3d6b3d"/>
+    <text x="14" y="51" font-size="13" fill="#fff" font-weight="600">RTX 5090: Gen5 &#215;16, sixteen lanes, and it barely needs them</text>
+    <rect x="0" y="72" width="76" height="32" rx="4" fill="#b4552d"/>
+    <text x="88" y="93" font-size="13" fill="#17171b">Arc B70 #1: Gen3 &#215;4, measured 3.23 GB/s</text>
+    <rect x="0" y="114" width="152" height="32" rx="4" fill="#c9805f"/>
+    <text x="164" y="135" font-size="13" fill="#17171b">Arc B70 #2: Gen4 &#215;4, measured 6.47 GB/s</text>
+    <text x="0" y="176" font-size="13.5" fill="#17171b">And they <tspan font-weight="600">share</tspan> an uplink, so together they get
+    <tspan font-weight="600">6.44 GB/s</tspan>, not 9.7.</text>
+    <text x="0" y="200" font-size="13" fill="#6e6e79">The cards holding 46 of the 58 GiB, doing most of the arithmetic, are on four lanes each.</text>
+  </svg>

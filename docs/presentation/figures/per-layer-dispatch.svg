@@ -1,0 +1,10 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="900" height="172" viewBox="0 0 900 172" role="img" aria-label="Weights versus activations">
+  <rect x="0" y="0" width="900" height="172" fill="#fbfbf9"/>
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">PER LAYER, PER DISPATCH</text>
+    <rect x="0" y="30" width="750" height="34" rx="4" fill="#2a5d7c"/>
+    <text x="14" y="52" font-size="13.5" fill="#fff" font-weight="600">expert weights that get read: 430 MB. never leave the card.</text>
+    <rect x="0" y="80" width="44" height="34" rx="4" fill="#2f6f4e"/>
+    <text x="56" y="102" font-size="13.5" fill="#17171b" font-weight="600">what actually crosses PCIe: 25.33 MB, measured, constant</text>
+    <text x="0" y="144" font-size="13.5" fill="#2e2e35">A <tspan font-weight="600">17 to 1</tspan> ratio. That is the entire reason a narrow link can serve a model this big.</text>
+    <text x="0" y="164" font-size="13" fill="#6e6e79">Move the small thing to where the big thing lives, not the other way round.</text>
+  </svg>

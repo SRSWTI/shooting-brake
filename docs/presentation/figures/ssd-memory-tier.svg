@@ -1,0 +1,15 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="900" height="232" viewBox="0 0 900 232" role="img" aria-label="Memory hierarchy">
+  <rect x="0" y="0" width="900" height="232" fill="#fbfbf9"/>
+    <g font-size="13">
+      <rect x="0" y="26" width="820" height="34" rx="4" fill="#2a5d7c"/>
+      <text x="14" y="48" fill="#fff" font-weight="600">Arc card memory: 603.5 GB/s. this is where the experts live.</text>
+      <rect x="0" y="70" width="180" height="34" rx="4" fill="#5f8f74"/>
+      <text x="192" y="92" fill="#17171b">host memory: fast enough, and 47.4 GiB of it is already spoken for</text>
+      <rect x="0" y="114" width="24" height="34" rx="4" fill="#8a6d1f"/>
+      <text x="36" y="136" fill="#17171b">NVMe SSD: slower, but there is a lot of it, and it is cheap</text>
+    </g>
+    <text x="0" y="182" font-size="13.5" fill="#17171b">Normally reading from the SSD into a GPU means: disk to host memory, then host
+    memory to GPU.</text>
+    <text x="0" y="204" font-size="13.5" fill="#17171b">Two hops, the CPU involved, and the kernel's storage stack in the middle of it.</text>
+    <text x="0" y="226" font-size="13.5" fill="#2f6f4e" font-weight="600">There is a way to skip all of that.</text>
+  </svg>

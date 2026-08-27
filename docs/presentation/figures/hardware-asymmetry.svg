@@ -1,0 +1,11 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="900" height="176" viewBox="0 0 900 176" role="img" aria-label="Bandwidth comparison">
+  <rect x="0" y="0" width="900" height="176" fill="#fbfbf9"/>
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">MEASURED BANDWIDTH, SAME SCALE</text>
+    <rect x="0" y="30" width="820" height="30" rx="4" fill="#2a5d7c"/>
+    <text x="14" y="50" font-size="13" fill="#fff" font-weight="600">inside one Arc card, its own memory: 603.5 GB/s</text>
+    <rect x="0" y="70" width="9" height="30" rx="3" fill="#b4552d"/>
+    <text x="20" y="90" font-size="13" fill="#17171b" font-weight="600">between the cards, both Arcs sharing PCIe: 6.44 GB/s</text>
+    <text x="0" y="130" font-size="13.5" fill="#2e2e35">The gap is <tspan font-weight="600">94 times</tspan>. Every design decision
+    in this system falls out of that one ratio.</text>
+    <text x="0" y="154" font-size="13" fill="#6e6e79">Which is why the experts never move, and why the KV cache can never leave the 5090.</text>
+  </svg>

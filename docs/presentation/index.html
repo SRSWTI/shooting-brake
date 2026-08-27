@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shooting Brake</title>
+<style>
+  :root{
+    --ink:#17171b; --body:#2e2e35; --mute:#6e6e79; --faint:#9d9da7;
+    --rule:#e7e6e1; --bg:#fbfbf9; --card:#fff; --wash:#f4f4f1;
+    --us:#2f6f4e; --them:#b4552d; --proj:#3b5b8c; --amber:#8a6d1f;
+    --nv:#3d6b3d; --arc:#2a5d7c;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--body);
+    font:16.5px/1.68 "Liberation Sans",-apple-system,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:1020px;margin:0 auto;padding:0 44px}
+  section{padding:70px 0;border-bottom:1px solid var(--rule)}
+  .act{padding:44px 0 0;border:none}
+  .actlab{font:600 12px/1 inherit;letter-spacing:.22em;text-transform:uppercase;
+    color:var(--faint);padding-bottom:10px;border-bottom:2px solid var(--ink);display:inline-block}
+  h1{font:600 46px/1.14 "Liberation Serif",Georgia,serif;letter-spacing:-.015em;color:var(--ink);margin:0 0 20px}
+  h2{font:600 29px/1.24 "Liberation Serif",Georgia,serif;color:var(--ink);margin:0 0 4px}
+  h3{font:600 18px/1.35 inherit;color:var(--ink);margin:36px 0 10px}
+  h4{font:600 15px/1.4 inherit;color:var(--ink);margin:26px 0 6px}
+  .kicker{font-size:12px;letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin:0 0 12px}
+  .lede{font-size:20.5px;line-height:1.55;color:#2a2a31;max-width:74ch}
+  p{max-width:78ch;margin:15px 0}
+  ul,ol{max-width:78ch;padding-left:22px}
+  li{margin:9px 0}
+  b,strong{color:var(--ink);font-weight:600}
+  .mute{color:var(--mute)}
+  small{font-size:13.5px;line-height:1.6;color:var(--mute);display:block;max-width:78ch}
+  code{font:13.5px/1.5 "Liberation Mono",monospace;background:var(--wash);
+    padding:1px 5px;border-radius:3px;color:#3a3a42}
+  table{border-collapse:collapse;width:100%;margin:22px 0;font-size:14.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+  th{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);font-weight:600}
+  td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .win{color:var(--us);font-weight:600}
+  .bad{color:var(--them)}
+  figure{margin:30px 0}
+  figcaption{font-size:14px;color:var(--mute);margin-top:12px;max-width:78ch}
+  .card{background:var(--card);border:1px solid var(--rule);border-radius:11px;padding:26px 28px}
+  .g2{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+  .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+  .row4{display:grid;grid-template-columns:repeat(4,1fr);gap:22px;margin:30px 0}
+  .stat{font:600 38px/1 "Liberation Serif",Georgia,serif;font-variant-numeric:tabular-nums;color:var(--ink)}
+  .statlab{font-size:12.5px;color:var(--mute);margin-top:6px;line-height:1.45}
+  .tag{display:inline-block;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+    padding:3px 8px;border-radius:20px;border:1px solid var(--rule);color:var(--mute);white-space:nowrap}
+  .tag.m{color:var(--us);border-color:#cfe0d6;background:#f2f8f4}
+  .tag.p{color:var(--proj);border-color:#d3dcea;background:#f3f6fb}
+  .tag.w{color:var(--amber);border-color:#e5dcc0;background:#fbf8ee}
+  .note{border-left:3px solid var(--rule);padding:2px 0 2px 18px;margin:22px 0;color:var(--mute);font-size:15px}
+  .note.k{border-color:#cfe0d6}
+  .note.a{border-color:#e5dcc0}
+  svg{display:block;max-width:100%;height:auto}
+  text{font-family:"Liberation Sans",Helvetica,sans-serif}
+  .why{background:var(--wash);border-radius:10px;padding:20px 24px;margin:22px 0}
+  .why p{margin:8px 0}
+  .why .lab{font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);font-weight:600}
+</style>
+
+<div class="wrap">
+
+<!-- ═════════════════ opening ═════════════════ -->
+<section>
+  <p class="kicker">Shooting Brake</p>
+  <h1>one model, one forward pass,<br>split across two vendors' GPUs.</h1>
+  <p class="lede">Nobody ships this. Frameworks split work <i>between machines</i>, or run a
+  whole model on one vendor's cards. Shooting Brake splits a single model down the middle
+  <i>inside every single token</i>: NVIDIA silicon does the thinking, two Intel cards hold and
+  compute the knowledge, and a hand built handshake stitches them into one forward pass, 47
+  times per token.</p>
+
+  <div class="row4">
+    <div><div class="stat">2</div><div class="statlab">GPU vendors, one forward pass, no shared runtime between them</div></div>
+    <div><div class="stat">58.2</div><div class="statlab">GiB of 4-bit weights, on cards that hold 32 GiB each</div></div>
+    <div><div class="stat">15-19 <span style="font-size:20px">&rarr;</span> 88</div><div class="statlab">tokens/sec, from the first prototype to today</div></div>
+    <div><div class="stat">1.03&times;</div><div class="statlab">generation speed vs a 96 GB datacenter card at 127K context</div></div>
+  </div>
+
+  <small>Everything here is measured on one machine unless it says <span class="tag p">projection</span>.
+  177 commits, 28 numbered experiments, failures included.</small>
+</section>
+
+<!-- ═════════════════ ACT I ═════════════════ -->
+<div class="act"><span class="actlab">Act I &nbsp;&middot;&nbsp; what it is and how it got here</span></div>
+
+<section>
+  <h2>what cross vendor inference means</h2>
+  <p>A large language model is a stack of layers. Every token you read was pushed through all
+  of them, one after another. Normally that stack lives on one GPU, or on several GPUs from the
+  same vendor talking over a fast private link like NVLink.</p>
+
+  <p>We do something different. In this machine the stack is <b>cut horizontally inside each
+  layer</b>. The attention math and the router run on an <b>RTX 5090</b>. The expert weights,
+  which are the bulk of the model, sit on <b>two Intel Arc Pro B70 cards</b>. Both halves have
+  to meet in the middle for every single layer of every single token.</p>
+
+  <p>That is harder than it sounds, and the reason is boring and brutal: <b>CUDA and Intel's
+  runtime share nothing</b>. No common stream, no common event, no shared synchronisation
+  primitive, no way for one to wait on the other. They are two separate worlds that happen to
+  be plugged into the same motherboard. Everything in this document exists because we had to
+  build a bridge between those worlds and then make it fast.</p>
+
+  <div class="why">
+    <p class="lab">the intuition</p>
+    <p>Think of a chef and two enormous pantries in another room. The chef knows the recipe and
+    does all the technique. The pantries hold the ingredients, far too many to keep on the
+    counter. For every step of every dish, the chef has to ask the pantries for exactly the
+    right ten ingredients out of two hundred and eighteen, and wait. The trick is not making
+    the pantries faster. The trick is the asking.</p>
+  </div>
+</section>
+
+<section>
+  <h2>how we got here</h2>
+  <p>This went through four distinct shapes before it looked like an engine, and each shape
+  answered one question the previous one could not.</p>
+
+  <h3>the first version was a hand written inference server</h3>
+  <p>Before any of this was about two vendors, it was a local inference server written from
+  scratch in C++17: its own kernels, its own speculative prefill and decode, and a stated
+  principle that <b>every optimisation targets one specific model family on one specific piece
+  of hardware</b> rather than trying to be general. That codebase is sitting in the first
+  commit. It is not what runs today, and it was never meant to be. What it gave us was the
+  instinct that the interesting wins live at the kernel and scheduling level, not in the
+  framework above them.</p>
+
+  <h3>then a prototype, to test whether cross vendor worked at all</h3>
+  <p>The question was not "is this fast". It was <b>"can two vendors' GPUs cooperate inside one
+  model at all"</b>. So the next shape was a deliberately crude cross-vendor provider: a single
+  SYCL translation unit that took routed expert work from the CUDA side, ran it on the Intel
+  card, and handed results back. It ran a Qwen 35B class model at <b>15 to 19 tokens per
+  second</b> with no custom kernels and no optimisation whatsoever. That figure predates our
+  instruments, so treat it as an honest memory of the floor, not a benchmark.</p>
+
+  <p>Crude as it was, it settled four things that everything since depends on:</p>
+  <ul>
+    <li><b>the transport works.</b> A fixed ring of pinned host buffers can carry routed expert
+    requests from CUDA to Intel and back, without either runtime knowing about the other.</li>
+    <li><b>the numbers come out right.</b> It converted signed 4-bit group-64 quantised weights
+    into the layout the Intel kernel wanted, and produced correct output. Correctness across a
+    vendor boundary was no longer a hypothesis.</li>
+    <li><b>placement is expressible.</b> You can decide which experts live on which device and
+    have both sides agree, consistently, at runtime.</li>
+    <li><b>failure has defined behaviour.</b> When the remote side fails, the system knows what
+    to do rather than hanging or producing garbage.</li>
+  </ul>
+
+  <p>And it settled one negative, which mattered just as much: <b>this thing must not host
+  production models</b>. It proved the lifecycle, it was never going to carry real serving.</p>
+
+  <h3>choosing which parts to keep</h3>
+  <p>At that point there were three existing codebases that each did part of the job, and the
+  central decision was which part to take from each. Getting this wrong would have cost months.</p>
+
+  <table>
+    <tr><th>candidate</th><th>what we took</th><th>what we refused, and why</th></tr>
+    <tr><td><b>upstream vLLM</b></td>
+        <td>made it the <b>owner of model state</b> on the 5090: attention, the KV cache,
+            scheduling, the API. We plug into its routed expert seam as an out of tree
+            plugin.</td>
+        <td>Nothing. This was the right host, and staying out of tree means we inherit its
+            upstream work instead of forking it.</td></tr>
+    <tr><td><b>a quantised inference engine</b></td>
+        <td>its <b>connector mechanics</b>, the patterns for moving work off-device
+            cleanly.</td>
+        <td>its MoE runtime and its role as host. Its expert path was not the shape we
+            needed, and hosting there would have trapped us outside the vLLM ecosystem.</td></tr>
+    <tr><td><b>Intel's llm-scaler</b></td>
+        <td>its <b>ESIMD MoE kernels</b>, to get compute on the Intel cards without writing
+            math first.</td>
+        <td>its host runtime, and its vLLM patch. That patch was pinned to a vLLM two minor
+            versions behind ours and could not be applied unchanged.</td></tr>
+  </table>
+
+  <p>So: <b>vLLM owns the model, we own the boundary, Intel owned the math</b>. That last part
+  changed later, and the fact that only one third of it changed is the point of drawing the
+  boundary carefully.</p>
+
+  <h3>the rules we set before writing code</h3>
+  <p>The plan committed on day one included constraints that read like paranoia and turned out
+  to be exactly right. Every one of them was written because the prototype had shown us the
+  failure it prevents.</p>
+  <ul>
+    <li><b>a fixed ring, allocated once.</b> Never allocate on the hot path. Allocation means
+    the driver, and the driver means unpredictable pauses in the middle of a token.</li>
+    <li><b>never pull a value back to the CPU mid-layer, and never synchronise the whole
+    device.</b> Both are the easy way to write this, and both destroy the overlap between the
+    two vendors' work. The cost of a single careless "read this number" is the entire
+    parallelism you were trying to buy.</li>
+    <li><b>batching is mandatory, not an optimisation.</b> One expert weight read has to serve
+    many tokens or the memory traffic makes the whole idea pointless.</li>
+    <li><b>decode and prefill get different dispatch policies.</b> Written before we could
+    measure why. It is now the single most important fact about this system.</li>
+    <li><b>every model needs an explicit capability manifest and its own correctness gate.</b>
+    Unsupported models stay on plain vLLM rather than silently entering an unvalidated path.</li>
+  </ul>
+
+  <h3>eight phases of implementation</h3>
+  <p>Each phase existed to kill one specific risk, and each ended in a gate that either passed
+  with numbers or blocked the next phase.</p>
+
+  <table>
+    <tr><th>phase</th><th>the risk it killed</th></tr>
+    <tr><td><b>0.</b> freeze the compatibility contract</td>
+        <td>Pin exactly which upstream versions and model shapes we claim to support, so
+            "it broke" can never be ambiguous.</td></tr>
+    <tr><td><b>1.</b> a persistent provider</td>
+        <td>The Intel side must be a long lived process holding its weights resident. Loading
+            per request would dominate everything.</td></tr>
+    <tr><td><b>2.</b> a versioned cross process ring</td>
+        <td>Two processes sharing pinned memory need a layout contract with a version number,
+            or a mismatched build corrupts silently instead of failing.</td></tr>
+    <tr><td><b>3.</b> qualify the provider's mathematics alone</td>
+        <td>Prove the expert math is right <i>outside</i> the model, against a reference. If you
+            only test end to end you cannot tell a kernel bug from a plumbing bug.</td></tr>
+    <tr><td><b>4.</b> the vLLM plugin with hybrid MoE</td>
+        <td>Insert into vLLM's routed expert lifecycle without forking vLLM.</td></tr>
+    <tr><td><b>5.</b> compact expert ownership placement</td>
+        <td>Both sides must agree on who owns which expert, with the ids remapped compactly so
+            the remote card only sees the experts it actually holds.</td></tr>
+    <tr><td><b>6.</b> eager execution gates</td>
+        <td>Get correct tokens out before touching CUDA graphs, because graph capture hides
+            bugs and changes failure modes.</td></tr>
+    <tr><td><b>7.</b> in process C ABI plus a real device gate</td>
+        <td>Collapse the cross process ring into an in process C ABI to remove a whole copy and
+            a whole scheduling boundary, then re-qualify on real silicon.</td></tr>
+  </table>
+
+  <h3>why we had to write our own kernels</h3>
+  <p>Then the checkpoint format changed. The model we wanted to serve ships in <b>NVFP4</b>, a
+  4-bit floating point format, and Intel's kernels do not read it. They handle 16-bit floats,
+  8-bit floats, and integers. Nothing that speaks NVFP4 existed for these cards anywhere.</p>
+
+  <p>Three options: convert the checkpoint to a format Intel's kernels could read, which we
+  later measured as destroying quality; keep weights in 16-bit, which does not fit in memory and
+  doubles the bytes crossing the link; or write the kernels. We wrote the kernels, and commit
+  <code>1da05c3a</code> is where Intel's come out and ours go in. Everything since is ours: the
+  expert bank format, the grouped prefill kernel, the decode kernel, the placement policy, the
+  doorbell.</p>
+
+  <div class="note k">Worth noticing what did <b>not</b> have to change when the math changed.
+  The provider boundary, the ring layout, the placement policy and the plugin all survived,
+  because the boundary was drawn around "give me routed expert work, hand back partial results"
+  rather than around any particular kernel. Replacing a third of the system took one commit.</div>
+
+  <h3>problems we ran into</h3>
+  <p>None of these were in the plan. Each cost real time and each is now a line in the ledger.</p>
+  <ul>
+    <li><b>the checkpoint lied about its own layout.</b> The model declared one architecture but
+    named its tensors like another, and its list of layers to leave unquantised carried the wrong
+    prefix on 348 of 349 entries. Result: every 16-bit module got built as though it were
+    quantised and rejected its own weights. Fixed with a prefix rewrite in our loader, which is
+    a no-op for correct checkpoints.</li>
+    <li><b>a vendor kernel library that hangs the GPU.</b> One MoE autotuner ran 25 minutes at
+    full utilisation without finishing on this class of card. Skipping those ops reached a
+    fallback that faulted on a misaligned address instead. We pinned the backend to a path that
+    works and wrote down both failure modes.</li>
+    <li><b>a latent bug of ours, exposed by a stricter consumer.</b> Our route remapping widened
+    expert ids to 64-bit. Two previous kernels tolerated it; a third type-checked and threw.
+    Fixed at the source rather than at the call site.</li>
+    <li><b>47 GiB of host memory vanishing.</b> Traced by instrumenting the boot: Intel's driver
+    keeps a full host copy of everything on the card. Not a leak, not fixable by any flag we
+    tried, and it killed an entire category of optimisation. Better to know.</li>
+    <li><b>prompt caching silently doing nothing.</b> Measured 1.007&times; on a repeated prompt
+    where it should have been enormous. The model mixes two attention types and the framework
+    cannot cache the state of one of them, so caching was disabled by architecture, not by
+    configuration. On the model we serve today it works, and measures about 139&times;.</li>
+    <li><b>a parity check that was itself broken.</b> A parity check compared two runs that had generated
+    <i>different random inputs</i>, and we spent an afternoon bisecting kernels for a bug that
+    did not exist. The gate is now seeded. That one is in the ledger as a rule: an instrument
+    has to be deterministic before it is allowed to accuse anything.</li>
+  </ul>
+</section>
+
+<!-- ═════════════════ ACT II ═════════════════ -->
+<div class="act"><span class="actlab">Act II &nbsp;&middot;&nbsp; the problem, properly</span></div>
+
+<section>
+  <h2>the weights do not fit on any single card</h2>
+  <p>The model we serve is a mixture of experts, roughly 118 billion parameters. Squeezed into
+  4-bit it is still <b>58.2 GiB</b> of weights. Every card in this machine holds 32 GB. The
+  arithmetic is not subtle.</p>
+
+  <figure>
+  <svg viewBox="0 0 900 250" role="img" aria-label="Weights against card capacity">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">58.2 GiB OF WEIGHTS AGAINST WHAT EACH CARD HOLDS</text>
+    <rect x="0" y="32" width="640" height="42" rx="4" fill="#17171b"/>
+    <text x="15" y="58" font-size="14" fill="#fff" font-weight="600">the model, 4-bit, 58.2 GiB</text>
+    <rect x="0" y="92" width="352" height="30" rx="4" fill="#eef1ee" stroke="#3d6b3d"/>
+    <text x="12" y="112" font-size="13" fill="#17171b">RTX 5090, 32 GB</text>
+    <text x="366" y="112" font-size="12.5" fill="#b4552d">55% of it</text>
+    <rect x="0" y="130" width="352" height="30" rx="4" fill="#eaeff2" stroke="#2a5d7c"/>
+    <text x="12" y="150" font-size="13" fill="#17171b">Arc Pro B70, 32 GB</text>
+    <text x="366" y="150" font-size="12.5" fill="#b4552d">55%</text>
+    <rect x="0" y="168" width="352" height="30" rx="4" fill="#eaeff2" stroke="#2a5d7c"/>
+    <text x="12" y="188" font-size="13" fill="#17171b">Arc Pro B70, 32 GB</text>
+    <text x="366" y="188" font-size="12.5" fill="#b4552d">55%</text>
+    <path d="M446,96 L458,96 L458,194 L446,194" fill="none" stroke="#2f6f4e" stroke-width="1.5"/>
+    <text x="470" y="138" font-size="13.5" fill="#2f6f4e" font-weight="600">96 GB between them.</text>
+    <text x="470" y="157" font-size="13.5" fill="#2f6f4e" font-weight="600">enough, if you can split it.</text>
+    <line x1="640" y1="26" x2="640" y2="212" stroke="#17171b" stroke-dasharray="3 3" opacity=".3"/>
+    <text x="648" y="228" font-size="12" fill="#6e6e79">what one card would have to reach</text>
+  </svg>
+  </figure>
+
+  <p>The normal answer is to buy one card big enough, a 96 GB datacenter part, and be done.
+  That answer works. It is also wasteful, for two reasons that have nothing to do with price.</p>
+
+  <h3>most of the model is unused on any given token</h3>
+  <p>Mixture of experts means each layer holds 218 separate expert networks, and a token uses
+  <b>10 of them</b>. The other 208 sit there doing nothing for that token. So when you buy 96
+  GB of fast memory, you are buying it to <i>store</i> weights, not to compute with them. The
+  storage requirement is huge, the compute requirement per token is small.</p>
+
+  <div class="why">
+    <p class="lab">the intuition</p>
+    <p>It is a library, not a factory. You need shelf space for two hundred books because any
+    one of them might be needed, but each reader only ever pulls ten. Paying for a
+    reading room the size of the shelves is the mistake.</p>
+  </div>
+
+  <h3>attention and experts need opposite things</h3>
+  <p>Inside every layer there are two very different jobs, and they have opposite needs.</p>
+
+  <table>
+    <tr><th>the job</th><th>how often it touches memory</th><th>what it needs</th></tr>
+    <tr>
+      <td><b>attention</b><br><span class="mute">plus the KV cache</span></td>
+      <td>re-reads the <i>entire</i> cache for every token, so the traffic grows as the
+          conversation grows</td>
+      <td><b>closeness.</b> It must sit next to the compute, on the fastest memory available.
+          Latency here is paid on every token.</td>
+    </tr>
+    <tr>
+      <td><b>the experts</b></td>
+      <td>read once per token, then not touched again until that expert is picked again</td>
+      <td><b>capacity.</b> They are enormous and rarely touched, so being a bit far away costs
+          almost nothing.</td>
+    </tr>
+  </table>
+
+  <p>When you buy one big card you are buying one kind of memory to satisfy both. Shooting
+  Brake gives each job the hardware it actually wants: attention gets the closest, fastest
+  memory on the fastest link, and the experts get cheap capacity a little further away.</p>
+
+  <h3>a third problem, specific to this hardware</h3>
+  <p>Splitting like this creates a problem the big card does not have. Every layer, twice, data
+  has to cross the gap between the cards. On this machine that gap is <b>PCIe</b>, and it is
+  the narrowest thing in the system by a wide margin.</p>
+
+  <figure>
+  <svg viewBox="0 0 900 176" role="img" aria-label="Bandwidth comparison">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">MEASURED BANDWIDTH, SAME SCALE</text>
+    <rect x="0" y="30" width="820" height="30" rx="4" fill="#2a5d7c"/>
+    <text x="14" y="50" font-size="13" fill="#fff" font-weight="600">inside one Arc card, its own memory: 603.5 GB/s</text>
+    <rect x="0" y="70" width="9" height="30" rx="3" fill="#b4552d"/>
+    <text x="20" y="90" font-size="13" fill="#17171b" font-weight="600">between the cards, both Arcs sharing PCIe: 6.44 GB/s</text>
+    <text x="0" y="130" font-size="13.5" fill="#2e2e35">The gap is <tspan font-weight="600">94 times</tspan>. Every design decision
+    in this system falls out of that one ratio.</text>
+    <text x="0" y="154" font-size="13" fill="#6e6e79">Which is why the experts never move, and why the KV cache can never leave the 5090.</text>
+  </svg>
+  </figure>
+</section>
+
+<!-- ═════════════════ ACT III ═════════════════ -->
+<div class="act"><span class="actlab">Act III &nbsp;&middot;&nbsp; the architecture, in full</span></div>
+
+<section>
+  <h2>the main idea</h2>
+  <p>You cannot move the experts. A single layer's worth of expert weights is about <b>430
+  MB</b>, and there are 47 layers. Pushing that across a 6.44 GB/s link every token would take
+  minutes per word. So the experts do not move. They are loaded into Arc memory once at startup
+  and they stay there for the life of the server.</p>
+
+  <p>What moves is the tokens, and tokens are tiny.</p>
+
+  <figure>
+  <svg viewBox="0 0 900 172" role="img" aria-label="Weights versus activations">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">PER LAYER, PER DISPATCH</text>
+    <rect x="0" y="30" width="750" height="34" rx="4" fill="#2a5d7c"/>
+    <text x="14" y="52" font-size="13.5" fill="#fff" font-weight="600">expert weights that get read: 430 MB. never leave the card.</text>
+    <rect x="0" y="80" width="44" height="34" rx="4" fill="#2f6f4e"/>
+    <text x="56" y="102" font-size="13.5" fill="#17171b" font-weight="600">what actually crosses PCIe: 25.33 MB, measured, constant</text>
+    <text x="0" y="144" font-size="13.5" fill="#2e2e35">A <tspan font-weight="600">17 to 1</tspan> ratio. That is the entire reason a narrow link can serve a model this big.</text>
+    <text x="0" y="164" font-size="13" fill="#6e6e79">Move the small thing to where the big thing lives, not the other way round.</text>
+  </svg>
+  </figure>
+
+  <h3>where each part runs, and why</h3>
+  <table>
+    <tr><th>hardware</th><th>what runs on it</th><th>why there and nowhere else</th></tr>
+    <tr>
+      <td><b>RTX 5090</b><br><span class="mute">32 GB, PCIe Gen5 &times;16<br>native 4-bit tensor cores</span></td>
+      <td>attention, the KV cache (10.69 GiB, 211,083 tokens), normalisation, the router,
+          the shared expert, and one local expert</td>
+      <td>Attention re-reads the whole cache every token. Put that cache on an Arc and you
+          would drag it across a 6.44 GB/s link 47 times per token instead of reading it at
+          local speed. It is not slow, it is <b>impossible</b>. This is also the only card
+          with hardware that speaks 4-bit natively.</td>
+    </tr>
+    <tr>
+      <td><b>2 &times; Arc Pro B70</b><br><span class="mute">32 GB each, 603.5 GB/s each<br>Gen3 &times;4 and Gen4 &times;4</span></td>
+      <td>170 routed experts, 85 per card, resident in 4-bit permanently</td>
+      <td>They are 46 of the 58 GiB and each one is touched once per token. Distance costs
+          them least, so this is where the cheap capacity belongs. Their matrix engines do
+          <b>not</b> speak 4-bit, so we convert inside the kernel.</td>
+    </tr>
+    <tr>
+      <td><b>host, 59.4 GiB</b><br><span class="mute">Ryzen 9950X3D</span></td>
+      <td>the ring buffers both sides read and write, and two CPU cores that do nothing but
+          watch for the doorbell</td>
+      <td>It is the only memory <b>both vendors can touch</b>. That makes it the meeting
+          point, which turns out to be the key to the whole design.</td>
+    </tr>
+  </table>
+
+  <div class="note k">Notice what is missing: there is no direct card to card link. The two
+  Arcs cannot talk to the 5090 and the 5090 cannot talk to them. Everything goes through
+  host memory. That is not a shortcut, it is the only road that exists.</div>
+</section>
+
+<section>
+  <h2>the router: choosing 10 out of 218</h2>
+  <p>Every layer, for every token, a small network scores all 218 experts and picks the best 10,
+  with a weight for each saying how much that expert's opinion counts. Then those 10 get sorted
+  by who owns them: about 1 lives on the 5090 and runs locally, and the remaining 9 split
+  roughly <b>5 and 5</b> across the two Arc cards.</p>
+
+  <p>The experts themselves never move, so what gets sent to each card is small: the token's
+  hidden state (3,072 numbers), the list of which experts to use, and their weights. The card
+  looks up those experts in its own memory, does the math, and sends back a partial answer.
+  The 5090 adds up all the partial answers and that is the layer done.</p>
+
+  <h3>something we had to check</h3>
+  <p>If routing were lopsided, one card would be swamped while the other idled. So we measured
+  it on real prose. <b>All 205 usable experts get picked</b>, the ten most popular take only
+  <b>7.2%</b> of the traffic between them, and the busiest expert is only <b>1.63&times;</b> the
+  average. On natural text the split across the two cards came out <b>51.87% to 48.13%</b>,
+  which is about as even as you could ask for.</p>
+
+  <p>That mattered more than we expected. We nearly built a clever uneven split to
+  compensate for a lopsidedness that only showed up with <b>random synthetic prompts</b>. On
+  real text the even split is already near optimal, and tuning for the synthetic case would
+  have made real text <b>6.4% worse</b>. We caught it by testing on actual prose instead of
+  generated tokens.</p>
+</section>
+
+<section>
+  <h2>pinned memory and DMA</h2>
+  <p>Two pieces of vocabulary, because everything after this depends on them.</p>
+
+  <h3>what DMA is</h3>
+  <p>A GPU does not politely ask the CPU to hand it data. It has its own engine that reaches
+  into system memory and takes it, called <b>direct memory access</b>. The CPU is not involved.
+  It is the difference between asking a colleague to fetch a file and having a key to the
+  filing cabinet yourself.</p>
+
+  <h3>what pinning is, and why it is required</h3>
+  <p>Normally the operating system is free to shuffle your memory around: move a page
+  somewhere else, swap it to disk, whatever it likes. That is fine for a CPU because the OS
+  updates the address as it goes. It is fatal for a GPU, which has been handed a raw physical
+  address and will happily read whatever is now sitting there.</p>
+
+  <p><b>Pinning</b> (or page locking) tells the OS: this memory does not move, ever. Once a
+  page is pinned, a GPU's DMA engine can read and write it at any moment without warning
+  anyone. All our ring buffers are pinned for exactly this reason.</p>
+
+  <div class="why">
+    <p class="lab">the intuition</p>
+    <p>Pinning is nailing the mailbox to the wall. Both parties can drop things in it and pick
+    things up whenever they like, without checking whether someone moved the mailbox.</p>
+  </div>
+
+  <h3>how the two combine</h3>
+  <p>Pinned host memory is the one place <b>both vendors' hardware can reach</b>. NVIDIA's DMA
+  engine can write it. Intel's DMA engine can read it. Neither needs to know the other exists.
+  Two runtimes that share no API at all share a mailbox, and that is enough to build a
+  handshake on.</p>
+</section>
+
+<section>
+  <h2>the doorbell</h2>
+  <p>This is the part with no equivalent in any shipping framework, so it gets the space.</p>
+
+  <p><b>The problem, plainly:</b> 47 times per token, the 5090 has to stop and wait for two
+  Intel cards to finish, then continue. CUDA has a rich set of tools for waiting on other CUDA
+  work. It has nothing at all for waiting on an Intel GPU. Intel's runtime is the same in
+  reverse. There is no shared clock, no shared event, no shared queue.</p>
+
+  <p><b>So we built a synchronisation primitive out of ordinary memory.</b> Two 4-byte words in
+  a pinned host page, per layer. One is the <i>signal</i>. One is the <i>completion</i>. That is
+  the entire protocol.</p>
+
+  <figure>
+  <svg viewBox="0 0 900 330" role="img" aria-label="Doorbell protocol sequence">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">THE HANDSHAKE, ONE LAYER</text>
+    <line x1="150" y1="34" x2="150" y2="300" stroke="#3d6b3d" stroke-width="1.5"/>
+    <text x="150" y="28" font-size="12.5" fill="#3d6b3d" font-weight="700" text-anchor="middle">RTX 5090</text>
+    <line x1="450" y1="34" x2="450" y2="300" stroke="#8a6d1f" stroke-width="1.5"/>
+    <text x="450" y="28" font-size="12.5" fill="#8a6d1f" font-weight="700" text-anchor="middle">pinned host memory</text>
+    <line x1="760" y1="34" x2="760" y2="300" stroke="#2a5d7c" stroke-width="1.5"/>
+    <text x="760" y="28" font-size="12.5" fill="#2a5d7c" font-weight="700" text-anchor="middle">Arc B70</text>
+    <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L7,3 z" fill="#6e6e79"/></marker></defs>
+
+    <path d="M152,58 L446,58" fill="none" stroke="#6e6e79" stroke-width="1.4" marker-end="url(#ar)"/>
+    <text x="158" y="52" font-size="12.5" fill="#17171b">1. writes the token count into the signal word</text>
+
+    <path d="M448,96 L448,96" fill="none" stroke="#6e6e79"/>
+    <text x="462" y="92" font-size="12.5" fill="#17171b">2. a CPU core pinned to nothing else</text>
+    <text x="462" y="110" font-size="12.5" fill="#6e6e79">but this is spinning on that word. it sees it.</text>
+
+    <path d="M452,140 L756,140" fill="none" stroke="#6e6e79" stroke-width="1.4" marker-end="url(#ar)"/>
+    <text x="462" y="134" font-size="12.5" fill="#17171b">3. hands the work over</text>
+
+    <rect x="640" y="158" width="240" height="42" rx="5" fill="#eaeff2" stroke="#2a5d7c"/>
+    <text x="652" y="176" font-size="12.5" fill="#17171b">4. computes its 5 experts,</text>
+    <text x="652" y="192" font-size="12.5" fill="#17171b">for every token in the batch</text>
+
+    <path d="M756,224 L452,224" fill="none" stroke="#2f6f4e" stroke-width="1.4" marker-end="url(#ar)"/>
+    <text x="462" y="218" font-size="12.5" fill="#17171b">5. writes results, then sets the completion word</text>
+
+    <path d="M446,262 L152,262" fill="none" stroke="#2f6f4e" stroke-width="1.4" marker-end="url(#ar)"/>
+    <text x="158" y="256" font-size="12.5" fill="#17171b">6. the 5090 was already waiting on it. it continues.</text>
+    <text x="158" y="290" font-size="12.5" fill="#6e6e79">then all of that again, 46 more times, before one word comes out.</text>
+  </svg>
+  <figcaption>The two Arc cards do steps 3 through 5 <b>at the same time</b>, each on its own
+  CPU core. That parallelism is why two cards are faster than one, and it is also fragile:
+  when we let the two pollers share a single core, the handshake serialised and the entire
+  benefit vanished. The core pinning is load bearing, not tidiness.</figcaption>
+  </figure>
+
+  <h3>what it costs</h3>
+  <p>Today that handshake costs <b>61 microseconds per layer</b>. Times 47 layers, that is
+  about 2.9 milliseconds of every token spent just knocking on doors. On an 11.4 ms token, that
+  is a quarter of the time.</p>
+
+  <p>So we went looking for something faster, and we found it.</p>
+</section>
+
+<section>
+  <h2>the semaphore, and where it stopped</h2>
+  <p>Intel's GPUs have a piece of hardware most people never think about, called the
+  <b>command streamer</b>. It is the front end that reads the list of things the GPU has been
+  told to do. And it can do something useful: it can be told <b>wait until this memory location
+  holds this value</b>, and it will sit there checking, in hardware, with no CPU involved at
+  all. The instruction is <code>MI_SEMAPHORE_WAIT</code>, exposed through an Intel extension.</p>
+
+  <p>That is exactly what we need. If the Arc card can wait on a memory word directly, we do
+  not need a CPU core spinning, and we do not need the host in the loop at all. We measured it:
+  <b>4.7 to 5.6 microseconds</b> for the round trip, against 61 for the poller. Twelve times
+  faster.</p>
+
+  <h3>why the first version did not work</h3>
+  <p>The obvious way to wire it up is to let Intel own the shared page and have CUDA write into
+  it. So we asked CUDA to take an Intel allocated host page and register it for DMA, using
+  <code>cudaHostRegister</code>. It refused. Error 1, invalid value, every time. Intel's host
+  memory is backed in a way CUDA will not accept, and no flag combination changed that. We
+  tried the driver debug keys too. All of them.</p>
+
+  <p>Worse, the failure mode is nasty. When you hand a raw unregistered host pointer to the
+  Intel side, the driver does not fail loudly, it quietly falls back to <b>copying</b> the page
+  into an internal buffer. Then the Arc waits on the copy forever while CUDA writes the
+  original. It would look like a hang with no error anywhere. We found that trap in a probe,
+  which is the only reason it never cost us a debugging week.</p>
+
+  <h3>inverting the design</h3>
+  <p>If CUDA will not accept Intel's memory, let <b>CUDA own the memory instead</b> and have
+  Intel's command streamer wait on it. CUDA allocates the pinned page. Intel's hardware waits
+  on a word inside it. We tested it on real silicon, both cards, 2,100 iterations:</p>
+
+  <div class="g3">
+    <div class="card"><div class="stat" style="color:var(--us)">8.1&nbsp;&micro;s</div>
+      <div class="statlab">full round trip, Gen4 card: 5090 writes, Arc's command streamer
+      wakes, publishes completion</div></div>
+    <div class="card"><div class="stat" style="color:var(--us)">9.2&nbsp;&micro;s</div>
+      <div class="statlab">same on the Gen3 card</div></div>
+    <div class="card"><div class="stat">0</div>
+      <div class="statlab">silent copy failures in 2,100 iterations, both directions verified</div></div>
+  </div>
+
+  <p style="margin-top:18px"><b>7.5&times; faster than the thing it replaces</b>, and it frees
+  the two CPU cores that currently do nothing but spin. Projected effect on generation speed:
+  11.4 ms down to somewhere around 9.7 to 10.6 ms per token.</p>
+
+  <div class="note a">And then it did not ship. Wiring the proven transport into the live
+  engine wedged during CUDA graph capture, four separate times, in three different designs.
+  The transport is proven. The integration is blocked on a driver level race we have isolated
+  but not fixed. The number above is a <span class="tag p">projection</span> and stays one
+  until it serves a real token. We are not going to pretend otherwise.</div>
+</section>
+
+<section>
+  <h2>one token, start to finish</h2>
+  <p>Putting it together. This is what happens between you pressing enter and one word
+  appearing.</p>
+
+  <figure>
+  <svg viewBox="0 0 900 420" role="img" aria-label="Full token path">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">ONE LAYER OF 47. ALL OF THIS, FORTY SEVEN TIMES, PER TOKEN.</text>
+    <rect x="0" y="34" width="326" height="232" rx="10" fill="#f2f6f2" stroke="#3d6b3d"/>
+    <text x="16" y="56" font-size="12.5" fill="#3d6b3d" font-weight="700">RTX 5090</text>
+    <g font-size="12.8" fill="#17171b">
+      <rect x="16" y="66" width="294" height="34" rx="6" fill="#fff" stroke="#dbe4db"/>
+      <text x="28" y="88">1. attention, reading the whole KV cache</text>
+      <rect x="16" y="106" width="294" height="34" rx="6" fill="#fff" stroke="#dbe4db"/>
+      <text x="28" y="128">2. router scores 218, keeps 10</text>
+      <rect x="16" y="146" width="294" height="34" rx="6" fill="#fff" stroke="#dbe4db"/>
+      <text x="28" y="168">3. runs the shared and local expert itself</text>
+      <rect x="16" y="186" width="294" height="34" rx="6" fill="#fff" stroke="#dbe4db"/>
+      <text x="28" y="208">4. rings the doorbell, then waits</text>
+      <rect x="16" y="226" width="294" height="30" rx="6" fill="#eef3ee" stroke="#c9d8c9"/>
+      <text x="28" y="246">7. adds up every partial answer</text>
+    </g>
+    <rect x="356" y="96" width="152" height="116" rx="10" fill="#fdfbf4" stroke="#c9b98a"/>
+    <text x="370" y="118" font-size="11.5" fill="#8a6d1f" font-weight="700">PINNED HOST PAGE</text>
+    <g font-size="12.2" fill="#2e2e35">
+      <text x="370" y="138">signal word</text>
+      <text x="370" y="156">completion word</text>
+      <text x="370" y="174">token, ids, weights</text>
+      <text x="370" y="192">result buffers</text>
+      <text x="370" y="207" font-size="11" fill="#8a6d1f">2 cores spinning here</text>
+    </g>
+    <rect x="556" y="34" width="344" height="104" rx="10" fill="#eff4f7" stroke="#2a5d7c"/>
+    <text x="572" y="56" font-size="12.5" fill="#2a5d7c" font-weight="700">Arc Pro B70 #1, Gen3 &times;4</text>
+    <text x="572" y="79" font-size="12.8" fill="#17171b">5. looks up its 5 experts, does the math</text>
+    <text x="572" y="99" font-size="12" fill="#6e6e79">85 experts resident, 603.5 GB/s local</text>
+    <text x="572" y="119" font-size="12" fill="#6e6e79">unpacks 4-bit into its matrix engines</text>
+    <rect x="556" y="150" width="344" height="104" rx="10" fill="#eff4f7" stroke="#2a5d7c"/>
+    <text x="572" y="172" font-size="12.5" fill="#2a5d7c" font-weight="700">Arc Pro B70 #2, Gen4 &times;4</text>
+    <text x="572" y="195" font-size="12.8" fill="#17171b">5. the same, at the same time</text>
+    <text x="572" y="215" font-size="12" fill="#6e6e79">85 experts resident, 603.5 GB/s local</text>
+    <text x="572" y="235" font-size="12" fill="#6e6e79">6. writes results, sets completion</text>
+    <defs><marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L7,3 z" fill="#6e6e79"/></marker></defs>
+    <path d="M326,150 L352,150" fill="none" stroke="#6e6e79" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M508,126 L552,92" fill="none" stroke="#6e6e79" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M508,180 L552,206" fill="none" stroke="#6e6e79" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M552,128 L512,160" fill="none" stroke="#2f6f4e" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M552,244 L512,196" fill="none" stroke="#2f6f4e" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M356,200 C300,246 300,240 216,240" fill="none" stroke="#2f6f4e" stroke-width="1.5" marker-end="url(#a2)"/>
+    <path d="M56,272 C56,300 844,300 844,266" fill="none" stroke="#17171b" stroke-width="1.2"
+          stroke-dasharray="4 4" opacity=".4" marker-end="url(#a2)"/>
+    <text x="330" y="322" font-size="12.8" fill="#17171b">&times; 47, strictly in order. layer 12 cannot start until layer 11 is done.</text>
+    <line x1="0" y1="348" x2="900" y2="348" stroke="#e7e6e1"/>
+    <text x="0" y="374" font-size="13.5" font-weight="600" fill="#17171b">61 &micro;s</text>
+    <text x="60" y="374" font-size="12.5" fill="#6e6e79">per layer just for the handshake. proven possible in hardware at 8 to 9.</text>
+    <text x="0" y="398" font-size="13.5" font-weight="600" fill="#17171b">25.33 MB</text>
+    <text x="80" y="398" font-size="12.5" fill="#6e6e79">crosses PCIe per dispatch, constant, verified in traces. the two Arcs share that window.</text>
+  </svg>
+  </figure>
+</section>
+
+<section>
+  <h2>why prefill and decode behave differently</h2>
+  <p>Reading your prompt and writing the answer are the same math, but they land on the
+  hardware completely differently, and once you see why, every result in this document makes
+  sense.</p>
+
+  <div class="g2">
+    <div class="card">
+      <p class="kicker" style="color:var(--us)">reading your prompt, "prefill"</p>
+      <p><b>2,048 tokens go through together.</b> An expert gets loaded from Arc memory once
+      and then used for hundreds of tokens. The cost of fetching it is spread across all of
+      them.</p>
+      <p>The cards are doing real, dense matrix work. This is the regime where engineering
+      pays, and it did: <b class="win">1,705 down to 387 microseconds per token, 4.40&times;</b>.</p>
+    </div>
+    <div class="card">
+      <p class="kicker" style="color:var(--them)">writing the answer, "decode"</p>
+      <p><b>One token goes through alone.</b> The same expert gets loaded, used once, and
+      thrown away. Nothing is spread across anything.</p>
+      <p>And the 47 round trips are strictly sequential, so their latency cannot be hidden.
+      Layer 12's input does not exist until layer 11 finishes.</p>
+    </div>
+  </div>
+
+  <div class="why">
+    <p class="lab">the intuition</p>
+    <p>Prefill is a delivery van doing one round with two thousand parcels. Decode is the same
+    van doing the same round with one parcel. The van costs the same either way. That is the
+    whole story, and it is why the two halves of this system behave like different machines.</p>
+  </div>
+
+  <h3>where a generated token spends its time</h3>
+  <figure>
+  <svg viewBox="0 0 900 156" role="img" aria-label="Decode time breakdown">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">12.1 MILLISECONDS PER GENERATED TOKEN, MEASURED</text>
+    <rect x="0" y="30" width="194" height="44" fill="#2a5d7c"/>
+    <rect x="194" y="30" width="626" height="44" fill="#cdd2d8"/>
+    <rect x="820" y="30" width="80" height="44" fill="#e4e6ea"/>
+    <text x="12" y="58" font-size="13" fill="#fff" font-weight="600">2.5 ms, 21.6%</text>
+    <text x="206" y="58" font-size="13" fill="#17171b" font-weight="600">7.9 ms, 69.7%: the 5090 waiting and orchestrating</text>
+    <text x="0" y="96" font-size="12.5" fill="#2a5d7c">the Arc cards actually working, both in parallel</text>
+    <text x="206" y="96" font-size="12.5" fill="#6e6e79">hundreds of tiny kernels, graph replay, and the 61 &micro;s handshake &times; 47</text>
+    <text x="742" y="96" font-size="12.5" fill="#6e6e79">2 ms tail</text>
+    <text x="0" y="132" font-size="13.5" fill="#17171b">The expert cards are <tspan font-weight="600">not the bottleneck</tspan> when generating.
+    Software orchestration is, by a factor of three.</text>
+  </svg>
+  <figcaption>This is why a faster expert kernel is worth about <b>2%</b> end to end during
+  generation, and why we stopped that line of work once we measured it rather than pushing on
+  out of momentum. It is also why generation speed is <b>flat</b> from 1K to 127K context: the
+  bottleneck is a fixed cost per layer that has no idea how long your conversation is.</figcaption>
+  </figure>
+</section>
+
+<!-- ═════════════════ ACT IV ═════════════════ -->
+<div class="act"><span class="actlab">Act IV &nbsp;&middot;&nbsp; the numbers</span></div>
+
+<section>
+  <h2>our kernels compared to the alternatives</h2>
+  <p>Every matrix kernel in this system is written by us. That was not a preference, it was
+  forced: the checkpoint ships in <b>NVFP4</b>, a 4-bit floating point format, and Intel's
+  matrix engines do not speak it. They handle 8-bit integers, 4-bit integers, and 16-bit
+  floats. Nothing else. So somebody had to write the code that unpacks 4-bit weights and feeds
+  them to hardware that has never heard of them, and no vendor had done it.</p>
+
+  <p>But we did not want to be precious about it. If someone else's kernel is faster, we should
+  use theirs. So we benchmarked <b>every credible alternative</b> on this exact card, at our
+  exact shapes.</p>
+
+  <table>
+    <tr><th>kernel</th><th>whose</th><th class="n">ms per layer</th><th>verdict</th></tr>
+    <tr><td><b>ours, NVFP4 grouped</b></td><td>us</td><td class="n"><b>2.355</b></td>
+        <td class="win">shipped, still the default</td></tr>
+    <tr><td>ESIMD MoE</td><td>Intel, llm-scaler</td><td class="n">n/a</td>
+        <td class="bad">dead. fp16 and fp8 only, 2&times; our bytes</td></tr>
+    <tr><td>sycl-tla grouped MoE</td><td>Intel's own CUTLASS port</td><td class="n">3.58</td>
+        <td class="bad">dead. 16-bit weights mean it cannot get under 2.66 ms no matter how
+            good the pipeline is</td></tr>
+    <tr><td>vllm-xpu grouped, fp16</td><td>vLLM's Intel kernels</td><td class="n">3.15</td>
+        <td class="bad">dead. same 16-bit wall</td></tr>
+    <tr><td>vllm-xpu grouped, MXFP4</td><td>vLLM's Intel kernels</td><td class="n">1.025</td>
+        <td>fast, but needs our scales rewritten in a lossier format</td></tr>
+    <tr><td>oneDNN grouped NVFP4</td><td>Intel's math library</td><td class="n"><b>0.970</b></td>
+        <td>fastest in isolation, exact format match</td></tr>
+  </table>
+
+  <h3>two results we did not expect</h3>
+  <p><b>First, we already beat Intel's own reference at our shapes.</b> Their sycl-tla example
+  hits 73 to 84 TFLOP/s in their benchmark, which looks like it should demolish our 20.5. But
+  their number needs about 244 rows of work per expert to reach it. Real routing gives us about
+  30. At 30 rows their kernel drops to 13 or 14 TFLOP/s, and 3.58 ms per layer, against our
+  2.355. <b>We are faster on their silicon, at the shape that actually occurs.</b> The 3.3&times;
+  gap we were worried about was an artefact of comparing at different fills.</p>
+
+  <div class="why">
+    <p class="lab">why 4-bit wins here, in one line</p>
+    <p>A 16-bit kernel has to read twice the bytes of a 4-bit one. On a memory bound job, that
+    sets a floor no amount of clever scheduling gets under. Two of the four candidates died on
+    that arithmetic alone, before anyone looked at their code quality.</p>
+  </div>
+
+  <p><b>Second, the two fast candidates did not survive integration.</b> Both looked 2.3 to
+  2.4&times; faster in isolation. Wired into the real engine the win came out roughly a wash,
+  because the expert GEMM is not the only thing happening in a prefill step. They are parked
+  behind a flag, ours stays the default, and the honest conclusion is that a microbenchmark
+  win is a hypothesis, not a result.</p>
+
+  <div class="note k">This is the part we would want a reviewer to check hardest. We went
+  looking for a reason to throw our own kernel away, found two candidates that beat it on the
+  bench, integrated both, and kept ours because the end to end number said so.</div>
+</section>
+
+<section>
+  <h2>the experiments, one line each</h2>
+  <p>Prefill is where the engineering went, and this is the whole ladder. Each row is a
+  measured step, not a projection.</p>
+
+  <figure>
+  <svg viewBox="0 0 900 246" role="img" aria-label="Prefill improvement ladder">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">MICROSECONDS PER TOKEN OF PROMPT, AT 32K CONTEXT</text>
+    <g font-size="13">
+      <rect x="240" y="30" width="620" height="26" rx="3" fill="#b4552d"/>
+      <text x="0" y="48" fill="#17171b">where we started</text>
+      <text x="868" y="48" fill="#b4552d" font-weight="600" text-anchor="end">1,705</text>
+      <rect x="240" y="66" width="191" height="26" rx="3" fill="#c07a52"/>
+      <text x="0" y="84" fill="#17171b">group the work by expert</text>
+      <text x="441" y="84" fill="#6e6e79">526</text>
+      <rect x="240" y="102" width="156" height="26" rx="3" fill="#a8825f"/>
+      <text x="0" y="120" fill="#17171b">send results back as 16-bit</text>
+      <text x="406" y="120" fill="#6e6e79">430</text>
+      <rect x="240" y="138" width="147" height="26" rx="3" fill="#7d8a6a"/>
+      <text x="0" y="156" fill="#17171b">prefetch the next tile</text>
+      <text x="397" y="156" fill="#6e6e79">404</text>
+      <rect x="240" y="174" width="141" height="26" rx="3" fill="#2f6f4e"/>
+      <text x="0" y="192" fill="#17171b" font-weight="600">overlap transfer with compute</text>
+      <text x="391" y="192" fill="#2f6f4e" font-weight="600">387</text>
+    </g>
+    <text x="0" y="228" font-size="13.5" fill="#17171b"><tspan font-weight="600">4.40&times; faster.</tspan>
+    A 32,000 token prompt went from 55.9 seconds to 12.7.</text>
+  </svg>
+  </figure>
+
+  <p>Generation speed, meanwhile, <b>did not move</b>. It sits at 12.1 to 12.5 ms per token and
+  everything we shipped this campaign was aimed at prefill. That is not a gap in the work, it
+  is what the measurements told us to do: 70% of a generated token is software orchestration,
+  so faster expert math cannot help. We tried anyway, measured 2%, and stopped.</p>
+</section>
+
+<section>
+  <h2>against a 96 GB datacenter card</h2>
+  <p>Same model, same weights, their own published benchmark run. This is the comparison that
+  matters, and it has two halves that behave completely differently.</p>
+
+  <figure>
+  <svg viewBox="0 0 900 372" role="img" aria-label="Prompt processing time versus context">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">TIME TO PROCESS THE PROMPT, COLD, NO CACHE ON EITHER SIDE</text>
+    <line x1="62" y1="290" x2="862" y2="290" stroke="#cdccc7"/>
+    <line x1="62" y1="40" x2="62" y2="290" stroke="#cdccc7"/>
+    <g font-size="11" fill="#9d9da7" text-anchor="end">
+      <text x="54" y="294">0</text><text x="54" y="211">20 s</text>
+      <text x="54" y="127">40 s</text><text x="54" y="44">60 s</text>
+    </g>
+    <g font-size="11.5" fill="#6e6e79" text-anchor="middle">
+      <text x="142" y="310">8K</text><text x="342" y="310">32K</text>
+      <text x="542" y="310">64K</text><text x="802" y="310">127K tokens of prompt</text>
+    </g>
+    <polyline points="142,276 342,237 542,177 802,42" fill="none" stroke="#b4552d" stroke-width="2.5"/>
+    <g fill="#b4552d"><circle cx="142" cy="276" r="4"/><circle cx="342" cy="237" r="4"/>
+      <circle cx="542" cy="177" r="4"/><circle cx="802" cy="42" r="4"/></g>
+    <text x="700" y="32" font-size="12.5" fill="#b4552d" font-weight="600" text-anchor="middle">ours, 59.4 s</text>
+    <polyline points="142,288 342,280 542,264 802,211" fill="none" stroke="#2f6f4e" stroke-width="2.5"/>
+    <g fill="#2f6f4e"><circle cx="142" cy="288" r="4"/><circle cx="342" cy="280" r="4"/>
+      <circle cx="542" cy="264" r="4"/><circle cx="802" cy="211" r="4"/></g>
+    <text x="806" y="203" font-size="12.5" fill="#2f6f4e" font-weight="600">their card, 18.9 s</text>
+    <text x="150" y="74" font-size="13" fill="#17171b">their curve bends upward. attention cost grows with the</text>
+    <text x="150" y="93" font-size="13" fill="#17171b">square of the prompt, so it gets worse faster than ours.</text>
+    <text x="150" y="118" font-size="13" fill="#17171b">ours is nearly a straight line. we are limited by a link,</text>
+    <text x="150" y="137" font-size="13" fill="#17171b">and a link does not care how long the prompt is.</text>
+    <text x="150" y="166" font-size="13.5" fill="#17171b" font-weight="600">so the gap collapses: 8.1&times; &rarr; 5.4&times; &rarr; 4.3&times; &rarr; 3.14&times;</text>
+  </svg>
+  <figcaption><b>Read this chart as the worst case, because it is.</b> This is cold prefill:
+  every prompt processed from scratch, nothing reused, on both sides. Real sessions do not look
+  like that. When a prompt shares its opening with one we have already seen, we skip straight
+  past the shared part, and we measured that at about <b>139&times; faster</b>. In an agentic
+  loop, where every turn resends the whole growing conversation, almost all of the prompt is
+  something we have already processed. The number above is paid once, not per turn.</figcaption>
+  </figure>
+
+  <figure>
+  <svg viewBox="0 0 900 348" role="img" aria-label="Generation speed versus context">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">MILLISECONDS PER GENERATED TOKEN</text>
+    <line x1="62" y1="268" x2="862" y2="268" stroke="#cdccc7"/>
+    <line x1="62" y1="40" x2="62" y2="268" stroke="#cdccc7"/>
+    <g font-size="11" fill="#9d9da7" text-anchor="end">
+      <text x="54" y="272">0</text><text x="54" y="196">5</text>
+      <text x="54" y="120">10 ms</text><text x="54" y="44">15</text>
+    </g>
+    <g font-size="11.5" fill="#6e6e79" text-anchor="middle">
+      <text x="122" y="288">1K</text><text x="302" y="288">16K</text><text x="482" y="288">32K</text>
+      <text x="662" y="288">64K</text><text x="822" y="288">127K</text>
+    </g>
+    <polyline points="122,95 302,95 482,95 662,95 822,95" fill="none" stroke="#b4552d" stroke-width="2.5"/>
+    <text x="128" y="87" font-size="12.5" fill="#b4552d" font-weight="600">ours: 11.40 ms, dead flat at every length</text>
+    <polyline points="122,161 302,153 482,146 662,130 822,99" fill="none" stroke="#2f6f4e" stroke-width="2.5"/>
+    <g fill="#2f6f4e"><circle cx="122" cy="161" r="4"/><circle cx="302" cy="153" r="4"/>
+      <circle cx="482" cy="146" r="4"/><circle cx="662" cy="130" r="4"/><circle cx="822" cy="99" r="4"/></g>
+    <text x="128" y="180" font-size="12.5" fill="#2f6f4e" font-weight="600">their card: gets slower as the conversation fills up</text>
+    <circle cx="822" cy="97" r="12" fill="none" stroke="#17171b" stroke-dasharray="3 2"/>
+    <text x="700" y="58" font-size="13.5" fill="#17171b" font-weight="600">they meet us here. 1.03&times;.</text>
+    <text x="640" y="330" font-size="12.5" fill="#6e6e79">their bottleneck knows how long your conversation is. ours does not.</text>
+  </svg>
+  <figcaption><b>And this gap is closable, not structural.</b> 70% of our generated token is
+  orchestration overhead, which speculative decoding attacks directly: draft several tokens
+  cheaply, verify them in one pass, and pay the 47 round trips once for several words instead
+  of once per word. The stock drafter for this model family accepted <b>zero</b> of 7,665 tokens
+  on our checkpoint, because it was trained against the unpruned original. Training our own
+  drafter on this model's actual outputs is a training job, not a kernel job, and at normal
+  acceptance rates it puts effective generation at <b>4 to 6 ms</b>, which is faster than their
+  card at <i>every</i> context length including the short ones.</figcaption>
+  </figure>
+</section>
+
+<!-- ═════════════════ ACT V ═════════════════ -->
+<div class="act"><span class="actlab">Act V &nbsp;&middot;&nbsp; what we do not have yet</span></div>
+
+<section>
+  <h2>PCIe lanes</h2>
+  <p>This is the biggest single lever in the system and it is not a chip, it is a slot.</p>
+
+  <figure>
+  <svg viewBox="0 0 900 218" role="img" aria-label="PCIe link allocation today">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">WHAT EACH CARD ACTUALLY GETS, MEASURED</text>
+    <rect x="0" y="30" width="760" height="32" rx="4" fill="#3d6b3d"/>
+    <text x="14" y="51" font-size="13" fill="#fff" font-weight="600">RTX 5090: Gen5 &times;16, sixteen lanes, and it barely needs them</text>
+    <rect x="0" y="72" width="76" height="32" rx="4" fill="#b4552d"/>
+    <text x="88" y="93" font-size="13" fill="#17171b">Arc B70 #1: Gen3 &times;4, measured 3.23 GB/s</text>
+    <rect x="0" y="114" width="152" height="32" rx="4" fill="#c9805f"/>
+    <text x="164" y="135" font-size="13" fill="#17171b">Arc B70 #2: Gen4 &times;4, measured 6.47 GB/s</text>
+    <text x="0" y="176" font-size="13.5" fill="#17171b">And they <tspan font-weight="600">share</tspan> an uplink, so together they get
+    <tspan font-weight="600">6.44 GB/s</tspan>, not 9.7.</text>
+    <text x="0" y="200" font-size="13" fill="#6e6e79">The cards holding 46 of the 58 GiB, doing most of the arithmetic, are on four lanes each.</text>
+  </svg>
+  </figure>
+
+  <p>Transfer is about <b>175 of the 387 microseconds</b> of every token of prompt, roughly
+  45%. Give each Arc its own Gen5 &times;16 root port and that link goes from 6.44 GB/s shared
+  to something near 50 GB/s each, which is <b>eight times</b> more, and it stops being shared
+  at all.</p>
+
+  <h3>effect on our own numbers</h3>
+  <p>First, <b>that transfer time is mostly not hidden today</b>. We already overlap transfer
+  with compute, and it only gained 5 to 6%. If the transfer were already hidden behind the expert
+  math, overlapping would have gained nothing at all. It gained a little, which means most of
+  those 175 microseconds are still on the critical path.</p>
+
+  <p>Here is what each change does, measured against our own current numbers rather than
+  against another card.</p>
+
+  <table>
+    <tr><th>our configuration</th><th class="n">per token of prompt</th>
+        <th class="n">32K prompt</th><th class="n">127K prompt</th></tr>
+    <tr><td>today, shipped</td><td class="n">387 &micro;s</td>
+        <td class="n">12.7 s</td><td class="n">59.4 s</td></tr>
+    <tr><td>+ its own Gen5 &times;16 per card</td><td class="n">~260 &micro;s</td>
+        <td class="n">~8.5 s</td><td class="n">~40 s</td></tr>
+    <tr><td>+ the faster 4-bit kernel</td><td class="n">~265 &micro;s</td>
+        <td class="n">~8.7 s</td><td class="n">~41 s</td></tr>
+    <tr><td><b>+ both</b></td><td class="n"><b>~162 &micro;s</b></td>
+        <td class="n win"><b>~5.3 s</b></td><td class="n win"><b>~25 s</b></td></tr>
+  </table>
+
+  <p>Each change on its own is worth about <b>1.5&times;</b> on prompt processing. Together they are
+  worth <b>2.4&times;</b>, because they multiply rather than add. That is what happens when a job
+  has two comparable costs sitting in series.</p>
+
+  <div class="note a"><b>Why both are needed.</b> Cut the link 8&times; and transfer drops
+  to about 22 microseconds, small enough to hide completely behind the expert math. But then the
+  expert math is the entire cost, so that is where you stop. Speed the expert math up 2.3&times;
+  instead and it stops being the biggest term, so the transfer you did not fix becomes the new
+  ceiling. Either one on its own leaves the other as the limit.</div>
+
+  <h3>comparison against their card</h3>
+  <p>Their curve bends upward because attention cost grows with the square of the prompt. Ours
+  is close to a straight line because we are limited by a link and a link does not care how long
+  the prompt is. So the question is not whether the lines converge, it is <i>where</i>.</p>
+
+  <figure>
+  <svg viewBox="0 0 1000 396" role="img" aria-label="Prompt processing curves, ours before and after against their card">
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">TIME TO PROCESS THE PROMPT, COLD. SECONDS.</text>
+    <line x1="62" y1="292" x2="852" y2="292" stroke="#cdccc7"/>
+    <line x1="62" y1="36" x2="62" y2="292" stroke="#cdccc7"/>
+    <g font-size="11" fill="#9d9da7" text-anchor="end">
+      <text x="54" y="296">0</text><text x="54" y="213">20</text>
+      <text x="54" y="130">40</text><text x="54" y="47">60 s</text>
+    </g>
+    <g font-size="11.5" fill="#6e6e79" text-anchor="middle">
+      <text x="150" y="312">8K</text><text x="350" y="312">32K</text>
+      <text x="550" y="312">64K</text><text x="810" y="312">127K</text>
+    </g>
+
+    <polyline points="150,276 350,237 550,177 810,42" fill="none" stroke="#b4552d" stroke-width="2.5"/>
+    <text x="814" y="46" font-size="12.5" fill="#b4552d" font-weight="600">us today, 59.4 s</text>
+
+    <polyline points="150,281 350,254 550,214 810,124" fill="none" stroke="#c9805f"
+              stroke-width="2.2" stroke-dasharray="6 4"/>
+    <text x="814" y="128" font-size="12.5" fill="#c9805f" font-weight="600">+ one lever, ~40 s</text>
+
+    <polyline points="150,284 350,268 550,243 810,186" fill="none" stroke="#3b5b8c"
+              stroke-width="2.4" stroke-dasharray="6 4"/>
+    <text x="814" y="182" font-size="12.5" fill="#3b5b8c" font-weight="600">+ both, ~25 s</text>
+
+    <polyline points="150,288 350,280 550,264 810,211" fill="none" stroke="#2f6f4e" stroke-width="2.5"/>
+    <text x="814" y="222" font-size="12.5" fill="#2f6f4e" font-weight="600">their card, 18.9 s</text>
+
+    <path d="M810,186 L868,168" fill="none" stroke="#3b5b8c" stroke-width="1.6" stroke-dasharray="2 3"/>
+    <path d="M810,211 L868,168" fill="none" stroke="#2f6f4e" stroke-width="1.6" stroke-dasharray="2 3"/>
+    <circle cx="868" cy="168" r="5" fill="none" stroke="#17171b" stroke-dasharray="2 2"/>
+
+    <text x="150" y="60" font-size="13" fill="#17171b">the gap at 127K, in ratios:</text>
+    <text x="150" y="82" font-size="13" fill="#b4552d">today, 3.14&times; slower than their card</text>
+    <text x="150" y="102" font-size="13" fill="#c9805f">one lever, 2.1&times;</text>
+    <text x="150" y="122" font-size="13" fill="#3b5b8c" font-weight="600">both levers, 1.32&times;</text>
+    <text x="150" y="150" font-size="12.5" fill="#6e6e79">and the two lines are still converging past the right edge.</text>
+    <text x="150" y="168" font-size="12.5" fill="#6e6e79">extending both curves, they meet somewhere around 250 to 290K tokens.</text>
+  </svg>
+  <figcaption>Today we are <b>3.14&times;</b> slower at
+  processing a 127K prompt. One lever takes that to about <b>2.1&times;</b>, both to about
+  <b>1.32&times;</b>. The crossing point lands somewhere around 250 to 290K tokens, which is past this model's own
+  262K architectural limit, so it is not a prompt anyone can actually send. Calling it a win
+  would be dishonest: with both changes we get close to level at the longest prompts the model
+  accepts, and stay well behind at short ones. What is accurate is that our curve has a
+  better shape than theirs, and each change moves the crossing point earlier.
+  <br><br><span class="tag p">projection</span> Each lever is measured on its own leg. The
+  composition, and anything past 127K, is extrapolation.</figcaption>
+  </figure>
+
+  <h3>decode</h3>
+  <p>Generating tokens is the opposite story, because our cost per token does not grow with the
+  conversation and theirs does.</p>
+  <table>
+    <tr><th>our configuration</th><th class="n">per token</th><th>against their card</th></tr>
+    <tr><td>today, shipped</td><td class="n">11.40 ms</td>
+        <td>behind at short prompts, <b>level at 127K</b> (they are 11.10 ms there)</td></tr>
+    <tr><td>+ the hardware doorbell</td><td class="n">~9.7 to 10.6 ms</td>
+        <td>ahead of them from roughly <b>96K</b> upward</td></tr>
+    <tr><td><b>+ our own drafter</b></td><td class="n"><b>~4 to 6 ms</b></td>
+        <td class="win">ahead of them <b>everywhere</b>, including a 1K prompt, where they are
+            7.02 ms</td></tr>
+  </table>
+  <p>The last row matters most because their generation speed gets worse as the conversation
+  fills up and ours does not. Lowering our flat cost beats their rising one at every context
+  length at the same time.</p>
+
+  <h3>four effects not in the table</h3>
+  <ul>
+    <li><b>the two cards stop fighting each other.</b> Right now they share one uplink and lose
+    about 34% to contention when both transfer at once. Separate root ports means separate
+    budgets, and both cards run at full speed simultaneously.</li>
+    <li><b>bigger chunks become worth sending.</b> More bandwidth means we can push more tokens
+    per dispatch, which means more rows of work per expert, which is exactly the thing that
+    makes the matrix engines efficient. This compounds with the faster kernel rather than just
+    adding to it.</li>
+    <li><b>overlap starts actually working.</b> We already overlap transfer with compute, and it
+    buys 5 to 6%. That is small because the transfer is so much bigger than the compute window
+    it hides behind. Shrink the transfer and the overlap covers all of it.</li>
+    <li><b>the doorbell round trip shortens.</b> The handshake is a small write and a small
+    read across the same link. Lower latency lanes make the 8 to 9 microsecond hardware
+    handshake we already proved land at the fast end of its range.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>what if the Arc cards were infinitely fast</h2>
+  <p class="lede">This is worth asking directly, because the intuitive answer is wrong. If you
+  handed us an Arc card with unlimited memory bandwidth, prompt processing would improve by
+  almost nothing and generation would improve by about a quarter. Then it would stop. Here is
+  why.</p>
+
+  <p>A prompt token costs 387 microseconds today. Taken apart, that is 175 microseconds of
+  moving weights across PCIe, 187 microseconds of the Arc cards doing arithmetic, and 68
+  microseconds of routing, scheduling and host work. Those first two run partly at the same
+  time, which is where the shipped number comes from.</p>
+
+  <p>A generated token costs 11.4 milliseconds. That splits very differently: <b>21.6%</b> is
+  the Arc cards actually working, <b>69.7%</b> is the 5090 sitting idle between layers waiting
+  for its own next launch, and the remaining couple of milliseconds is sampling and API
+  overhead.</p>
+
+  <p>So a token's time sits in a few separate places. What follows removes one place at a time
+  and reports what is left. A row reads "unchanged" when that cost is not part of that operation
+  to begin with.</p>
+
+  <table>
+    <tr><th>if this one thing became free</th>
+        <th class="n">a prompt token,<br>from 387 microsec to</th>
+        <th class="n">a generated token,<br>from 11.4 millisec to</th></tr>
+    <tr><td>moving weights over PCIe</td>
+        <td class="n win"><b>255 &micro;s</b>, 1.5&times; faster</td>
+        <td class="n">11.3 ms, unchanged</td></tr>
+    <tr><td>the Arc cards' memory speed</td>
+        <td class="n">330 &micro;s, 1.2&times; at best</td>
+        <td class="n">8.9 ms, 1.3&times; faster</td></tr>
+    <tr><td>the 5090 waiting between layers</td>
+        <td class="n">387 &micro;s, unchanged</td>
+        <td class="n win"><b>3.5 ms</b>, 3.3&times; faster</td></tr>
+    <tr><td><b>all three at once</b></td>
+        <td class="n"><b>68 &micro;s</b></td><td class="n"><b>~2 ms</b></td></tr>
+  </table>
+
+  <p>Two rows say "unchanged" and both are worth understanding. PCIe does not matter for
+  generation because generating a token only sends 6 KB of state across the link, not weights.
+  The 5090's waiting does not matter for prompts because a prompt processes 2,048 tokens per
+  launch, so the launch cost is divided across all of them. Generation pays it 47 times for one
+  token.</p>
+
+  <h3>why an infinitely fast Arc card barely helps the prompt</h3>
+  <p>Our prompt kernel reads about 430 MB of expert weights per layer. At the 603.5 GB/s we
+  measured on the card, fetching that much should take 0.71 ms. We measure 2.355 ms. So the
+  kernel is running at roughly <b>30% of the memory bandwidth it already has</b>, and the other
+  70% of its time goes to unpacking 4-bit weights and doing the multiply.</p>
+  <p>Giving it more bandwidth does not help something that is not waiting on bandwidth. That is
+  the whole argument for spending effort on a better kernel instead: the faster 4-bit kernel we
+  benchmarked is 2.3&times; quicker on the same card at the same bandwidth.</p>
+
+  <h3>why it does help generation, but only to a point</h3>
+  <p>Generation is the opposite case. There the card reads one expert's weights to serve a single
+  token, so there is no arithmetic to hide behind, and our kernel runs at <b>545 GB/s, about 90%
+  of the card's ceiling</b>. That one is genuinely bandwidth-limited and close to physics.</p>
+  <p>But it is only 21.6% of a generated token. Take Arc service to zero and 11.4 ms becomes
+  about 8.9 ms, and there it stops, because the 5090 is still spending 7.9 milliseconds waiting
+  between its 47 layers. That waiting is software, not silicon. No card fixes it.</p>
+
+  <div class="note a"><b>The useful conclusion.</b> Of the three things you could make infinitely
+  fast, the Arc cards' own bandwidth is the <i>least</i> valuable. The link between the cards is
+  worth 1.5&times; on prompts. Fixing our own per-layer overhead is worth 3.3&times; on
+  generation. The card itself is worth 1.2&times; and 1.3&times;. We are not short of memory
+  bandwidth. We are short of a good kernel on one side and disciplined scheduling on the other,
+  and both of those are ours to fix.</div>
+
+  <p>One last number for scale. If all three were free and only the fixed 68 microseconds of
+  routing and host work remained, a 32K prompt would take about 2.2 seconds. The 96 GB card we
+  keep comparing against does that same prompt in 2.336 seconds today. So a perfect version of
+  this design lands roughly level with their card, not far past it. The reason to build it is
+  that it runs a model none of those cards can hold, at a fraction of the cost, not that the
+  ceiling is higher.</p>
+</section>
+
+<section>
+  <h2>memory capacity</h2>
+  <p>The obvious guess is that faster host memory would help. It would not, and the reason is
+  worth knowing: even a single channel of DDR5 is five to ten times faster than the PCIe link it
+  feeds. Host memory bandwidth is nowhere near being our problem.</p>
+
+  <p><b>Space is.</b> And for a reason nobody would predict: Intel's driver keeps a <b>full copy
+  in host memory of everything we put on the Arc cards</b>. Byte for byte. 24.34 GiB per card,
+  <b>47.4 GiB of the machine's 59.4</b>, gone. That leaves 2.78 GiB free while serving, and the
+  machine swaps.</p>
+
+  <p>We did not guess this, we instrumented the boot and watched it happen in two steps as each
+  card loaded. Then we tried every driver flag that looked relevant. None of them changed it.</p>
+
+  <p>At 96 GB the same copy leaves about 45 GiB free instead of 2.78, which un-kills three
+  things we had to abandon:</p>
+  <ul>
+    <li>a <b>third Arc card</b>, because each one costs 24 GiB of host shadow and we simply do
+    not have it. A third card means 57 experts per card instead of 85, so a third less work
+    each.</li>
+    <li>keeping a <b>copy of the experts in host memory</b> for prefill, which we measured as
+    needing 44 to 56 GiB and therefore impossible today.</li>
+    <li><b>no more swapping</b> during long context serving, which currently costs us
+    unpredictable stalls.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>reusing cached prompts</h2>
+  <p>Right now, when you come back tomorrow, your conversation is gone. The processed form of
+  it, the part that took 59 seconds to compute at 127K tokens, lived in GPU memory and was
+  evicted the moment something else needed the space.</p>
+
+  <p>That is silly, and it is fixable. The processed form of a conversation is just data. It can
+  be written to host memory when the GPU needs the space, and to disk when host memory needs
+  the space, and read back when you return. Then a returning user does not pay for their history
+  again. They pay only for what they just typed.</p>
+
+  <div class="why">
+    <p class="lab">why this is the most valuable unbuilt thing on this page</p>
+    <p>We already measured what happens when a prompt is already processed: about <b>139&times;
+    faster</b>. That is not a projection, that is the reuse we get today, within a session, while
+    the data survives in memory. Everything above is about making that survive longer: an hour,
+    a day, a week. The gap we lose to a datacenter card is entirely in <i>first</i> processing of
+    a prompt. Making first processing rare is worth more than making it faster.</p>
+  </div>
+
+  <p><span class="tag p">not built yet</span> &nbsp;This is a roadmap item, not a claim. The
+  measured 139&times; is real; the persistence layer around it is designed and unwritten.</p>
+</section>
+
+<section>
+  <h2>using the SSD as another memory tier</h2>
+  <p>There is a natural hierarchy here, and we currently use only the top two floors of it.</p>
+
+  <figure>
+  <svg viewBox="0 0 900 232" role="img" aria-label="Memory hierarchy">
+    <g font-size="13">
+      <rect x="0" y="26" width="820" height="34" rx="4" fill="#2a5d7c"/>
+      <text x="14" y="48" fill="#fff" font-weight="600">Arc card memory: 603.5 GB/s. this is where the experts live.</text>
+      <rect x="0" y="70" width="180" height="34" rx="4" fill="#5f8f74"/>
+      <text x="192" y="92" fill="#17171b">host memory: fast enough, and 47.4 GiB of it is already spoken for</text>
+      <rect x="0" y="114" width="24" height="34" rx="4" fill="#8a6d1f"/>
+      <text x="36" y="136" fill="#17171b">NVMe SSD: slower, but there is a lot of it, and it is cheap</text>
+    </g>
+    <text x="0" y="182" font-size="13.5" fill="#17171b">Normally reading from the SSD into a GPU means: disk to host memory, then host
+    memory to GPU.</text>
+    <text x="0" y="204" font-size="13.5" fill="#17171b">Two hops, the CPU involved, and the kernel's storage stack in the middle of it.</text>
+    <text x="0" y="226" font-size="13.5" fill="#2f6f4e" font-weight="600">There is a way to skip all of that.</text>
+  </svg>
+  </figure>
+
+  <p>The technique is called GPU direct storage: the SSD writes <b>straight into GPU memory</b>
+  over PCIe, with no bounce through host memory and no kernel driver in the path. We have a
+  library for it sitting in our vendor tree, <code>uGDS</code>, which builds the NVMe commands
+  in user space and lets the drive DMA directly to the card.</p>
+
+  <p>Their published figures are <b>5.3&times; the bandwidth and 108&times; lower latency on
+  small reads</b>, 5.2 microseconds against 561, compared to NVIDIA's own GPU direct storage.
+  Those are <i>their</i> numbers, not ours; we have not run it yet.</p>
+
+  <p>What it would be for: the conversation storage above. If a returning user's processed
+  history can be pulled off an SSD straight into GPU memory in microseconds rather than
+  milliseconds, then persisting conversations to disk stops being a fallback and becomes the
+  normal path. It also makes the host memory shadow problem less painful, because cold data does
+  not need to sit in host RAM waiting to be needed.</p>
+
+  <p><span class="tag p">unexplored</span> &nbsp;Vendored, not tested. On the list, behind the
+  things that are already measured.</p>
+</section>
+
+<section>
+  <h2>the part no hardware fixes</h2>
+  <p>Of the 11.4 ms it takes to produce a word, <b>7.9 ms is the 5090 orchestrating</b>:
+  hundreds of small kernel launches, graph replay overhead, and 47 doorbell handshakes. No PCIe
+  generation touches that. No amount of memory touches it. It is software.</p>
+
+  <p>Three things attack it, and we know the size of each:</p>
+  <table>
+    <tr><th>fix</th><th>what it is</th><th class="n">worth</th><th>state</th></tr>
+    <tr><td>hardware doorbell</td><td>the command streamer semaphore, replacing the spinning
+        CPU core</td><td class="n">~2.4 ms</td><td>proven at 8 to 9 &micro;s, integration blocked</td></tr>
+    <tr><td>fusing small kernels</td><td>fewer, bigger launches per layer</td>
+        <td class="n">~1 to 2 ms</td><td>not started</td></tr>
+    <tr><td><b>our own drafter</b></td><td>draft several tokens, verify in one pass, pay the 47
+        round trips once for several words</td><td class="n"><b>~6 to 8 ms</b></td>
+        <td class="win">the big one. a training job.</td></tr>
+  </table>
+  <p>Which is why the drafter is the next thing we do, and why it is not a kernel problem.</p>
+</section>
+
+<section>
+  <h2>current state</h2>
+  <p class="lede">A 118 billion parameter model, in its native 4-bit format, is serving right
+  now on one gaming GPU and two workstation cards, none of which holds even a third of it. It
+  runs 131,072 tokens of context. Prompt processing is 4.40&times; faster than where this
+  started. Generation speed matches a 96 GB datacenter card once the conversation gets long.
+  Repeated prompts come back about 139&times; faster.</p>
+
+</section>
+
+</div>

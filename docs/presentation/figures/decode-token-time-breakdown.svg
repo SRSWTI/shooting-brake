@@ -1,0 +1,14 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="900" height="156" viewBox="0 0 900 156" role="img" aria-label="Decode time breakdown">
+  <rect x="0" y="0" width="900" height="156" fill="#fbfbf9"/>
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">12.1 MILLISECONDS PER GENERATED TOKEN, MEASURED</text>
+    <rect x="0" y="30" width="194" height="44" fill="#2a5d7c"/>
+    <rect x="194" y="30" width="626" height="44" fill="#cdd2d8"/>
+    <rect x="820" y="30" width="80" height="44" fill="#e4e6ea"/>
+    <text x="12" y="58" font-size="13" fill="#fff" font-weight="600">2.5 ms, 21.6%</text>
+    <text x="206" y="58" font-size="13" fill="#17171b" font-weight="600">7.9 ms, 69.7%: the 5090 waiting and orchestrating</text>
+    <text x="0" y="96" font-size="12.5" fill="#2a5d7c">the Arc cards actually working, both in parallel</text>
+    <text x="206" y="96" font-size="12.5" fill="#6e6e79">hundreds of tiny kernels, graph replay, and the 61 &#181;s handshake &#215; 47</text>
+    <text x="742" y="96" font-size="12.5" fill="#6e6e79">2 ms tail</text>
+    <text x="0" y="132" font-size="13.5" fill="#17171b">The expert cards are <tspan font-weight="600">not the bottleneck</tspan> when generating.
+    Software orchestration is, by a factor of three.</text>
+  </svg>

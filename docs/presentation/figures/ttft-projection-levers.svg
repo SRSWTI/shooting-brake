@@ -1,0 +1,39 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="1000" height="396" viewBox="0 0 1000 396" role="img" aria-label="Prompt processing curves, ours before and after against the RTX PRO 6K">
+  <rect x="0" y="0" width="1000" height="396" fill="#fbfbf9"/>
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">TIME TO PROCESS THE PROMPT, COLD. SECONDS.</text>
+    <line x1="62" y1="292" x2="852" y2="292" stroke="#cdccc7"/>
+    <line x1="62" y1="36" x2="62" y2="292" stroke="#cdccc7"/>
+    <g font-size="11" fill="#9d9da7" text-anchor="end">
+      <text x="54" y="296">0</text><text x="54" y="213">20</text>
+      <text x="54" y="130">40</text><text x="54" y="47">60 s</text>
+    </g>
+    <g font-size="11.5" fill="#6e6e79" text-anchor="middle">
+      <text x="150" y="312">8K</text><text x="350" y="312">32K</text>
+      <text x="550" y="312">64K</text><text x="810" y="312">127K</text>
+    </g>
+
+    <polyline points="150,276 350,237 550,177 810,42" fill="none" stroke="#b4552d" stroke-width="2.5"/>
+    <text x="814" y="46" font-size="12.5" fill="#b4552d" font-weight="600">us today, 59.4 s</text>
+
+    <polyline points="150,281 350,254 550,214 810,124" fill="none" stroke="#c9805f"
+              stroke-width="2.2" stroke-dasharray="6 4"/>
+    <text x="814" y="128" font-size="12.5" fill="#c9805f" font-weight="600">+ one lever, ~40 s</text>
+
+    <polyline points="150,284 350,268 550,243 810,186" fill="none" stroke="#3b5b8c"
+              stroke-width="2.4" stroke-dasharray="6 4"/>
+    <text x="814" y="182" font-size="12.5" fill="#3b5b8c" font-weight="600">+ both, ~25 s</text>
+
+    <polyline points="150,288 350,280 550,264 810,211" fill="none" stroke="#2f6f4e" stroke-width="2.5"/>
+    <text x="814" y="222" font-size="12.5" fill="#2f6f4e" font-weight="600">RTX PRO 6K, 18.9 s</text>
+
+    <path d="M810,186 L868,168" fill="none" stroke="#3b5b8c" stroke-width="1.6" stroke-dasharray="2 3"/>
+    <path d="M810,211 L868,168" fill="none" stroke="#2f6f4e" stroke-width="1.6" stroke-dasharray="2 3"/>
+    <circle cx="868" cy="168" r="5" fill="none" stroke="#17171b" stroke-dasharray="2 2"/>
+
+    <text x="150" y="60" font-size="13" fill="#17171b">the gap at 127K, in ratios:</text>
+    <text x="150" y="82" font-size="13" fill="#b4552d">today, 3.14&#215; slower than the RTX PRO 6K</text>
+    <text x="150" y="102" font-size="13" fill="#c9805f">one lever, 2.1&#215;</text>
+    <text x="150" y="122" font-size="13" fill="#3b5b8c" font-weight="600">both levers, 1.32&#215;</text>
+    <text x="150" y="150" font-size="12.5" fill="#6e6e79">and the two lines are still converging past the right edge.</text>
+    <text x="150" y="168" font-size="12.5" fill="#6e6e79">extending both curves, they meet somewhere around 250 to 290K tokens.</text>
+  </svg>

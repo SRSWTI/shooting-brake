@@ -1,0 +1,20 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="900" height="250" viewBox="0 0 900 250" role="img" aria-label="Weights against card capacity">
+  <rect x="0" y="0" width="900" height="250" fill="#fbfbf9"/>
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">58.2 GiB OF WEIGHTS AGAINST WHAT EACH CARD HOLDS</text>
+    <rect x="0" y="32" width="640" height="42" rx="4" fill="#17171b"/>
+    <text x="15" y="58" font-size="14" fill="#fff" font-weight="600">the model, 4-bit, 58.2 GiB</text>
+    <rect x="0" y="92" width="352" height="30" rx="4" fill="#eef1ee" stroke="#3d6b3d"/>
+    <text x="12" y="112" font-size="13" fill="#17171b">RTX 5090, 32 GB</text>
+    <text x="366" y="112" font-size="12.5" fill="#b4552d">55% of it</text>
+    <rect x="0" y="130" width="352" height="30" rx="4" fill="#eaeff2" stroke="#2a5d7c"/>
+    <text x="12" y="150" font-size="13" fill="#17171b">Arc Pro B70, 32 GB</text>
+    <text x="366" y="150" font-size="12.5" fill="#b4552d">55%</text>
+    <rect x="0" y="168" width="352" height="30" rx="4" fill="#eaeff2" stroke="#2a5d7c"/>
+    <text x="12" y="188" font-size="13" fill="#17171b">Arc Pro B70, 32 GB</text>
+    <text x="366" y="188" font-size="12.5" fill="#b4552d">55%</text>
+    <path d="M446,96 L458,96 L458,194 L446,194" fill="none" stroke="#2f6f4e" stroke-width="1.5"/>
+    <text x="470" y="138" font-size="13.5" fill="#2f6f4e" font-weight="600">96 GB between them.</text>
+    <text x="470" y="157" font-size="13.5" fill="#2f6f4e" font-weight="600">enough, if you can split it.</text>
+    <line x1="640" y1="26" x2="640" y2="212" stroke="#17171b" stroke-dasharray="3 3" opacity=".3"/>
+    <text x="648" y="228" font-size="12" fill="#6e6e79">what one card would have to reach</text>
+  </svg>

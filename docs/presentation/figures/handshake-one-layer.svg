@@ -1,0 +1,33 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="900" height="330" viewBox="0 0 900 330" role="img" aria-label="Doorbell protocol sequence">
+  <rect x="0" y="0" width="900" height="330" fill="#fbfbf9"/>
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">THE HANDSHAKE, ONE LAYER</text>
+    <line x1="150" y1="34" x2="150" y2="300" stroke="#3d6b3d" stroke-width="1.5"/>
+    <text x="150" y="28" font-size="12.5" fill="#3d6b3d" font-weight="700" text-anchor="middle">RTX 5090</text>
+    <line x1="450" y1="34" x2="450" y2="300" stroke="#8a6d1f" stroke-width="1.5"/>
+    <text x="450" y="28" font-size="12.5" fill="#8a6d1f" font-weight="700" text-anchor="middle">pinned host memory</text>
+    <line x1="760" y1="34" x2="760" y2="300" stroke="#2a5d7c" stroke-width="1.5"/>
+    <text x="760" y="28" font-size="12.5" fill="#2a5d7c" font-weight="700" text-anchor="middle">Arc B70</text>
+    <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L7,3 z" fill="#6e6e79"/></marker></defs>
+
+    <path d="M152,58 L446,58" fill="none" stroke="#6e6e79" stroke-width="1.4" marker-end="url(#ar)"/>
+    <text x="158" y="52" font-size="12.5" fill="#17171b">1. writes the token count into the signal word</text>
+
+    <path d="M448,96 L448,96" fill="none" stroke="#6e6e79"/>
+    <text x="462" y="92" font-size="12.5" fill="#17171b">2. a CPU core pinned to nothing else</text>
+    <text x="462" y="110" font-size="12.5" fill="#6e6e79">but this is spinning on that word. it sees it.</text>
+
+    <path d="M452,140 L756,140" fill="none" stroke="#6e6e79" stroke-width="1.4" marker-end="url(#ar)"/>
+    <text x="462" y="134" font-size="12.5" fill="#17171b">3. hands the work over</text>
+
+    <rect x="640" y="158" width="240" height="42" rx="5" fill="#eaeff2" stroke="#2a5d7c"/>
+    <text x="652" y="176" font-size="12.5" fill="#17171b">4. computes its 5 experts,</text>
+    <text x="652" y="192" font-size="12.5" fill="#17171b">for every token in the batch</text>
+
+    <path d="M756,224 L452,224" fill="none" stroke="#2f6f4e" stroke-width="1.4" marker-end="url(#ar)"/>
+    <text x="462" y="218" font-size="12.5" fill="#17171b">5. writes results, then sets the completion word</text>
+
+    <path d="M446,262 L152,262" fill="none" stroke="#2f6f4e" stroke-width="1.4" marker-end="url(#ar)"/>
+    <text x="158" y="256" font-size="12.5" fill="#17171b">6. the 5090 was already waiting on it. it continues.</text>
+    <text x="158" y="290" font-size="12.5" fill="#6e6e79">then all of that again, 46 more times, before one word comes out.</text>
+  </svg>

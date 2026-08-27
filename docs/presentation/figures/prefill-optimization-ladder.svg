@@ -1,0 +1,23 @@
+<svg font-family="&quot;Liberation Sans&quot;,Helvetica,sans-serif" xmlns="http://www.w3.org/2000/svg" width="900" height="246" viewBox="0 0 900 246" role="img" aria-label="Prefill improvement ladder">
+  <rect x="0" y="0" width="900" height="246" fill="#fbfbf9"/>
+    <text x="0" y="14" font-size="12" fill="#9d9da7" letter-spacing="1.2">MICROSECONDS PER TOKEN OF PROMPT, AT 32K CONTEXT</text>
+    <g font-size="13">
+      <rect x="240" y="30" width="620" height="26" rx="3" fill="#b4552d"/>
+      <text x="0" y="48" fill="#17171b">where we started</text>
+      <text x="868" y="48" fill="#b4552d" font-weight="600" text-anchor="end">1,705</text>
+      <rect x="240" y="66" width="191" height="26" rx="3" fill="#c07a52"/>
+      <text x="0" y="84" fill="#17171b">group the work by expert</text>
+      <text x="441" y="84" fill="#6e6e79">526</text>
+      <rect x="240" y="102" width="156" height="26" rx="3" fill="#a8825f"/>
+      <text x="0" y="120" fill="#17171b">send results back as 16-bit</text>
+      <text x="406" y="120" fill="#6e6e79">430</text>
+      <rect x="240" y="138" width="147" height="26" rx="3" fill="#7d8a6a"/>
+      <text x="0" y="156" fill="#17171b">prefetch the next tile</text>
+      <text x="397" y="156" fill="#6e6e79">404</text>
+      <rect x="240" y="174" width="141" height="26" rx="3" fill="#2f6f4e"/>
+      <text x="0" y="192" fill="#17171b" font-weight="600">overlap transfer with compute</text>
+      <text x="391" y="192" fill="#2f6f4e" font-weight="600">387</text>
+    </g>
+    <text x="0" y="228" font-size="13.5" fill="#17171b"><tspan font-weight="600">4.40&#215; faster.</tspan>
+    A 32,000 token prompt went from 55.9 seconds to 12.7.</text>
+  </svg>

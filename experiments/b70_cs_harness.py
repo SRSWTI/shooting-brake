@@ -52,6 +52,21 @@ def main() -> int:
     ap.add_argument("--dump-out", default=None,
                     help="save every layer's output row 0 (fp16) for "
                          "cross-mode numerical parity checks")
+    ap.add_argument("--no-arm", action="store_true",
+                    help="skip sb_b70_poll_arm_cs: CS modes must stay "
+                         "dormant and every step must ride the classic sweep")
+    ap.add_argument("--wedge-replay", action="store_true",
+                    help="replay the kill-bench 25 capture wedge: one "
+                         "PARTIAL step (layer 0 signal only). Old code "
+                         "wedges the poller forever; new code must recover "
+                         "within the 250ms step deadline, latch classic, "
+                         "and serve a subsequent full step correctly")
+    ap.add_argument("--slow-gap-ms", type=float, default=0.0,
+                    help="sleep this long between layer doorbells, "
+                         "simulating the FIRST eager decode step's Python "
+                         "overhead. The baked step must survive it WITHOUT "
+                         "the no-progress recovery firing (errors must stay "
+                         "0) -- the false-poison found live 2026-08-25")
     a = ap.parse_args()
 
     if a.classic:
@@ -123,13 +138,56 @@ def main() -> int:
         assert r == 0, f"poll_register layer {layer} -> {r}"
         lanes.append(t)
     assert lib.sb_b70_poll_start(poller, ctypes.c_int(5)) == 0
-    print(f"[harness] poller started, {L} layers registered", flush=True)
+    if not a.no_arm:
+        # Production arms via the post-capture worker hook; the harness has
+        # no capture phase, so arm immediately after start.
+        lib.sb_b70_poll_arm_cs(poller)
+    print(f"[harness] poller started, {L} layers registered, "
+          f"cs_armed={not a.no_arm}", flush=True)
 
     # -- the fake CUDA side ---------------------------------------------------
     sig_views = [t["sig"].numpy() for t in lanes]
     comp_views = [t["comp"].numpy() for t in lanes]
     step_times = []
     wedged = False
+
+    if a.wedge_replay:
+        # The kill-bench 25 stimulus: a partial step. Ring ONLY layer 0 and
+        # let the poller submit the all-47 baked step; layers 1..46 have no
+        # signal coming, ever. Old code: zeCommandQueueSynchronize parks
+        # forever. New code: busy at the 250ms deadline -> poison-drain ->
+        # classic latch, process healthy.
+        print("[harness] wedge-replay: ringing layer 0 ONLY...", flush=True)
+        comp_views[0][0] = 0
+        sig_views[0][0] = M
+        deadline = time.perf_counter() + 5.0
+        recovered = False
+        while time.perf_counter() < deadline:
+            if int(lib.sb_b70_poll_error_count(poller)) >= 1:
+                recovered = True
+                break
+            time.sleep(0.05)
+        t_rec = time.perf_counter() - (deadline - 5.0)
+        if not recovered:
+            print(f"[harness] WEDGE-REPLAY FAIL: no recovery within 5s "
+                  f"(pid {os.getpid()}); poller likely parked. Sleeping "
+                  f"600s for gdb.", flush=True)
+            time.sleep(600)
+            return 2
+        stale = [i for i in range(L) if sig_views[i][0] != 0]
+        print(f"[harness] wedge-replay: recovered in {t_rec*1e3:.0f} ms, "
+              f"errors={int(lib.sb_b70_poll_error_count(poller))}, "
+              f"stale_signals={stale}", flush=True)
+        if stale:
+            print("[harness] WEDGE-REPLAY FAIL: signals not scrubbed",
+                  flush=True)
+            return 2
+        # Poisoned chains legitimately wrote completions; scrub them before
+        # the fallback-correctness step.
+        for layer in range(L):
+            comp_views[layer][0] = 0
+        print("[harness] wedge-replay: running one FULL step on the classic "
+              "fallback...", flush=True)
     for step in range(a.steps):
         t0 = time.perf_counter()
         if a.burst:
@@ -152,6 +210,8 @@ def main() -> int:
                     break
         else:
             for layer in range(L):
+                if a.slow_gap_ms > 0 and layer > 0:
+                    time.sleep(a.slow_gap_ms / 1e3)
                 comp_views[layer][0] = 0
                 sig_views[layer][0] = M  # ring the doorbell (host store ~= DMA)
                 deadline = time.perf_counter() + a.timeout_s
@@ -187,6 +247,9 @@ def main() -> int:
     print(f"[harness] min = {st[0]:.2f} ms, max = {st[-1]:.2f} ms")
     print("[harness] classic-poller reference for this shape: ~61 us/layer "
           "handshake + ~68 us service")
+    errors = int(lib.sb_b70_poll_error_count(poller))
+    print(f"[harness] poller errors = {errors}"
+          + (" (recovery fired -- FAIL for a healthy run)" if errors else ""))
     if a.dump_out:
         np.savez(a.dump_out,
                  **{f"l{i}": lanes[i]["out"][0].numpy() for i in range(L)})
@@ -194,7 +257,7 @@ def main() -> int:
     lib.sb_b70_poll_stop(poller)
     lib.sb_b70_poll_destroy(poller)
     c.shutdown()
-    return 0
+    return 1 if (errors and not a.wedge_replay) else 0
 
 
 if __name__ == "__main__":

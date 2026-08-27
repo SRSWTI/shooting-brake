@@ -183,9 +183,16 @@ class B70Poller {
       }
 
       // Mode 3 (baked): one pre-recorded command list per layer, one
-      // ExecuteCommandLists per M=1 step. Record lazily once every layer is
-      // registered; any failure latches classic mode permanently.
-      if (cs_mode == 3 && !cs_disabled && !snapshot.empty() &&
+      // ExecuteCommandLists per M=1 step. Two safety layers, both born from
+      // the kill-bench 25 capture wedge:
+      //   1. cs_armed_ -- the Python side arms this only after CUDA graph
+      //      capture finishes, so baked never sees capture's partial dummy
+      //      sweeps at all (recording is also deferred until then).
+      //   2. Bounded execute + poison-drain recovery -- if a step still
+      //      stalls (contract violated some new way), the deadline converts
+      //      an 8-minute process wedge into a ~600 ms classic fallback.
+      if (cs_mode == 3 && !cs_disabled &&
+          cs_armed_.load(std::memory_order_acquire) && !snapshot.empty() &&
           known == total_layers) {
         if (!baked_ready) {
           bool recorded = true;
@@ -204,19 +211,56 @@ class B70Poller {
           baked_ready = recorded;
         }
         if (baked_ready && snapshot[0].signal[0] == 1) {
-          if (provider_->baked_execute_step() ==
-              shooting_brake::phase1::ProviderStatus::ok) {
+          // A drained healthy step takes ~6-7 ms, but the FIRST eager decode
+          // step runs Python between layer doorbells and can stretch a step
+          // over seconds -- a fixed deadline cannot distinguish that from
+          // the kill-bench 25 partial step. Progress is the discriminator,
+          // and it must be MONOTONE: the 5090 consumes `completion`, so
+          // completion counts alias under sampling (a live step can look
+          // dead). The provider's per-list progress words are written by
+          // the chains and read only here.
+          constexpr uint64_t kWaitSliceNs = 250'000'000ull;
+          constexpr uint64_t kDrainDeadlineNs = 500'000'000ull;
+          size_t last_done = 0;
+          auto st = provider_->baked_execute_step(kWaitSliceNs);
+          while (st == shooting_brake::phase1::ProviderStatus::busy &&
+                 running_.load(std::memory_order_relaxed)) {
+            const size_t done = provider_->baked_progress_count();
+            if (done == last_done) {
+              break;  // a full slice, zero progress: the step is dead
+            }
+            last_done = done;
+            st = provider_->baked_wait(kWaitSliceNs);
+          }
+          if (st == shooting_brake::phase1::ProviderStatus::ok) {
             sequence += snapshot.size();
             dispatches_.fetch_add(snapshot.size());
             rows_.fetch_add(snapshot.size());
             m_histogram_[m_bucket(1)].fetch_add(snapshot.size());
             continue;
           }
-          // Baked signal clears for layers 1+ are DEVICE scope: before the
-          // classic sweep may run again, wipe every signal host-side or the
-          // sweep steals stale doorbells (the kill-bench 22 race, revived).
+          if (st == shooting_brake::phase1::ProviderStatus::busy) {
+            // Dead step: satisfy the stuck WAITs host-side so the queue can
+            // drain. Completions the poisoned chains write are LEFT AT 1
+            // deliberately: a 5090 waiter, if any, must proceed (its step is
+            // already broken; garbage beats deadlock), and a partial dummy
+            // sweep has no reader at all.
+            for (const PollLayer& entry : snapshot) {
+              entry.signal[0] = 1;
+            }
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            provider_->baked_wait(kDrainDeadlineNs);
+          }
+          provider_->baked_disable("baked: latched classic after recovery");
+          // Scrub ONLY consumed layers (completion==1). A signal that is
+          // still up with completion==0 is a REAL doorbell that raced the
+          // recovery -- wiping it would strand the 5090 on a completion
+          // that never comes (the second wedge class, found live 2026-08-25);
+          // the classic sweep below must serve it instead.
           for (const PollLayer& entry : snapshot) {
-            entry.signal[0] = 0;
+            if (entry.completion[0] == 1) {
+              entry.signal[0] = 0;
+            }
           }
           std::atomic_thread_fence(std::memory_order_seq_cst);
           cs_disabled = true;
@@ -233,7 +277,7 @@ class B70Poller {
       // mode permanently; the failed step is finished by the sweep, which
       // spins the remaining layers' untouched signals.
       if ((cs_mode == 1 || cs_mode == 2) && !cs_disabled &&
-          !snapshot.empty() &&
+          cs_armed_.load(std::memory_order_acquire) && !snapshot.empty() &&
           known == total_layers) {
         const uint32_t M = snapshot[0].signal[0];
         if (M != 0 && M <= 32) {
@@ -377,6 +421,11 @@ class B70Poller {
     return sizes.empty() ? 0 : static_cast<size_t>(sizes.front());
   }
 
+ public:
+  // Python calls this AFTER CUDA graph capture (see cs_armed_ below).
+  void arm_cs() { cs_armed_.store(true, std::memory_order_release); }
+
+ private:
   B70Provider* provider_;
   uint64_t generation_;
   std::vector<PollLayer> layers_;
@@ -387,6 +436,11 @@ class B70Poller {
   std::atomic<uint64_t> rows_{0};
   std::array<std::atomic<uint64_t>, 7> m_histogram_{};
   std::atomic<uint64_t> errors_{0};
+  // Gate for CS doorbell modes: the Python side arms this AFTER vLLM's CUDA
+  // graph capture completes (kill-bench 25: warmup/capture dummy passes are
+  // partial steps that violate baked mode's all-47 contract). Never armed =
+  // classic sweep forever, which is also the enforce_eager-safe default.
+  std::atomic<bool> cs_armed_{false};
   std::atomic<uint64_t> service_ns_{0};
   std::atomic<uint64_t> total_ns_{0};
   std::atomic<uint64_t> kernel_ns_{0};
@@ -627,6 +681,14 @@ int sb_b70_poll_start(sb_b70_poller_t* poller, int pin_cpu) {
 void sb_b70_poll_stop(sb_b70_poller_t* poller) {
   if (!poller) return;
   reinterpret_cast<B70Poller*>(poller)->stop();
+}
+
+// Arms the CS-doorbell fast path (modes 1..3). Call ONLY once CUDA graph
+// capture has finished: the baked step contract is all-47-layers, and
+// capture's partial dummy sweeps violate it (kill-bench 25 wedge class).
+void sb_b70_poll_arm_cs(sb_b70_poller_t* poller) {
+  if (!poller) return;
+  reinterpret_cast<B70Poller*>(poller)->arm_cs();
 }
 
 void sb_b70_poll_reset(sb_b70_poller_t* poller) {

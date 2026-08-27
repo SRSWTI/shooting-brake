@@ -2,9 +2,16 @@
 
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <unordered_map>
+
 #include "cutlass/kernel_hardware_info.h"
 #include "xe_2/gemm_xe2_policy.hpp"
 #include "xe_2/grouped_gemm_xe2.hpp"
+#include "grouped_moe_onednn.hpp"
 
 using namespace cute;
 
@@ -85,7 +92,30 @@ constexpr char kLayoutB = 'C';
 // one statically throws away ~1.4x at the end it is wrong for -- which is what
 // shipping m_32_k16 did the moment MAX_BATCH went 256 -> 2048.
 using PolicySmallM = MoE::w4a16_policy_m_32_k16;
-using PolicyBigM = MoE::w4a16_policy_m_32_k16;  // measured: k16_d32 lost 7% in situ
+// The big-tile arm never actually got a big tile: k16_d32 lost 7% when it
+// was pinned GLOBALLY (pre-dispatch-branch, so it also ran the 30-row
+// fills it is wrong for). With the >=64 rows/expert branch below it only
+// ever sees fat fills, where the probe table above says the 128-row tile
+// wins 1.41x. SB_GROUPED_BIGM selects the arm for the re-bench:
+//   m32 (default, shipped) | m64 | m64n128 | m128 | d32
+using PolicyBigM = MoE::w4a16_policy_m_32_k16;
+using PolicyBigM64 = MoE::w4a16_policy_m_64_k16;
+using PolicyBigM64N128 = MoE::w4a16_policy_m_64_n128_k16;
+using PolicyBigM128 = MoE::w4a16_policy_m_128_k16;
+using PolicyBigD32 = MoE::w4a16_policy_k16_d32;
+enum class BigMArm { kM32, kM64, kM64N128, kM128, kD32 };
+inline BigMArm bigm_arm() {
+  static const BigMArm arm = [] {
+    const char* v = std::getenv("SB_GROUPED_BIGM");
+    if (v == nullptr) return BigMArm::kM32;
+    if (std::strcmp(v, "m64") == 0) return BigMArm::kM64;
+    if (std::strcmp(v, "m64n128") == 0) return BigMArm::kM64N128;
+    if (std::strcmp(v, "m128") == 0) return BigMArm::kM128;
+    if (std::strcmp(v, "d32") == 0) return BigMArm::kD32;
+    return BigMArm::kM32;
+  }();
+  return arm;
+}
 constexpr int kBigTileRowsPerExpert = 64;
 
 // Only the policy varies between the two GEMMs, so bind the rest once.
@@ -101,6 +131,122 @@ inline void launch_nvfp4(sycl::queue& q, const sycl::half* a,
       reinterpret_cast<const HalfT*>(bias), d, n, k, rows, e, gs, atom);
 }
 
+// The big-tile arm is env-selected (SB_GROUPED_BIGM) for the re-bench;
+// unused arms only JIT if selected, so the default costs nothing extra.
+inline void launch_nvfp4_big(sycl::queue& q, const sycl::half* a,
+                             const std::uint8_t* w, const std::uint8_t* s,
+                             const sycl::half* bias, float* d, int n, int k,
+                             const std::int32_t* rows, int e, int gs,
+                             std::int32_t* atom) {
+  switch (bigm_arm()) {
+    case BigMArm::kM64:
+      launch_nvfp4<PolicyBigM64>(q, a, w, s, bias, d, n, k, rows, e, gs, atom);
+      return;
+    case BigMArm::kM64N128:
+      launch_nvfp4<PolicyBigM64N128>(q, a, w, s, bias, d, n, k, rows, e, gs,
+                                     atom);
+      return;
+    case BigMArm::kM128:
+      launch_nvfp4<PolicyBigM128>(q, a, w, s, bias, d, n, k, rows, e, gs,
+                                  atom);
+      return;
+    case BigMArm::kD32:
+      launch_nvfp4<PolicyBigD32>(q, a, w, s, bias, d, n, k, rows, e, gs, atom);
+      return;
+    default:
+      launch_nvfp4<PolicyBigM>(q, a, w, s, bias, d, n, k, rows, e, gs, atom);
+      return;
+  }
+}
+
+// MXFP4 arm: same E2M1 payload, e8m0 scales at group 32 (tile_k=32 legal
+// again -- the whole speed argument). Scales are DERIVED from the bank's
+// e4m3/16 planes and are approximate: e8m0 has no mantissa and one scale
+// covers two 16-blocks, so this arm is quality-gated before any default
+// flip; the bank itself is untouched.
+template <class policy>
+inline void launch_mxfp4(sycl::queue& q, const sycl::half* a,
+                         const std::uint8_t* w, const std::uint8_t* s_e8m0,
+                         const sycl::half* bias, float* d, int n, int k,
+                         const std::int32_t* rows, int e,
+                         std::int32_t* atom) {
+  launch<kLayoutA, kLayoutB, policy, MoE::A_DTYPE::BITS16,
+         MoE::B_DTYPE::MXFP4, HalfT, E2M1, std::uint8_t, HalfT, float>(
+      q, reinterpret_cast<const HalfT*>(a), reinterpret_cast<const E2M1*>(w),
+      s_e8m0, reinterpret_cast<const HalfT*>(bias), d, n, k, rows, e,
+      /*group_size=*/32, atom);
+}
+
+using PolicyMxSmallM = MoE::w4a16_policy_m_32;
+using PolicyMxBigM = MoE::w4a16_policy_m_32;  // d32 128-tile: measure first
+
+// Which backend serves the GEMM legs. Parsed once; the oneDNN arm keeps its
+// own disarm latch on top of this.
+enum class Backend { kNative, kOnednn, kMxfp4 };
+
+Backend backend() {
+  static const Backend b = [] {
+    const char* v = std::getenv("SB_GROUPED_BACKEND");
+    if (v != nullptr && std::strcmp(v, "mxfp4") == 0) {
+      std::fprintf(stderr, "[sb.grouped] backend=mxfp4 armed\n");
+      return Backend::kMxfp4;
+    }
+    if (v != nullptr && std::strcmp(v, "onednn") == 0) {
+      return Backend::kOnednn;  // grouped_moe_onednn.cpp logs its own arm
+    }
+    return Backend::kNative;
+  }();
+  return b;
+}
+
+// Bank e4m3/16 scale plane -> derived e8m0/32 plane, [E, N, K/32] u8,
+// computed once per plane on the caller's in-order queue and cached for the
+// life of the process (exactly the bank's lifetime). Geometric mean of the
+// two covered e4m3 scales, rounded to the nearest power of two: the
+// log-symmetric choice, so the two halves of a 32-block split the error.
+const std::uint8_t* mxfp4_scale_plane(sycl::queue& q,
+                                      const std::uint8_t* bank_e4m3, int E,
+                                      int N, int kg16) {
+  static std::mutex mu;
+  static std::unordered_map<const void*, std::uint8_t*> cache;
+  std::lock_guard<std::mutex> lock(mu);
+  auto it = cache.find(bank_e4m3);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  const int kg32 = kg16 / 2;
+  std::uint8_t* plane = sycl::malloc_device<std::uint8_t>(
+      static_cast<std::size_t>(E) * N * kg32, q);
+  if (plane == nullptr) {
+    return nullptr;  // caller falls back to the native launch
+  }
+  q.parallel_for(
+      sycl::range<3>(static_cast<std::size_t>(E), static_cast<std::size_t>(N),
+                     static_cast<std::size_t>(kg32)),
+      [=](sycl::id<3> idx) {
+        const std::size_t e = idx[0], n = idx[1], g = idx[2];
+        const std::uint8_t* src = bank_e4m3 + (e * N + n) * kg16 + 2 * g;
+        const auto dec = [](std::uint8_t v) {
+          const int ex = (v >> 3) & 0xF;
+          const int mn = v & 0x7;
+          const float mag =
+              ex == 0 ? sycl::ldexp(static_cast<float>(mn) / 8.0f, -6)
+                      : sycl::ldexp(1.0f + static_cast<float>(mn) / 8.0f,
+                                    ex - 7);
+          // Scales are magnitudes; a sign bit here would be checkpoint
+          // corruption and clamping it is the safe read.
+          return sycl::fmax(mag, 1e-8f);
+        };
+        const float g0 = sycl::log2(dec(src[0]));
+        const float g1 = sycl::log2(dec(src[1]));
+        const int ex = static_cast<int>(sycl::round((g0 + g1) * 0.5f)) + 127;
+        plane[(e * N + n) * kg32 + g] =
+            static_cast<std::uint8_t>(sycl::clamp(ex, 0, 254));
+      });
+  cache.emplace(bank_e4m3, plane);
+  return plane;
+}
+
 }  // namespace
 
 bool grouped_moe_nvfp4(sycl::queue& q, const sycl::half* act_src,
@@ -114,9 +260,10 @@ bool grouped_moe_nvfp4(sycl::queue& q, const sycl::half* act_src,
                        std::int32_t* hist, std::int32_t* offs,
                        std::int32_t* cursor, std::int32_t* rows,
                        std::int32_t* slot_row, std::int32_t* slot_exp,
-                       float* slot_w, std::int32_t* atom, float* out, int M,
+                       float* slot_w, std::int32_t* slot_of,
+                       std::int32_t* atom, float* out, int M,
                        int experts, int top_k, int hidden, int inter,
-                       int group_size) noexcept try {
+                       int group_size, int rows_cap) noexcept try {
   if (M <= 0 || experts <= 0 || top_k <= 0 || group_size != 16) {
     return false;
   }
@@ -153,7 +300,10 @@ bool grouped_moe_nvfp4(sycl::queue& q, const sycl::half* act_src,
     });
   });
 
-  // 3. scatter each route into its expert's slot range.
+  // 3. scatter each route into its expert's slot range, recording the
+  //    inverse map (route -> slot) for the reduce-mode output stage.
+  //    Unowned routes (-1 ids) and overflow slots stay -1.
+  q.memset(slot_of, 0xFF, static_cast<std::size_t>(routes) * sizeof(std::int32_t));
   q.submit([&](sycl::handler& h) {
     h.parallel_for(sycl::range<1>(routes), [=](sycl::id<1> i) {
       const int e = ids[i];
@@ -169,6 +319,7 @@ bool grouped_moe_nvfp4(sycl::queue& q, const sycl::half* act_src,
       slot_row[slot] = static_cast<int>(i) / top_k;
       slot_exp[slot] = e;
       slot_w[slot] = route_w[i];
+      slot_of[i] = slot;
     });
   });
 
@@ -191,19 +342,52 @@ bool grouped_moe_nvfp4(sycl::queue& q, const sycl::half* act_src,
   });
 
   // 5. w13: [routes, H] x [E, 2I, H] -> [routes, 2I]
-  q.memset(atom, 0, sizeof(std::int32_t));
-  // Rows per expert has to be estimated on the host: the true count is
-  // offs[E], which lives on the device and reading it would cost a sync. The
-  // /2 is the two-card split this rig ships -- a different card count wants
-  // this re-derived, not inherited. At M=512 this yields 30 (small tile wins),
-  // at M=2048 it yields 120 (big tile wins), matching both measured points.
-  const bool big_tile = (M * top_k) / (2 * E) >= kBigTileRowsPerExpert;
-  if (big_tile) {
-    launch_nvfp4<PolicyBigM>(q, g_act, w13, s13, bias13, g_mid, 2 * I, H, rows,
-                             E, group_size, atom);
-  } else {
-    launch_nvfp4<PolicySmallM>(q, g_act, w13, s13, bias13, g_mid, 2 * I, H,
-                               rows, E, group_size, atom);
+  // Backend dispatch, SB_GROUPED_BACKEND:
+  //   onednn -- grouped micro kernel over the untouched bank (bit-exact vs
+  //             native, 1.01 vs 2.355 ms/layer at 30 rows/expert; gate-2
+  //             probe + A/B verify, 2026-08-25).
+  //   mxfp4  -- native cute mainloop at group 32 / tile_k 32 over DERIVED
+  //             e8m0 scales (approximate; quality-gated before any default).
+  // Any refusal falls back to the native launch below within the same
+  // dispatch, so numerics never depend on a flag being healthy. offs+1 is
+  // the inclusive-ends view oneDNN's grouped encoding expects; rows_cap is
+  // the g_* chunk allocation capacity and keeps the cached primitive's
+  // shape process-constant.
+  const Backend be = backend();
+  const bool use_onednn =
+      be == Backend::kOnednn && onednn_grouped_armed() && rows_cap >= routes;
+  const std::uint8_t* s13_mx =
+      be == Backend::kMxfp4 && group_size == 16
+          ? mxfp4_scale_plane(q, s13, E, 2 * I, H / 16)
+          : nullptr;
+  bool leg_done = false;
+  if (use_onednn) {
+    leg_done = onednn_grouped_gemm(q, g_act, w13, s13, g_mid, offs + 1,
+                                   rows_cap, E, H, 2 * I);
+  } else if (s13_mx != nullptr) {
+    // The cute mainloop distributes tiles through `atom`; it must be zeroed
+    // for the mxfp4 launch exactly as for the native one.
+    q.memset(atom, 0, sizeof(std::int32_t));
+    launch_mxfp4<PolicyMxSmallM>(q, g_act, w13, s13_mx, bias13, g_mid, 2 * I,
+                                 H, rows, E, atom);
+    leg_done = true;
+  }
+  if (!leg_done) {
+    q.memset(atom, 0, sizeof(std::int32_t));
+    // Rows per expert has to be estimated on the host: the true count is
+    // offs[E], which lives on the device and reading it would cost a sync.
+    // The /2 is the two-card split this rig ships -- a different card count
+    // wants this re-derived, not inherited. At M=512 this yields 30 (small
+    // tile wins), at M=2048 it yields 120 (big tile wins), matching both
+    // measured points.
+    const bool big_tile = (M * top_k) / (2 * E) >= kBigTileRowsPerExpert;
+    if (big_tile) {
+      launch_nvfp4_big(q, g_act, w13, s13, bias13, g_mid, 2 * I, H,
+                       rows, E, group_size, atom);
+    } else {
+      launch_nvfp4<PolicySmallM>(q, g_act, w13, s13, bias13, g_mid, 2 * I, H,
+                                 rows, E, group_size, atom);
+    }
   }
 
   // 6. SwiGLU. alpha13 lands here rather than in the kernel: it is constant per
@@ -226,18 +410,67 @@ bool grouped_moe_nvfp4(sycl::queue& q, const sycl::half* act_src,
   });
 
   // 7. w2: [routes, I] x [E, H, I] -> [routes, H]
-  q.memset(atom, 0, sizeof(std::int32_t));
-  if (big_tile) {
-    launch_nvfp4<PolicyBigM>(q, g_gated, w2, s2, bias2, g_outr, H, I, rows, E,
-                             group_size, atom);
-  } else {
-    launch_nvfp4<PolicySmallM>(q, g_gated, w2, s2, bias2, g_outr, H, I, rows, E,
-                               group_size, atom);
+  const std::uint8_t* s2_mx =
+      be == Backend::kMxfp4 && group_size == 16
+          ? mxfp4_scale_plane(q, s2, E, H, I / 16)
+          : nullptr;
+  leg_done = false;
+  if (use_onednn) {
+    leg_done = onednn_grouped_gemm(q, g_gated, w2, s2, g_outr, offs + 1,
+                                   rows_cap, E, I, H);
+  } else if (s2_mx != nullptr) {
+    q.memset(atom, 0, sizeof(std::int32_t));
+    launch_mxfp4<PolicyMxSmallM>(q, g_gated, w2, s2_mx, bias2, g_outr, H, I,
+                                 rows, E, atom);
+    leg_done = true;
+  }
+  if (!leg_done) {
+    q.memset(atom, 0, sizeof(std::int32_t));
+    const bool big_tile = (M * top_k) / (2 * E) >= kBigTileRowsPerExpert;
+    if (big_tile) {
+      launch_nvfp4_big(q, g_gated, w2, s2, bias2, g_outr, H, I, rows,
+                       E, group_size, atom);
+    } else {
+      launch_nvfp4<PolicySmallM>(q, g_gated, w2, s2, bias2, g_outr, H, I,
+                                 rows, E, group_size, atom);
+    }
   }
 
-  // 8. weighted scatter back to token rows. alpha2 applied here for the same
-  //    reason as alpha13. The output is fully written, not accumulated onto
-  //    stale contents, so it must be zeroed first.
+  // 8. output stage, two modes:
+  //    atomic (default) -- weighted atomic scatter onto a zeroed output.
+  //      Float atomics make the summation order run-dependent, which is
+  //      the measured run-to-run first-bit churn at partial M.
+  //    reduce (SB_GROUPED_SCATTER=reduce) -- per-token segmented reduce
+  //      over the inverse map: no memset, no atomics, fixed k order, so
+  //      the output is bit-stable across runs. Also drops ~140 MiB of
+  //      traffic per layer at M=2048 (24 memset + the RMW read leg).
+  //    alpha2 lands here in both modes: constant per expert, so it
+  //    factors out of the dot product.
+  static const bool kReduceScatter = [] {
+    const char* v = std::getenv("SB_GROUPED_SCATTER");
+    return v != nullptr && std::strcmp(v, "reduce") == 0;
+  }();
+  if (kReduceScatter) {
+    const int tk = top_k;
+    q.submit([&](sycl::handler& h) {
+      h.parallel_for(sycl::range<2>(M, H), [=](sycl::id<2> ij) {
+        const int t = static_cast<int>(ij[0]);
+        const int c = static_cast<int>(ij[1]);
+        float acc = 0.0f;
+        for (int k = 0; k < tk; ++k) {
+          const int s = slot_of[static_cast<std::size_t>(t) * tk + k];
+          // A zero router weight would NOT be enough: 0 * NaN is NaN, so
+          // unowned routes are skipped by index rather than scaled away.
+          if (s >= 0) {
+            acc += g_outr[static_cast<std::size_t>(s) * H + c] * slot_w[s] *
+                   alpha2[slot_exp[s]];
+          }
+        }
+        out[static_cast<std::size_t>(t) * H + c] = acc;
+      });
+    });
+    return true;
+  }
   q.memset(out, 0, static_cast<std::size_t>(M) * H * sizeof(float));
   q.submit([&](sycl::handler& h) {
     h.parallel_for(sycl::range<2>(routes, H), [=](sycl::id<2> ij) {

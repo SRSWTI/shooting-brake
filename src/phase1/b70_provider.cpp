@@ -459,6 +459,7 @@ struct B70Provider::Impl {
   std::int32_t* g_slot_row = nullptr;  // [routes] slot -> source token
   std::int32_t* g_slot_exp = nullptr;  // [routes] slot -> expert
   float* g_slot_w = nullptr;           // [routes] slot -> router weight
+  std::int32_t* g_slot_of = nullptr;   // [routes] route -> slot (-1 unowned)
   std::int32_t* g_atomic = nullptr;    // grouped GEMM persistent work counter
   bool grouped_ready = false;
   // Pipelining geometry (SHOOTING_BRAKE_B70_PIPELINE=<nchunks>, default 1).
@@ -500,6 +501,11 @@ struct B70Provider::Impl {
   ze_command_queue_handle_t baked_queue = nullptr;
   std::vector<ze_command_list_handle_t> baked_lists;
   std::uint64_t* baked_ts = nullptr;  // [g_layers x 5] in-list timestamps
+  // Per-layer progress words, written LAST by each baked list and read only
+  // by the host: the 5090 consumes `completion`, so completion counts alias
+  // under sampling; these are the monotone step-progress signal the
+  // no-progress recovery discriminates on. Host USM, zeroed per step.
+  std::uint32_t* baked_progress = nullptr;
 
   std::optional<sycl::event> dispatch_begin;
   std::optional<sycl::event> kernel_begin;
@@ -710,6 +716,7 @@ struct B70Provider::Impl {
       free_pointer(w13);
       free_pointer(g_atomic);
       free_pointer(g_slot_w);
+      free_pointer(g_slot_of);
       free_pointer(g_slot_exp);
       free_pointer(g_slot_row);
       free_pointer(g_rows);
@@ -1397,6 +1404,7 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
       impl_->g_slot_row = impl_->allocate_device<std::int32_t>(routes);
       impl_->g_slot_exp = impl_->allocate_device<std::int32_t>(routes);
       impl_->g_slot_w = impl_->allocate_device<float>(routes);
+      impl_->g_slot_of = impl_->allocate_device<std::int32_t>(routes);
       impl_->g_atomic = impl_->allocate_device<std::int32_t>(nchunks);
       if (nchunks > 1) {
         // Phase 2: the copy queue exists only when chunking is armed, so the
@@ -1697,11 +1705,12 @@ ProviderStatus B70Provider::issue(const std::uint64_t generation,
               impl_->g_offs + c * (er + 1), impl_->g_cursor + c * er,
               impl_->g_rows + c * er, impl_->g_slot_row + c * cr,
               impl_->g_slot_exp + c * cr, impl_->g_slot_w + c * cr,
+              impl_->g_slot_of + c * cr,
               impl_->g_atomic + c, impl_->output + r0 * g_hidden,
               static_cast<int>(mc), static_cast<int>(resident_experts),
               static_cast<int>(impl_->config.top_k),
               static_cast<int>(g_hidden), static_cast<int>(g_intermediate),
-              16);
+              16, static_cast<int>(cr));
           if (pipelined && grouped_done) {
             if (impl_->out_fp16) {
               // Narrow this chunk's rows now so its D2H can leave the card
@@ -2486,6 +2495,13 @@ ProviderStatus B70Provider::baked_record_layer(
         return fail("baked: raw queue create failed");
       }
       impl_->baked_lists.assign(g_layers, nullptr);
+      impl_->baked_progress =
+          sycl::malloc_host<std::uint32_t>(g_layers, *impl_->queue);
+      if (impl_->baked_progress == nullptr) {
+        return fail("baked: progress array allocation failed");
+      }
+      std::memset(impl_->baked_progress, 0,
+                  g_layers * sizeof(std::uint32_t));
     }
     if (impl_->baked_lists[layer] != nullptr) {
       return ProviderStatus::ok;  // idempotent re-registration
@@ -2639,6 +2655,9 @@ ProviderStatus B70Provider::baked_record_layer(
                                                  nullptr));
     }
     ok(impl_->cs_write(xl, &wr, const_cast<std::uint32_t*>(completion), 1ull));
+    // Host-only progress marker, AFTER the completion write: the recovery
+    // logic treats progress[layer] != 0 as "this list ran to its end".
+    ok(impl_->cs_write(xl, &wr, impl_->baked_progress + layer, 1ull));
     ok(zeCommandListClose(list));
     if (zr != ZE_RESULT_SUCCESS) {
       zeCommandListDestroy(list);
@@ -2655,7 +2674,8 @@ ProviderStatus B70Provider::baked_record_layer(
   }
 }
 
-ProviderStatus B70Provider::baked_execute_step() {
+ProviderStatus B70Provider::baked_execute_step(
+    const std::uint64_t deadline_ns) {
   try {
     ze_command_queue_handle_t zq = nullptr;
     ze_command_list_handle_t* lists = nullptr;
@@ -2680,6 +2700,9 @@ ProviderStatus B70Provider::baked_execute_step() {
       zq = impl_->baked_queue;
       lists = impl_->baked_lists.data();
       count = static_cast<std::uint32_t>(impl_->baked_lists.size());
+      // Reset the per-step progress markers BEFORE submission; the chains
+      // rewrite them as they run and the recovery logic reads them.
+      std::memset(impl_->baked_progress, 0, g_layers * sizeof(std::uint32_t));
     }
     if (zeCommandQueueExecuteCommandLists(zq, count, lists, nullptr) !=
         ZE_RESULT_SUCCESS) {
@@ -2687,10 +2710,13 @@ ProviderStatus B70Provider::baked_execute_step() {
       impl_->set_error("baked: step submit failed");
       return ProviderStatus::device_error;
     }
-    // Park until the step drains. Scanning mid-step is exactly the
-    // signal-steal race of kill-bench 22; the protocol serializes layers by
-    // construction (layer L+1's WAIT can only fire after the consumer takes
-    // layer L's completion), so there is nothing useful to do here anyway.
+    // Park until the step drains -- but only up to deadline_ns. An unbounded
+    // synchronize here is exactly how a partial step (vLLM warmup/capture
+    // dummy passes, kill-bench 25) turned into a wedged process four times:
+    // a layer whose signal never arrives parks its hardware WAIT forever.
+    // On deadline the caller poisons the stuck signals and calls
+    // baked_drain(); busy is a recoverable verdict, not a failure.
+    const auto t0 = std::chrono::steady_clock::now();
     for (;;) {
       const ze_result_t r = zeCommandQueueSynchronize(zq, 5'000'000ull);
       if (r == ZE_RESULT_SUCCESS) {
@@ -2704,6 +2730,11 @@ ProviderStatus B70Provider::baked_execute_step() {
       if (impl_->health.stopped) {
         return ProviderStatus::shutdown;
       }
+      const auto waited = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - t0);
+      if (static_cast<std::uint64_t>(waited.count()) >= deadline_ns) {
+        return ProviderStatus::busy;
+      }
     }
     impl_->health.dispatches += g_layers;
     return ProviderStatus::ok;
@@ -2714,6 +2745,65 @@ ProviderStatus B70Provider::baked_execute_step() {
     }
     return ProviderStatus::device_error;
   }
+}
+
+ProviderStatus B70Provider::baked_wait(const std::uint64_t deadline_ns) {
+  try {
+    ze_command_queue_handle_t zq = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      if (impl_->baked_queue == nullptr) {
+        return ProviderStatus::device_error;
+      }
+      zq = impl_->baked_queue;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    for (;;) {
+      const ze_result_t r = zeCommandQueueSynchronize(zq, 5'000'000ull);
+      if (r == ZE_RESULT_SUCCESS) {
+        return ProviderStatus::ok;
+      }
+      if (r != ZE_RESULT_NOT_READY) {
+        impl_->baked_failed = true;
+        impl_->set_error("baked: wait synchronize failed");
+        return ProviderStatus::device_error;
+      }
+      if (impl_->health.stopped) {
+        return ProviderStatus::shutdown;
+      }
+      const auto waited = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - t0);
+      if (static_cast<std::uint64_t>(waited.count()) >= deadline_ns) {
+        return ProviderStatus::busy;
+      }
+    }
+  } catch (...) {
+    try {
+      impl_->set_current_exception("provider baked_wait failed: ");
+    } catch (...) {
+    }
+    return ProviderStatus::device_error;
+  }
+}
+
+void B70Provider::baked_disable(const char* why) noexcept {
+  try {
+    impl_->baked_failed = true;
+    impl_->set_error(why != nullptr ? why : "baked: disabled");
+  } catch (...) {
+  }
+}
+
+std::size_t B70Provider::baked_progress_count() const noexcept {
+  const std::uint32_t* p = impl_->baked_progress;
+  if (p == nullptr) {
+    return 0;
+  }
+  std::size_t done = 0;
+  for (std::size_t l = 0; l < g_layers; ++l) {
+    done += p[l] != 0 ? 1 : 0;
+  }
+  return done;
 }
 
 void B70Provider::shutdown() noexcept {

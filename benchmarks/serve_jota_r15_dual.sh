@@ -77,7 +77,11 @@ export SHOOTING_BRAKE_MODEL=srswti/axe-superveloce-jota-118b-r15-nvfp4
 # prefix cache erases on repeat traffic. L=61 is the hard ceiling here:
 # L=65 leaves 6.0 GiB KV and one 131072-token request needs 6.64.
 # Total card usage is L-invariant (28.75-28.92 GiB across all five).
-export SHOOTING_BRAKE_PLACEMENT="${SHOOTING_BRAKE_PLACEMENT:-fractional:2:0.22018348623853212}"
+# 95/75 toward device 0 (Gen4 x4): dev1 (Gen3 x4) gates every prefill
+# bracket at ~90.6% duty while dev0 idles 23%. Measured 2026-08-25:
+# -2.0% aggregate cold TTFT, -2.5% at 127K, decode unchanged, 3-pass
+# ladder + correctness spots green (docs/software-floor-campaign).
+export SHOOTING_BRAKE_PLACEMENT="${SHOOTING_BRAKE_PLACEMENT:-fractional:2:0.22018348623853212:95,75}"
 export SHOOTING_BRAKE_HYBRID=1
 export SHOOTING_BRAKE_B70_DEVICE=1
 export SHOOTING_BRAKE_B70_GRAPH=1

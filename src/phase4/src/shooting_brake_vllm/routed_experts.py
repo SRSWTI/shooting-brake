@@ -38,6 +38,7 @@ from .partition import (
 )
 from .placement import Device, Placement, build_for_qualified
 from .provider import ShootingBrakeExpertProviderClient
+from .seam_trace import SeamTracer, seam_tracer
 
 
 def _b70_wire_dtype() -> torch.dtype:
@@ -2464,6 +2465,12 @@ class HybridRoutedExperts(RoutedExperts):
                 raise RuntimeError(
                     "B70 CUDA slot map was not initialized before graph capture"
                 )
+            _tracer = seam_tracer()
+            _rec = (
+                _tracer.begin(layer_idx, x.shape[0])
+                if _tracer is not None
+                else None
+            )
             lane_ids = [
                 lane.slot_map_cuda[topk_ids] for lane in self._b70_lanes
             ]
@@ -2511,12 +2518,17 @@ class HybridRoutedExperts(RoutedExperts):
                 x, cuda_weights, cuda_topk_ids,
                 shared_experts, shared_experts_input,
             )
+            SeamTracer.mark(_rec, 1)
             y_b70 = self._b70_take_graph(self._b70_lanes[0], x.shape[0])
             for lane in self._b70_lanes[1:]:
                 y_b70 = y_b70 + self._b70_take_graph(lane, x.shape[0])
+            SeamTracer.mark(_rec, 2)
             if self._cpu_active:
-                return y_cuda + y_b70 + self._cpu_take_graph(x.shape[0])
-            return y_cuda + y_b70
+                y_out = y_cuda + y_b70 + self._cpu_take_graph(x.shape[0])
+            else:
+                y_out = y_cuda + y_b70
+            SeamTracer.mark(_rec, 3)
+            return y_out
         part = partition_routes(topk_ids, topk_weights, dml, layer_idx)
         if os.environ.get("SHOOTING_BRAKE_VALIDATE_PARTITION") == "1":
             validate_partition(

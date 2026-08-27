@@ -227,7 +227,7 @@ single 96 GB RTX PRO 6000 Blackwell with prefix caching off; ours matched.
 | prefill @ 32K | faster | **5.43x** behind | they win |
 | prefill @ 127K | faster | **3.14x** behind | gap closing fast |
 | **decode @ 127K** | 11.10 ms | **11.40 ms** | **1.03x — parity** |
-| hardware cost | ~8,000 USD, one card | 5090 + 2 Arc Pro, retail | ours far cheaper |
+| hardware cost | ~18,000 USD, one card | 5090 + 2 Arc Pro, retail | ours far cheaper |
 
 **Why the gap closes with context** — and this is the structural point, not a
 spin: their prefill is attention-bound and **superlinear** (attention cost

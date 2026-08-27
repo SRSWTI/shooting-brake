@@ -164,7 +164,25 @@ class B70Provider final {
                                     float* ring_output,
                                     volatile std::uint32_t* signal,
                                     volatile std::uint32_t* completion);
-  ProviderStatus baked_execute_step();
+  // Submits the 47-list step and waits AT MOST deadline_ns. Returns busy on
+  // deadline -- the step is still in flight on hardware WAITs. busy is NOT
+  // an error and must not latch anything: the first eager decode step runs
+  // Python between layers and legitimately exceeds any fixed deadline, so
+  // the caller re-waits (baked_wait) while completions keep PROGRESSING and
+  // recovers (poison signals, then baked_wait) only when a window passes
+  // with zero progress -- the kill-bench 25 partial-step signature.
+  ProviderStatus baked_execute_step(std::uint64_t deadline_ns);
+  // Waits up to deadline_ns for the already-submitted step. ok = drained,
+  // busy = still in flight (caller decides: keep waiting on progress, or
+  // poison-and-terminate on none). Sets no failure latch by itself; the
+  // caller calls baked_disable() when it gives up for the process.
+  ProviderStatus baked_wait(std::uint64_t deadline_ns);
+  // Terminal: baked mode must never be used again this process.
+  void baked_disable(const char* why) noexcept;
+  // Monotone within a step: how many baked lists have run to their final
+  // (host-only) progress write. The recovery loop's discriminator -- the
+  // 5090 consumes `completion`, so completion counts alias under sampling.
+  std::size_t baked_progress_count() const noexcept;
 
   ProviderStatus issue_cs_chain(std::uint64_t generation, std::size_t layer,
                                 const sycl::half* ring_hidden,

@@ -11,8 +11,10 @@ NVFP4 (E2M1 weights + E4M3 block scales), 58.2 GiB on disk, 47 MoE layers +
 dense layer 0, 218 experts/layer, top_k=10, hidden 3072, hybrid sliding/full
 attention.
 **Split:** 5090 runs attention/GDN/router + local & shared experts (vLLM in-tree
-CUTLASS W4A4); 2x B70 run 170 routed NVFP4 experts (85/card) reached by a
-custom doorbell protocol, 47 host-visible sync points per token.
+CUTLASS W4A4); 2x B70 run 170 routed NVFP4 experts (95 on the Gen4-x4 card,
+75 on the Gen3-x4 card -- weighted placement shipped 2026-08-25, -2.0%
+aggregate cold TTFT, -2.5% at 127K) reached by a custom doorbell protocol,
+47 host-visible sync points per token.
 
 ## 1. Prefill — the campaign's main lever (32K band, per token)
 
@@ -101,7 +103,30 @@ does not know the context length. Artifact:
   live-append (80-95 us/bracket vs the 61 us it replaces); baked chains
   (numerically correct at 9.4e-4 but wedges vLLM graph capture, parked);
   ngram spec-decode (8.6 ms short ctx, 24.8 ms at 107K — flag only);
-  DFlash drafter (0 of 7,665 tokens accepted — trained on the unpruned target).
+  DFlash drafter (0 of 7,665 tokens accepted — trained on the unpruned target);
+  oneDNN grouped NVFP4 backend (kernel 2.43x + bit-exact vs shipped, but
+  cold-TTFT only -2.7..-3.0% e2e paired 3x3 ladder — prefill is no longer
+  GEMM-bound; parked behind `SB_GROUPED_BACKEND=onednn`, default native,
+  `docs/kernel-bakeoff-2026-08-25.md`);
+  MXFP4 e8m0/32 scale arm (fastest kernel but lossy by format: rel 1.0-1.75
+  vs native on real bank, W4A4-class — flag only, `SB_GROUPED_BACKEND=mxfp4`).
+- **Software-floor session (2026-08-25 evening,
+  `docs/software-floor-campaign-2026-08-25.md`):** weighted 95/75 placement
+  SHIPPED as default (-2.0% TTFT, config-only); reduce scatter
+  (`SB_GROUPED_SCATTER=reduce`, -4.7%/layer, bit-deterministic -- fixes the
+  atomic-scatter churn class) and BigM d32 tile (`SB_GROUPED_BIGM=d32`,
+  -11.5%/layer, bit-exact) both gates-green but flag-only: wire-bound
+  prefill hides them today (~-0.5% TTFT); they lower the compute floor for
+  the Gen5-x16 end state. Fused shared expert
+  (`SHOOTING_BRAKE_FUSED_SHARED=1`): correct, ITL wash -- parked.
+  Serving-level finding: temp-0 greedy is NOT self-reproducible (1/10
+  identical across back-to-back runs, same boot -- prefix-cache path +
+  partial-M churn amplified by think chains); text-equality gates are
+  unusable on this stack. Truncated-thinking chat responses return EMPTY
+  content (upstream 0.27.1 parser behavior). VRAM headroom: 2 concurrent
+  chunk prefills can OOM the 5090 with desktop squatters present;
+  mitigation `SB_KV_BYTES=10936647680` (-9.9K KV tokens) pending
+  ratification.
 
 ## 7. One-line summary
 

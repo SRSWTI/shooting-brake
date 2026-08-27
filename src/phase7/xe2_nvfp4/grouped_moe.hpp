@@ -41,9 +41,13 @@ bool grouped_moe_nvfp4(sycl::queue& q,
                        std::int32_t* hist, std::int32_t* offs,
                        std::int32_t* cursor, std::int32_t* rows,
                        std::int32_t* slot_row, std::int32_t* slot_exp,
-                       float* slot_w, std::int32_t* atom,
+                       float* slot_w,
+                       std::int32_t* slot_of,  // [M*top_k] route -> slot, -1 if unowned
+                       std::int32_t* atom,
                        float* out,                     // [M, hidden]
                        int M, int experts, int top_k, int hidden, int inter,
-                       int group_size) noexcept;
+                       int group_size,
+                       int rows_cap  // g_* chunk allocation capacity, routes
+                       ) noexcept;
 
 }  // namespace sb::xe2

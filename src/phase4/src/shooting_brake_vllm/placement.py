@@ -443,10 +443,20 @@ class ExpertGroupPolicy:
 
 @dataclass(frozen=True)
 class FractionalRemotePolicy:
-    """Keep a fraction on CUDA and balance the rest across N B70 devices."""
+    """Keep a fraction on CUDA and spread the rest across N B70 devices.
+
+    Without ``remote_weights`` the remote experts are balanced evenly
+    (divmod). With weights they are apportioned proportionally by the
+    largest-remainder method, so ``weights=(95, 75)`` over 170 remote
+    experts lands exactly 95/75. Weights are positional over
+    ``remote_device_indices``; device 0 is the Gen4-x4 card, so weighting
+    it heavier shifts wire traffic off the Gen3-x4 card that gates every
+    prefill bracket at ~90.6% duty (kernel-bakeoff 2026-08-25).
+    """
 
     remote_device_indices: tuple[int, ...]
     cuda_fraction: float
+    remote_weights: tuple[int, ...] | None = None
     name: str = field(init=False, default="fractional-remote")
 
     def __post_init__(self) -> None:
@@ -458,21 +468,57 @@ class FractionalRemotePolicy:
             DeviceTarget(Device.B70, index)
         if not 0.0 <= self.cuda_fraction <= 1.0:
             raise ValueError("cuda_fraction must be between zero and one")
+        if self.remote_weights is not None:
+            if len(self.remote_weights) != len(self.remote_device_indices):
+                raise ValueError(
+                    "remote_weights must match remote_device_indices "
+                    f"({len(self.remote_weights)} weights for "
+                    f"{len(self.remote_device_indices)} devices)"
+                )
+            if any(weight <= 0 for weight in self.remote_weights):
+                raise ValueError("remote_weights must be positive")
+        weights_tag = (
+            ""
+            if self.remote_weights is None
+            else f",weights={','.join(map(str, self.remote_weights))}"
+        )
         object.__setattr__(
             self,
             "name",
             f"fractional-remote:devices={','.join(map(str, self.remote_device_indices))}"
-            f",cuda_fraction={self.cuda_fraction}",
+            f",cuda_fraction={self.cuda_fraction}{weights_tag}",
         )
+
+    def _remote_counts(self, remote_n: int) -> list[int]:
+        if self.remote_weights is None:
+            quotient, remainder = divmod(remote_n, len(self.remote_device_indices))
+            return [
+                quotient + (1 if position < remainder else 0)
+                for position in range(len(self.remote_device_indices))
+            ]
+        # Largest-remainder apportionment: exact when the weights already
+        # sum to remote_n, proportional otherwise.
+        total = sum(self.remote_weights)
+        shares = [remote_n * weight / total for weight in self.remote_weights]
+        counts = [int(share) for share in shares]
+        leftover = remote_n - sum(counts)
+        order = sorted(
+            range(len(shares)),
+            key=lambda position: shares[position] - counts[position],
+            reverse=True,
+        )
+        for position in order[:leftover]:
+            counts[position] += 1
+        return counts
 
     def groups(self, num_experts: int) -> tuple[ExpertGroup, ...]:
         cuda_n = round(num_experts * self.cuda_fraction)
         remote_n = num_experts - cuda_n
-        quotient, remainder = divmod(remote_n, len(self.remote_device_indices))
+        counts = self._remote_counts(remote_n)
         groups: list[ExpertGroup] = []
         start = 0
         for position, index in enumerate(self.remote_device_indices):
-            count = quotient + (1 if position < remainder else 0)
+            count = counts[position]
             if count:
                 groups.append(
                     ExpertGroup(
@@ -910,6 +956,10 @@ def policy_from_name(name: str) -> PlacementPolicy:
                                    requires ``SHOOTING_BRAKE_ALL_OUT=1``
       * ``fractional:<N>:<F>``  -> balance non-CUDA experts over B70 devices
                                    ``0..N-1``, keeping fraction ``F`` on CUDA
+      * ``fractional:<N>:<F>:<w0>,<w1>,...``
+                                -> same, but apportion remote experts by the
+                                   positional weights (largest remainder),
+                                   e.g. ``fractional:2:0.22:95,75``
 
     This is the swappable seam a future predictive / speculative offloader
     plugs into: implement :class:`PlacementPolicy` and register a name here.
@@ -922,17 +972,26 @@ def policy_from_name(name: str) -> PlacementPolicy:
         return InterleavedPolicy(period=int(name.split(":", 1)[1]))
     if name.startswith("fractional:"):
         parts = name.split(":")
-        if len(parts) != 3:
+        if len(parts) not in (3, 4):
             raise PlacementError(
-                "fractional policy needs "
-                f"'fractional:<remote_devices>:<cuda_fraction>', got {name!r}"
+                "fractional policy needs 'fractional:<remote_devices>:"
+                f"<cuda_fraction>[:<w0>,<w1>,...]', got {name!r}"
             )
         device_count = int(parts[1])
         if device_count < 1:
             raise PlacementError("fractional policy needs at least one device")
+        weights: tuple[int, ...] | None = None
+        if len(parts) == 4:
+            try:
+                weights = tuple(int(w) for w in parts[3].split(","))
+            except ValueError as exc:
+                raise PlacementError(
+                    f"fractional weights must be integers, got {parts[3]!r}"
+                ) from exc
         return FractionalRemotePolicy(
             remote_device_indices=tuple(range(device_count)),
             cuda_fraction=float(parts[2]),
+            remote_weights=weights,
         )
     if name.startswith("subset:"):
         parts = name.split(":")

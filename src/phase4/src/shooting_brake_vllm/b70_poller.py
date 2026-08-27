@@ -182,6 +182,17 @@ class B70Poller:
         """Zero native timing, shape, dispatch, and error counters."""
         self._lib.sb_b70_poll_reset(self._handle)
 
+    def arm_cs(self) -> None:
+        """Arm the CS-doorbell fast path (SHOOTING_BRAKE_B70_CS_DOORBELL).
+
+        MUST be called only after CUDA graph capture completes: warmup and
+        capture run partial dummy sweeps that violate the baked step's
+        all-47-layers contract and wedged the engine four times before this
+        latch existed (kill-bench 25). Never calling it leaves the classic
+        sweep in charge, which is always safe.
+        """
+        self._lib.sb_b70_poll_arm_cs(self._handle)
+
     def trace_snapshot(self) -> list[dict]:
         """Most recent per-dispatch windows from the native trace ring.
 
@@ -399,4 +410,15 @@ def get_b70_poller(
     return poller
 
 
-__all__ = ["B70Poller", "get_b70_poller"]
+def arm_all_cs() -> None:
+    """Arm the CS-doorbell path on every live poller.
+
+    Call site is the post-capture worker hook (see ``__init__.py``); until
+    it fires, SHOOTING_BRAKE_B70_CS_DOORBELL modes stay dormant and every
+    dispatch rides the classic sweep.
+    """
+    for poller in _pollers.values():
+        poller.arm_cs()
+
+
+__all__ = ["B70Poller", "get_b70_poller", "arm_all_cs"]

@@ -165,5 +165,15 @@ class w4a16_policy_k16_d32 : public xe_gemm_policy_base {
   using SGLayout = Layout<Shape<_4, _8, _1>, Stride<_8, _1, _0>>;
 };
 
+// MXFP4 additions: group_size = 32 makes tile_k = 32 legal again (the scale
+// reload gate fires once per tile), which is the whole speed argument for
+// the MXFP4 arm. Auto-derived D store atom, because our GEMMs write fp32
+// (see w4a16_policy_k16_d32's history above).
+class w4a16_policy_d32 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_128, _256, _32>;
+  using SGLayout = Layout<Shape<_4, _8, _1>, Stride<_8, _1, _0>>;
+};
+
 
 }  // namespace MoE

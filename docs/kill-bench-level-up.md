@@ -1014,6 +1014,36 @@ step recovery, (3) re-run this exact A/B. Expected prize remains the host-hop
 share of the 211 us inter-dispatch gap; the drafter finetune (4-6 ms
 effective) outranks it and is the next lever.
 
+## 25b. Baked chains revival: KILLED at the third design defect (2026-08-25)
+
+One revival attempt against 25's two named fixes, stop-loss agreed up front
+(one more wedge class = permanent kill). Both fixes landed and WORK:
+
+1. **Capture latch** (`sb_b70_poll_arm_cs` + a `Worker.compile_or_warm_up_model`
+   post-hook in phase4): baked stays dormant through warmup/capture -- trace
+   shows all 517 warmup dispatches on classic; arm B survived CUDA graph
+   capture for the first time ever.
+2. **Bounded execute + poison recovery** (`baked_execute_step(deadline)` /
+   `baked_wait` / monotone per-list progress words the 5090 never touches):
+   the kill-bench 25 partial-step stimulus now recovers in ~1.5 s instead of
+   wedging (harness `--wedge-replay`); a 20 ms/layer slow writer completes
+   with zero false-poisons (`--slow-gap-ms`); 30-step parity 1.5e-4.
+
+**The third defect, found live:** the FIRST real decode step can stall
+>250 ms with genuinely ZERO chain progress -- the 5090 stops ringing
+mid-step (eager-step compilation stalls are unbounded), which is
+indistinguishable poller-side from a dead partial step. Recovery poisoned a
+healthy step; the stale completion residue then broke the classic handshake
+on dev0 (engine watchdog: "371 B70 dispatch(es) failed, device 0: 370") and
+the engine terminated LOUDLY in seconds -- the safety design converted the
+old 8-minute silent wedge into a fast attributed abort, which is the one
+durable improvement. A fix needs a third design iteration (arm only after K
+complete classic steps, plus completion-state reconciliation with the
+5090's step protocol). Stop-loss fired: **KILLED permanently.** Flag and
+recovery machinery stay in-tree, default off; classic path re-verified.
+The decode levers standing: drafter finetune (4-6 ms effective), then
+nothing.
+
 ## 26. Production-KV bridge: banked grid stays quotable (2026-08-24)
 
 The 16-cell pipeline2 grid was banked at KV=8.29 GiB; production now runs

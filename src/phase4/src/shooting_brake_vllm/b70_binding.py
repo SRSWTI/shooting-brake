@@ -182,6 +182,8 @@ class B70ProviderClient:
         lib.sb_b70_poll_stop.argtypes = [ctypes.c_void_p]
         lib.sb_b70_poll_reset.restype = None
         lib.sb_b70_poll_reset.argtypes = [ctypes.c_void_p]
+        lib.sb_b70_poll_arm_cs.restype = None
+        lib.sb_b70_poll_arm_cs.argtypes = [ctypes.c_void_p]
 
 
         for counter in (

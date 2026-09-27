@@ -1,0 +1,354 @@
+/// Native B70 provider lifecycle and buffer-ownership abstraction.
+/// Sources: src/phase1/b70_provider.hpp::B70Provider;
+///          src/phase1/b70_provider.cpp::load, issue, take, shutdown,
+///          issue_cs_chain, issue_cs_ride, baked_record_layer,
+///          baked_execute_step, baked_wait, baked_disable.
+///
+/// Atomicity: each public call is one transition because Impl::mutex serializes
+/// its state changes. Device kernels/copies are abstracted as an accepted
+/// pending dispatch; take is the publication boundary. A caller buffer changes
+/// only on successful take (or native completion), never on rejection/failure.
+/// Numeric kernel internals belong to compute.ryu and command-list ordering to
+/// command_streamer.ryu; this model retains their observable mode and outcome.
+module provider {
+  type Phase = Unloaded | Ready | Pending | Stopped
+  type Bank = NoBank | NVFP4 | Int4
+  type Wire = FP32 | FP16
+  type Kernel = NoKernel | Split | Fused | Grouped | Int4Split | CsChain | CsRide | Baked
+  type Native = NativeIdle | BakedRecorded | BakedFlight | BakedDisabled
+  type Buffer = CallerUnchanged | CallerCommitted
+  type Status = Ok | Busy | NotLoaded | InvalidArgument | GenerationMismatch |
+    SequenceMismatch | DeviceError | Shutdown
+
+  type State = {
+    phase: Phase,
+    bank: Bank,
+    wire: Wire,
+    generation: int,
+    pendingGeneration: int,
+    pendingSequence: int,
+    pendingM: int,
+    pendingKernel: Kernel,
+    pendingPoison: bool,
+    groupedEnabled: bool,
+    resourcesOwned: bool,
+    allocations: int,
+    dispatches: int,
+    outputVersion: int,
+    callerBuffer: Buffer,
+    registeredRanges: int,
+    memoryQueryKnown: bool,
+    native: Native,
+    csFailed: bool,
+    bakedFailed: bool,
+    bakedProgress: int,
+    lastStatus: Status,
+  }
+
+  var s: State
+
+  action init = s' = {
+    phase: Unloaded, bank: NoBank, wire: FP32, generation: 0,
+    pendingGeneration: 0, pendingSequence: 0, pendingM: 0,
+    pendingKernel: NoKernel, pendingPoison: false, groupedEnabled: false,
+    resourcesOwned: false, allocations: 0, dispatches: 0,
+    outputVersion: 0, callerBuffer: CallerUnchanged, registeredRanges: 0,
+    memoryQueryKnown: false, native: NativeIdle, csFailed: false,
+    bakedFailed: false, bakedProgress: 0, lastStatus: NotLoaded,
+  }
+
+  /// Successful load summarizes authenticated bank/layout/device checks and
+  /// persistent allocation/upload. Int4 is explicit opt-in in the source.
+  action load(bank: Bank, wire: Wire, grouped: bool): bool = all {
+    s.phase == Unloaded, bank != NoBank,
+    s' = { ...s, phase: Ready, bank: bank, wire: wire, generation: 7,
+      groupedEnabled: grouped and bank == NVFP4, resourcesOwned: true,
+      allocations: if (grouped and bank == NVFP4) 14 else 7,
+      lastStatus: Ok },
+  }
+
+  /// Header/config/opt-in failures fail closed: no bank, queue, mapping, or
+  /// persistent allocation remains owned. Concrete parameters describe the
+  /// rejected input rather than an oracle outcome.
+  action rejectLoad(bank: Bank, configGeneration: int,
+                    headerValid: bool, int4OptIn: bool): bool = all {
+    s.phase == Unloaded,
+    any {
+      bank == NoBank, configGeneration <= 0, not(headerValid),
+      bank == Int4 and not(int4OptIn),
+    },
+    s' = { ...s, bank: NoBank, resourcesOwned: false,
+      registeredRanges: 0, lastStatus: InvalidArgument },
+  }
+
+  /// The bounded model uses two layers, four compact resident slots, hidden
+  /// width two and max batch 128. Those bounds preserve the real predicates.
+  action issue(gen: int, seq: int, layer: int, m: int,
+               minCompactId: int, maxCompactId: int,
+               weightsFinite: bool): bool = all {
+    s.phase == Ready, s.native != BakedFlight,
+    gen == s.generation, layer >= 0, layer < 2, m > 0, m <= 128,
+    minCompactId >= -1, maxCompactId < 4, weightsFinite,
+    s' = { ...s, phase: Pending, pendingGeneration: gen,
+      pendingSequence: seq, pendingM: m,
+      pendingKernel:
+        if (s.bank == Int4) Int4Split
+        else if (m <= 32) Split
+        else if (s.groupedEnabled) Grouped
+        else Fused,
+      pendingPoison: false, callerBuffer: CallerUnchanged,
+      dispatches: s.dispatches + 1, lastStatus: Ok },
+  }
+
+  action rejectIssueGeneration(gen: int): bool = all {
+    s.phase == Ready, gen != s.generation,
+    s' = { ...s, callerBuffer: CallerUnchanged,
+      lastStatus: GenerationMismatch },
+  }
+  action rejectIssueShape(layer: int, m: int, minCompactId: int,
+                          maxCompactId: int, weightsFinite: bool): bool = all {
+    s.phase == Ready,
+    any {
+      layer < 0, layer >= 2, m <= 0, m > 128,
+      minCompactId < -1, maxCompactId >= 4, not(weightsFinite),
+    },
+    s' = { ...s, callerBuffer: CallerUnchanged,
+      lastStatus: InvalidArgument },
+  }
+  action rejectIssueBusy(gen: int, seq: int): bool = all {
+    s.phase == Pending,
+    s' = { ...s, callerBuffer: CallerUnchanged, lastStatus: Busy },
+  }
+
+  /// Represents a sequence-bound post-kernel/pre-copyout fault or async SYCL
+  /// error. Provider staging is poisoned; caller storage is still untouched.
+  action poisonPending = all {
+    s.phase == Pending, not(s.pendingPoison),
+    s' = { ...s, pendingPoison: true, callerBuffer: CallerUnchanged,
+      lastStatus: DeviceError },
+  }
+
+  action rejectTakeGeneration(gen: int): bool = all {
+    s.phase == Pending, gen != s.pendingGeneration,
+    s' = { ...s, callerBuffer: CallerUnchanged,
+      lastStatus: GenerationMismatch },
+  }
+  action rejectTakeSequence(gen: int, seq: int): bool = all {
+    s.phase == Pending, gen == s.pendingGeneration,
+    seq != s.pendingSequence,
+    s' = { ...s, callerBuffer: CallerUnchanged,
+      lastStatus: SequenceMismatch },
+  }
+  /// Hidden width is two in this finite model. A short/null-equivalent output
+  /// capacity is rejected without retiring valid pending work.
+  action rejectTakeBuffer(gen: int, seq: int, outputElements: int): bool = all {
+    s.phase == Pending, not(s.pendingPoison),
+    gen == s.pendingGeneration, seq == s.pendingSequence,
+    outputElements < s.pendingM * 2,
+    s' = { ...s, callerBuffer: CallerUnchanged,
+      lastStatus: InvalidArgument },
+  }
+
+  action take(gen: int, seq: int, outputElements: int): bool = all {
+    s.phase == Pending, not(s.pendingPoison),
+    gen == s.pendingGeneration, seq == s.pendingSequence,
+    outputElements >= s.pendingM * 2,
+    s' = { ...s, phase: Ready, pendingGeneration: 0, pendingSequence: 0,
+      pendingM: 0, pendingKernel: NoKernel, callerBuffer: CallerCommitted,
+      outputVersion: s.outputVersion + 1, lastStatus: Ok },
+  }
+
+  /// A poisoned exact-identity take retires the dispatch but preserves both
+  /// caller output and DispatchResult sentinels in the implementation.
+  action takePoison(gen: int, seq: int): bool = all {
+    s.phase == Pending, s.pendingPoison,
+    gen == s.pendingGeneration, seq == s.pendingSequence,
+    s' = { ...s, phase: Ready, pendingGeneration: 0, pendingSequence: 0,
+      pendingM: 0, pendingKernel: NoKernel, pendingPoison: false,
+      callerBuffer: CallerUnchanged, lastStatus: DeviceError },
+  }
+
+  /// Telemetry is fail-open and does not affect dispatchability.
+  action queryMemory(available: bool): bool = all {
+    s.phase == Ready,
+    s' = { ...s, memoryQueryKnown: available, lastStatus: s.lastStatus },
+  }
+  /// Registration imports the range into the SYCL context; the caller keeps
+  /// memory ownership and must keep it alive. Shutdown releases registration.
+  action registerHostRange = all {
+    s.phase == Ready,
+    s' = { ...s, registeredRanges: s.registeredRanges + 1,
+      lastStatus: Ok },
+  }
+  action rejectHostRange = all {
+    s.phase == Ready,
+    s' = { ...s, lastStatus: InvalidArgument },
+  }
+
+  /// Mode 1/2 command-streamer paths are fire-and-forget: no classic pending
+  /// identity is installed; direct completion publishes the ring result.
+  action nativeDispatch(kernel: Kernel, gen: int, layer: int,
+                        m: int, buffersPresent: bool): bool = all {
+    s.phase == Ready, s.bank == NVFP4, not(s.csFailed),
+    gen == s.generation, layer >= 0, layer < 2, buffersPresent,
+    any { kernel == CsChain, kernel == CsRide }, m > 0, m <= 32,
+    s' = { ...s, callerBuffer: CallerCommitted,
+      outputVersion: s.outputVersion + 1, dispatches: s.dispatches + 1,
+      lastStatus: Ok },
+  }
+  action nativeLatchFailure(kernel: Kernel): bool = all {
+    s.phase == Ready, not(s.csFailed),
+    any { kernel == CsChain, kernel == CsRide },
+    s' = { ...s, csFailed: true, callerBuffer: CallerUnchanged,
+      lastStatus: DeviceError },
+  }
+
+  /// Mode 3 is NVFP4, fp16-wire, M=1 only. One transition summarizes complete
+  /// idempotent per-layer recording; execution may time out recoverably.
+  action recordBaked = all {
+    s.phase == Ready, s.bank == NVFP4, s.wire == FP16,
+    s.native == NativeIdle, not(s.bakedFailed),
+    s' = { ...s, native: BakedRecorded, bakedProgress: 0, lastStatus: Ok },
+  }
+  action executeBaked = all {
+    s.phase == Ready, s.native == BakedRecorded, not(s.bakedFailed),
+    s' = { ...s, native: BakedFlight, bakedProgress: 0,
+      callerBuffer: CallerUnchanged, lastStatus: Busy },
+  }
+  action observeBakedProgress = all {
+    s.phase == Ready, s.native == BakedFlight, s.bakedProgress < 2,
+    s' = { ...s, bakedProgress: s.bakedProgress + 1, lastStatus: Busy },
+  }
+  /// busy is not poison: repeated bounded waits can observe progress and drain.
+  action bakedWaitBusy = all {
+    s.phase == Ready, s.native == BakedFlight,
+    s' = { ...s, lastStatus: Busy },
+  }
+  action bakedDrain = all {
+    s.phase == Ready, s.native == BakedFlight, s.bakedProgress == 2,
+    s' = { ...s, native: BakedRecorded, callerBuffer: CallerCommitted,
+      outputVersion: s.outputVersion + 1, dispatches: s.dispatches + 2,
+      lastStatus: Ok },
+  }
+  /// Caller-declared abandonment is terminal for baked mode, not for classic
+  /// issue/take. This models baked_disable's process-lifetime latch.
+  action disableBaked = all {
+    s.phase == Ready, s.native == BakedFlight,
+    s' = { ...s, native: BakedDisabled, bakedFailed: true,
+      callerBuffer: CallerUnchanged, lastStatus: DeviceError },
+  }
+  /// Raw-list recording/submission/synchronization failures latch baked_failed.
+  action bakedQueueFailure = all {
+    s.phase == Ready, not(s.bakedFailed),
+    any { s.native == BakedRecorded, s.native == BakedFlight },
+    s' = { ...s, native: BakedDisabled, bakedFailed: true,
+      callerBuffer: CallerUnchanged, lastStatus: DeviceError },
+  }
+
+  /// Shutdown is idempotent in C++; this transition models the first call.
+  /// Provider allocations/mappings/registrations are released. Allocation
+  /// count is cumulative health telemetry, so it does not decrement.
+  action shutdown = all {
+    s.phase != Stopped,
+    s' = { ...s, phase: Stopped, resourcesOwned: false,
+      registeredRanges: 0, pendingGeneration: 0, pendingSequence: 0,
+      pendingM: 0, pendingKernel: NoKernel, pendingPoison: false,
+      native: if (s.native == BakedDisabled) BakedDisabled else NativeIdle,
+      lastStatus: Shutdown },
+  }
+  action stay = s' = s
+
+  action step = any {
+    load(NVFP4, FP32, false), load(NVFP4, FP16, true),
+    load(Int4, FP32, false), rejectLoad(Int4, 7, true, false),
+    issue(7, 10, 0, 1, -1, 3, true),
+    issue(7, 11, 1, 64, 0, 3, true),
+    rejectIssueGeneration(8), rejectIssueShape(2, 1, 0, 3, true),
+    rejectIssueShape(0, 1, 0, 4, true), rejectIssueBusy(7, 11),
+    poisonPending, rejectTakeGeneration(8), rejectTakeSequence(7, 99),
+    rejectTakeBuffer(7, 10, 1), take(7, 10, 2), take(7, 11, 128),
+    takePoison(7, 10), queryMemory(true), queryMemory(false),
+    registerHostRange, rejectHostRange,
+    nativeDispatch(CsChain, 7, 0, 1, true),
+    nativeDispatch(CsRide, 7, 1, 32, true), nativeLatchFailure(CsChain),
+    recordBaked, executeBaked, observeBakedProgress, bakedWaitBusy,
+    bakedDrain, disableBaked, shutdown, stay,
+    bakedQueueFailure,
+  }
+
+  val inv = and {
+    (s.phase == Pending) == (s.pendingM > 0),
+    (s.phase == Pending) == (s.pendingKernel != NoKernel),
+    s.pendingPoison implies s.phase == Pending,
+    s.resourcesOwned == any { s.phase == Ready, s.phase == Pending },
+    s.outputVersion <= s.dispatches,
+    s.allocations >= 0, s.dispatches >= 0, s.outputVersion >= 0,
+    s.registeredRanges >= 0,
+    s.phase == Unloaded implies s.bank == NoBank,
+    s.phase == Stopped implies not(s.resourcesOwned),
+    s.native == BakedFlight implies s.phase == Ready,
+    s.native == BakedDisabled implies s.bakedFailed,
+    s.bank == Int4 implies not(s.groupedEnabled),
+  }
+
+  val witnessSplitPublished = s.phase == Ready and s.outputVersion == 1 and
+    s.dispatches == 1 and s.callerBuffer == CallerCommitted
+  val witnessPoisonPreservesCaller = s.phase == Ready and
+    s.lastStatus == DeviceError and s.callerBuffer == CallerUnchanged and
+    s.dispatches == 1 and s.outputVersion == 0
+  val witnessBusyStillPending = s.phase == Pending and s.lastStatus == Busy
+  val witnessGroupedSelected = s.phase == Pending and s.pendingKernel == Grouped
+  val witnessInt4Selected = s.phase == Pending and s.pendingKernel == Int4Split
+  val witnessBakedRecovered = s.native == BakedRecorded and
+    s.lastStatus == Ok and s.outputVersion == 1
+  val witnessShutdownReleased = s.phase == Stopped and
+    not(s.resourcesOwned) and s.registeredRanges == 0
+
+  run splitSuccessTest = init.then(load(NVFP4, FP32, false))
+    .then(issue(7, 10, 0, 1, -1, 3, true)).then(take(7, 10, 2))
+    .expect(witnessSplitPublished and inv)
+  run busyAndStaleIdentityTest = init.then(load(NVFP4, FP32, false))
+    .then(issue(7, 10, 0, 1, -1, 3, true)).then(rejectIssueBusy(7, 11))
+    .expect(witnessBusyStillPending).then(rejectTakeGeneration(8))
+    .then(rejectTakeSequence(7, 99)).then(take(7, 10, 2)).expect(inv)
+  run badOutputBufferKeepsFlightTest = init.then(load(NVFP4, FP32, false))
+    .then(issue(7, 10, 0, 1, -1, 3, true))
+    .then(rejectTakeBuffer(7, 10, 1))
+    .expect(s.phase == Pending and s.callerBuffer == CallerUnchanged)
+    .then(take(7, 10, 2)).expect(inv)
+  run failurePoisonTest = init.then(load(NVFP4, FP32, false))
+    .then(issue(7, 10, 0, 1, -1, 3, true)).then(poisonPending)
+    .then(takePoison(7, 10)).expect(witnessPoisonPreservesCaller and inv)
+  run groupedAndFusedModesTest = init.then(load(NVFP4, FP32, true))
+    .then(issue(7, 11, 1, 64, 0, 3, true)).expect(witnessGroupedSelected)
+    .then(take(7, 11, 128)).then(shutdown).then(init)
+    .then(load(NVFP4, FP32, false))
+    .then(issue(7, 12, 1, 64, 0, 3, true))
+    .expect(s.pendingKernel == Fused and inv)
+  run int4SplitTest = init.then(load(Int4, FP32, false))
+    .then(issue(7, 10, 0, 64, 0, 3, true))
+    .expect(witnessInt4Selected and inv).then(take(7, 10, 128)).expect(inv)
+  run shapeErrorDoesNotClaimBuffersTest = init.then(load(NVFP4, FP32, false))
+    .then(rejectIssueShape(0, 1, 0, 4, true)).expect(s.phase == Ready and
+      s.callerBuffer == CallerUnchanged and s.dispatches == 0 and inv)
+  run nativeQueueTest = init.then(load(NVFP4, FP32, false))
+    .then(nativeDispatch(CsChain, 7, 0, 1, true))
+    .expect(witnessSplitPublished and inv)
+  run bakedRecoverableBusyTest = init.then(load(NVFP4, FP16, true))
+    .then(recordBaked).then(executeBaked).then(bakedWaitBusy)
+    .then(observeBakedProgress).then(bakedWaitBusy)
+    .then(observeBakedProgress).then(bakedDrain)
+    .expect(witnessBakedRecovered and inv)
+  run bakedTerminalDisableTest = init.then(load(NVFP4, FP16, false))
+    .then(recordBaked).then(executeBaked).then(disableBaked)
+    .expect(s.native == BakedDisabled and s.callerBuffer == CallerUnchanged and inv)
+  run bakedQueueFailureTest = init.then(load(NVFP4, FP16, false))
+    .then(recordBaked).then(executeBaked).then(bakedQueueFailure)
+    .expect(s.native == BakedDisabled and s.bakedFailed and
+      s.callerBuffer == CallerUnchanged and inv)
+  run shutdownReleasesRegistrationTest = init.then(load(NVFP4, FP32, false))
+    .then(registerHostRange).then(shutdown)
+    .expect(witnessShutdownReleased and inv)
+  run rejectedLoadTest = init.then(rejectLoad(Int4, 7, true, false))
+    .expect(s.phase == Unloaded and not(s.resourcesOwned) and inv)
+}

@@ -1,0 +1,265 @@
+/// Grouped Xe2 NVFP4 prefill: route grouping, two quantized GEMMs, overflow-safe
+/// SwiGLU, and weighted output. This is a bounded control/data abstraction of
+/// src/phase7/xe2_nvfp4/grouped_moe.cpp::grouped_moe_nvfp4.
+///
+/// Atomicity: each action collapses one in-order SYCL submission/stage. Route
+/// scatter and default output scatter expose their nondeterministic ordering as
+/// metadata; tensor kernels are not interleaved element by element.
+/// Numerical abstraction: bounded integer GEMM results/factors stand for FP32
+/// tensor elements. Power-of-two rescaling is computed exactly here, but this
+/// model does not claim GPU floating-point bit equivalence.
+module compute {
+  type Phase = Idle | Ready | Histogrammed | Scanned | Scattered | Gathered |
+    GateUpDone | Activated | DownDone | Complete | Refused
+  type Backend = Native | OneDnn | MxFp4
+  type Scatter = Atomic | Deterministic
+  type State = {
+    phase: Phase,
+    requested: Backend,
+    effective: Backend,
+    oneDnnArmed: bool,
+    mxScaleCached: bool,
+    approximateScales: bool,
+    m: int,
+    topK: int,
+    groupSize: int,
+    rowsCap: int,
+    routes: int,
+    ownedRoutes: int,
+    hist0: int,
+    hist1: int,
+    offsetEnd: int,
+    inverseMapped: int,
+    gatheredRows: int,
+    scratchEpoch: int,
+    gatedRaw: int,
+    shift: int,
+    gatedNarrow: int,
+    routeWeightScaled: int,
+    downScalar: int,
+    outputScalar: int,
+    scatter: Scatter,
+    bitStable: bool,
+    fallbackUsed: bool,
+  }
+
+  /// Bounded E=2 route-count helper. IDs outside [0,2) are unowned.
+  pure def isExpert(id: int, expert: int): int = if (id == expert) 1 else 0
+  pure def countExpert(expert: int, id0: int, id1: int, id2: int, id3: int): int =
+    isExpert(id0, expert) + isExpert(id1, expert) +
+    isExpert(id2, expert) + isExpert(id3, expert)
+
+  var s: State
+
+  action init = s' = {
+    phase: Idle, requested: Native, effective: Native,
+    oneDnnArmed: true, mxScaleCached: false, approximateScales: false,
+    m: 0, topK: 0, groupSize: 0, rowsCap: 0, routes: 0,
+    ownedRoutes: 0, hist0: 0, hist1: 0, offsetEnd: 0,
+    inverseMapped: 0, gatheredRows: 0, scratchEpoch: 0,
+    gatedRaw: 0, shift: 0, gatedNarrow: 0, routeWeightScaled: 1,
+    downScalar: 0, outputScalar: 0, scatter: Atomic,
+    bitStable: false, fallbackUsed: false,
+  }
+
+  /// Production requires positive M/E/top_k and group_size=16. This bounded
+  /// model fixes E=2 and admits at most four routes so all IDs fit parameters.
+  action configure(be: Backend, m: int, topK: int, rowsCap: int, groupSize: int): bool = all {
+    s.phase == Idle,
+    m > 0, topK > 0, m * topK <= 4,
+    rowsCap >= m * topK, rowsCap <= 4,
+    groupSize == 16,
+    s' = { ...s, phase: Ready, requested: be, effective: be,
+      m: m, topK: topK, rowsCap: rowsCap, groupSize: groupSize,
+      routes: m * topK },
+  }
+  action rejectUnsupportedShape(m: int, topK: int, groupSize: int): bool = all {
+    s.phase == Idle,
+    (m <= 0) or (topK <= 0) or (groupSize != 16),
+    s' = { ...s, phase: Refused, m: m, topK: topK, groupSize: groupSize },
+  }
+
+  /// The four-ID bounded domain computes, rather than assumes, resident counts.
+  /// Unused positions for routes<4 must be -1.
+  action histogram(id0: int, id1: int, id2: int, id3: int): bool = all {
+    s.phase == Ready,
+    id0 >= -1, id0 <= 2, id1 >= -1, id1 <= 2,
+    id2 >= -1, id2 <= 2, id3 >= -1, id3 <= 2,
+    (s.routes >= 1) or (id0 == -1),
+    (s.routes >= 2) or (id1 == -1),
+    (s.routes >= 3) or (id2 == -1),
+    (s.routes >= 4) or (id3 == -1),
+    s' = { ...s, phase: Histogrammed,
+      ownedRoutes: countExpert(0, id0, id1, id2, id3) +
+        countExpert(1, id0, id1, id2, id3),
+      hist0: countExpert(0, id0, id1, id2, id3),
+      hist1: countExpert(1, id0, id1, id2, id3) },
+  }
+  action scan = all {
+    s.phase == Histogrammed,
+    s' = { ...s, phase: Scanned, offsetEnd: s.hist0 + s.hist1 },
+  }
+  /// Relaxed atomic cursors may permute slots within an expert. slot_of records
+  /// exactly the owned route count; unowned routes remain -1 in implementation.
+  action scatterRoutes = all {
+    s.phase == Scanned, s.offsetEnd <= s.rowsCap,
+    s' = { ...s, phase: Scattered, inverseMapped: s.offsetEnd },
+  }
+  action gatherActivations = all {
+    s.phase == Scattered,
+    s' = { ...s, phase: Gathered, gatheredRows: s.offsetEnd },
+  }
+
+  /// gateRaw is one bounded representative FP32 gate/up/SwiGLU row result.
+  /// Native and MXFP4 clear the one-int persistent-work-queue scratch first.
+  action nativeGateUp(gateRaw: int): bool = all {
+    s.phase == Gathered, s.requested == Native,
+    gateRaw >= 0, gateRaw <= 262016,
+    s' = { ...s, phase: GateUpDone, effective: Native,
+      scratchEpoch: 1, gatedRaw: gateRaw },
+  }
+  action oneDnnGateUp(cachedRowsCap: int, gateRaw: int): bool = all {
+    s.phase == Gathered, s.requested == OneDnn, s.oneDnnArmed,
+    cachedRowsCap == s.rowsCap, s.rowsCap >= s.routes,
+    gateRaw >= 0, gateRaw <= 262016,
+    s' = { ...s, phase: GateUpDone, effective: OneDnn,
+      scratchEpoch: 1, gatedRaw: gateRaw },
+  }
+  /// QueueCtx::bound throws when live cached geometry differs. The catch
+  /// permanently clears g_armed and the same dispatch runs native.
+  action oneDnnGeometryMismatch(cachedRowsCap: int, gateRaw: int): bool = all {
+    s.phase == Gathered, s.requested == OneDnn, s.oneDnnArmed,
+    cachedRowsCap > 0, cachedRowsCap != s.rowsCap,
+    gateRaw >= 0, gateRaw <= 262016,
+    s' = { ...s, phase: GateUpDone, effective: Native,
+      oneDnnArmed: false, fallbackUsed: true,
+      scratchEpoch: 1, gatedRaw: gateRaw },
+  }
+  action mxFp4GateUp(gateRaw: int): bool = all {
+    s.phase == Gathered, s.requested == MxFp4,
+    gateRaw >= 0, gateRaw <= 262016,
+    s' = { ...s, phase: GateUpDone, effective: MxFp4,
+      mxScaleCached: true, approximateScales: true,
+      scratchEpoch: 1, gatedRaw: gateRaw },
+  }
+  /// Derived-scale allocation refusal is not latched; this invocation uses native.
+  action mxFp4AllocationFallsBack(gateRaw: int): bool = all {
+    s.phase == Gathered, s.requested == MxFp4,
+    gateRaw >= 0, gateRaw <= 262016,
+    s' = { ...s, phase: GateUpDone, effective: Native,
+      fallbackUsed: true, scratchEpoch: 1, gatedRaw: gateRaw },
+  }
+
+  /// Bounded form of the source's minimal power-of-two normalization. Values
+  /// up to 4*65504 cover shifts 0,1,2 without an unbounded exponent operator.
+  action swiglu(routeWeight: int): bool = all {
+    s.phase == GateUpDone, routeWeight >= 0, routeWeight <= 4,
+    s' = { ...s, phase: Activated,
+      shift: if (s.gatedRaw <= 65504) 0 else if (s.gatedRaw <= 131008) 1 else 2,
+      gatedNarrow: if (s.gatedRaw <= 65504) s.gatedRaw else
+        if (s.gatedRaw <= 131008) s.gatedRaw / 2 else s.gatedRaw / 4,
+      routeWeightScaled: if (s.gatedRaw <= 65504) routeWeight else
+        if (s.gatedRaw <= 131008) routeWeight * 2 else routeWeight * 4 },
+  }
+
+  /// downFactor is a bounded scalar abstraction of one linear down-projection
+  /// coefficient. Re-zeroing atom is visible as scratch epoch 2.
+  action downGemm(downFactor: int): bool = all {
+    s.phase == Activated, s.scratchEpoch == 1,
+    downFactor >= -4, downFactor <= 4,
+    s' = { ...s, phase: DownDone, scratchEpoch: 2,
+      downScalar: s.gatedNarrow * downFactor },
+  }
+  action atomicOutput = all {
+    s.phase == DownDone,
+    s' = { ...s, phase: Complete, scatter: Atomic, bitStable: false,
+      outputScalar: s.ownedRoutes * s.downScalar * s.routeWeightScaled },
+  }
+  action deterministicOutput = all {
+    s.phase == DownDone,
+    s' = { ...s, phase: Complete, scatter: Deterministic, bitStable: true,
+      outputScalar: s.ownedRoutes * s.downScalar * s.routeWeightScaled },
+  }
+
+  action stay = all { s.phase == Complete, s' = s }
+  action step = any {
+    configure(Native, 2, 2, 4, 16),
+    configure(OneDnn, 2, 2, 4, 16),
+    configure(MxFp4, 2, 2, 4, 16),
+    rejectUnsupportedShape(2, 2, 32),
+    histogram(0, 1, -1, 0), scan, scatterRoutes, gatherActivations,
+    nativeGateUp(6), nativeGateUp(70000),
+    oneDnnGateUp(4, 6), oneDnnGeometryMismatch(3, 6),
+    mxFp4GateUp(6), mxFp4AllocationFallsBack(6),
+    swiglu(1), downGemm(3), atomicOutput, deterministicOutput, stay,
+  }
+
+  val overflowProductPreserved =
+    s.gatedNarrow * s.routeWeightScaled == s.gatedRaw
+  val inv = and {
+    s.ownedRoutes <= s.routes,
+    s.offsetEnd <= s.rowsCap,
+    s.inverseMapped <= s.ownedRoutes,
+    s.gatheredRows <= s.inverseMapped,
+    s.scratchEpoch >= 0,
+    s.scratchEpoch <= 2,
+    s.approximateScales implies s.effective == MxFp4,
+    s.bitStable implies (s.phase == Complete and s.scatter == Deterministic),
+    (s.phase == Complete) implies s.scratchEpoch == 2,
+    (not(s.oneDnnArmed)) implies s.fallbackUsed,
+  }
+
+  val witnessNativeAtomic =
+    s.phase == Complete and s.effective == Native and s.scatter == Atomic
+  val witnessDeterministic =
+    s.phase == Complete and s.scatter == Deterministic and s.bitStable
+  val witnessOverflowSafe =
+    s.phase == Activated and s.shift > 0 and overflowProductPreserved
+  val witnessOneDnnDisarmedFallback =
+    s.phase == Complete and s.requested == OneDnn and
+    s.effective == Native and not(s.oneDnnArmed) and s.fallbackUsed
+  val witnessApproximateMxFp4 =
+    s.phase == Complete and s.effective == MxFp4 and s.mxScaleCached
+  val witnessUnsupportedShape = s.phase == Refused
+
+  run nativeAtomicTest = init.then(configure(Native, 2, 2, 4, 16))
+    .then(histogram(0, 1, -1, 0)).then(scan).then(scatterRoutes)
+    .then(gatherActivations).then(nativeGateUp(6)).then(swiglu(1))
+    .then(downGemm(3)).then(atomicOutput)
+    .expect(witnessNativeAtomic and s.outputScalar == 54 and inv)
+  run deterministicReduceTest = init.then(configure(Native, 2, 2, 4, 16))
+    .then(histogram(0, 1, -1, 0)).then(scan).then(scatterRoutes)
+    .then(gatherActivations).then(nativeGateUp(6)).then(swiglu(1))
+    .then(downGemm(3)).then(deterministicOutput)
+    .expect(witnessDeterministic and s.outputScalar == 54 and inv)
+  run overflowScalingTest = init.then(configure(Native, 2, 2, 4, 16))
+    .then(histogram(0, 1, -1, 0)).then(scan).then(scatterRoutes)
+    .then(gatherActivations).then(nativeGateUp(70000)).then(swiglu(1))
+    .expect(witnessOverflowSafe and inv).then(downGemm(3))
+    .then(deterministicOutput).expect(s.outputScalar == 630000 and inv)
+  run oneDnnSuccessTest = init.then(configure(OneDnn, 2, 2, 4, 16))
+    .then(histogram(0, 1, -1, 0)).then(scan).then(scatterRoutes)
+    .then(gatherActivations).then(oneDnnGateUp(4, 6)).then(swiglu(1))
+    .then(downGemm(3)).then(deterministicOutput)
+    .expect(s.effective == OneDnn and s.oneDnnArmed and inv)
+  run oneDnnPermanentDisarmTest = init.then(configure(OneDnn, 2, 2, 4, 16))
+    .then(histogram(0, 1, -1, 0)).then(scan).then(scatterRoutes)
+    .then(gatherActivations).then(oneDnnGeometryMismatch(3, 6)).then(swiglu(1))
+    .then(downGemm(3)).then(deterministicOutput)
+    .expect(witnessOneDnnDisarmedFallback and inv)
+  run mxFp4ApproximateTest = init.then(configure(MxFp4, 2, 2, 4, 16))
+    .then(histogram(0, 1, -1, 0)).then(scan).then(scatterRoutes)
+    .then(gatherActivations).then(mxFp4GateUp(6)).then(swiglu(1))
+    .then(downGemm(3)).then(deterministicOutput)
+    .expect(witnessApproximateMxFp4 and inv)
+  run mxFp4AllocationFallbackTest = init.then(configure(MxFp4, 2, 2, 4, 16))
+    .then(histogram(0, 1, -1, 0)).then(scan).then(scatterRoutes)
+    .then(gatherActivations).then(mxFp4AllocationFallsBack(6)).then(swiglu(1))
+    .then(downGemm(3)).then(atomicOutput)
+    .expect(s.effective == Native and s.fallbackUsed and inv)
+  run unsupportedGroupTest = init.then(rejectUnsupportedShape(2, 2, 32))
+    .expect(witnessUnsupportedShape and inv)
+    .then(configure(Native, 2, 2, 4, 16).fail())
+  run cannotGatherBeforeScatterTest = init.then(configure(Native, 2, 2, 4, 16))
+    .then(histogram(0, 1, -1, 0)).then(scan).then(gatherActivations.fail())
+}

@@ -1,0 +1,247 @@
+{
+  "id": "observability",
+  "title": "Route observability, locality, topology, telemetry, seam tracing, and calibration",
+  "models": [
+    {
+      "path": "models/observability.ryu",
+      "main": "observability",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessDisabled",
+        "witnessExactLocality",
+        "witnessContiguous",
+        "witnessReplicated",
+        "witnessBoundaryThree",
+        "witnessWarmupExcluded",
+        "witnessProviderGenerationRejected",
+        "witnessSeamLifecycle"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "benchmarks/route_locality.py",
+      "role": "functional",
+      "models": ["models/observability.ryu"],
+      "symbols": [
+        "TraceHeader",
+        "record_dtype",
+        "read_trace",
+        "write_trace",
+        "uniform_jaccard",
+        "uniform_working_set",
+        "_uniform_lru_rates",
+        "uniform_baseline",
+        "_consecutive_runs",
+        "_working_set_sums",
+        "_lru_counts",
+        "_layer_metrics",
+        "analyze_trace",
+        "format_report",
+        "main"
+      ],
+      "notes": "Authoritative offline SBRTv1 reader/writer and temporal-locality semantics. The model retains bounded validated/sorted top-2 records, exact consecutive-run, width-two working-set, capacity-two LRU, and scaled Jaccard behavior; NumPy I/O, arbitrary geometry/windows/capacities, report formatting, and the 100000-token null simulation are abstracted."
+    },
+    {
+      "path": "benchmarks/route_topology.py",
+      "role": "functional",
+      "models": ["models/observability.ryu"],
+      "symbols": [
+        "KERNEL_US",
+        "_validate_geometry",
+        "select_single_row_steps",
+        "count_summary",
+        "topology_summary",
+        "simulate_topologies",
+        "_uniform_global_expected_max",
+        "sweep_boundaries",
+        "_synthetic_records",
+        "select_last_step_runs",
+        "analyze_trace_file",
+        "main"
+      ],
+      "notes": "Owns record selection, contiguous/replicated/single-card route counting, integer measured-knot lookup, exhaustive contiguous boundary rows, synthetic inputs, and CLI interpretation limits. The four-expert model evaluates both legal boundaries and all three topology families from each parameterized record; production-size distributions, percentiles, and combinatorial uniform expectation are abstracted."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/route_stats.py",
+      "role": "behavior",
+      "models": ["models/observability.ryu"],
+      "symbols": [
+        "RouteCounter",
+        "RouteCounter.observe",
+        "RouteCounter.save_csv",
+        "RouteTrace",
+        "RouteTrace._allocate_staging",
+        "RouteTrace._append_slot",
+        "RouteTrace._finish_slot",
+        "RouteTrace.observe",
+        "RouteTrace.flush",
+        "RouteTrace.close",
+        "load_csv",
+        "analyze",
+        "format_analysis",
+        "enabled",
+        "trace_enabled",
+        "get_counter",
+        "get_trace",
+        "peek_trace",
+        "flush_trace",
+        "peek",
+        "dump"
+      ],
+      "notes": "Live global-ID histogram and SBRTv1 producer. The model preserves opt-in lazy lifecycle, per-record accounting, pending/durable separation, flush-without-close, close, histogram reset/calibration, and dimension/identity failure observations. Device tensors, eight pinned slots, CUDA events, 65536-record file blocks, CSV bytes, and atexit mechanics are explicit atomic abstractions."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/seam_trace.py",
+      "role": "behavior",
+      "models": ["models/observability.ryu"],
+      "symbols": [
+        "_SeamRecord",
+        "SeamTracer",
+        "SeamTracer.step_begin",
+        "SeamTracer._advance_step",
+        "SeamTracer.step_end",
+        "SeamTracer.begin",
+        "SeamTracer.mark",
+        "SeamTracer.dump",
+        "seam_tracer"
+      ],
+      "notes": "Opt-in sampled decode seam lifecycle. The model distinguishes accepted decode-shaped samples, current-stream-capture skips, large-M skips, and one-time nonempty dump. Timestamp values, CUDA event elapsed-time numerics, NPZ serialization, cadence counters, fallback layer rollover, and NaN details are documented but abstracted."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/telemetry.py",
+      "role": "behavior",
+      "models": ["models/observability.ryu"],
+      "symbols": [
+        "_provider_health_stats",
+        "_iter_hybrid_layers",
+        "_collect_eager_partition",
+        "_collect_arm_contract",
+        "collect_worker_stats",
+        "reset_worker_stats",
+        "dump_route_histogram"
+      ],
+      "notes": "Worker collective-RPC snapshot/reset surface. The model preserves mutable-counter reset, monotonic provider generation/dispatch baseline, unavailable scoped delta after generation change/regression, histogram liveness, and dump lifecycle. Full route/poller/memory/power dictionaries and external device reads are inventory observations rather than tensor/device simulation."
+    },
+    {
+      "path": "src/phase7/calibrate_routes.py",
+      "role": "harness",
+      "models": ["models/observability.ryu"],
+      "symbols": ["load_corpus", "run", "main"],
+      "notes": "All-CUDA frequency-calibration workflow contract: configure histogram, load/filter corpus, warm up, reset, execute, worker-RPC dump, shutdown, and offline CSV analysis. The model preserves Warmup->Reset->Measuring->Dumped and warmup exclusion. The checked-in benchmark import path does not match the present repository layout, reported in the chapter rather than corrected."
+    },
+    {
+      "path": "src/phase7/calibrate_routes.sh",
+      "role": "harness",
+      "models": ["models/observability.ryu"],
+      "symbols": [],
+      "notes": "Shell launcher has no source-language symbols. It sources oneAPI, enables strict shell mode, prepends the venv, and invokes calibration. Its cd plus Python relative path resolves to src/src/phase7 in this checkout; the chapter records that source contradiction."
+    },
+    {
+      "path": "tests/test_route_locality.py",
+      "role": "harness",
+      "models": ["models/observability.ryu"],
+      "symbols": [
+        "_high_reuse_records",
+        "_uniform_records",
+        "_analyze",
+        "test_analyzer_separates_reuse_from_uniform_chance"
+      ],
+      "notes": "CPU harness contract for repeated-versus-uniform Jaccard separation, chance working sets, LRU hit rates/accounting, and report sections. It is not itself modeled as runtime behavior and was not run by this agent."
+    },
+    {
+      "path": "tests/test_route_topology.py",
+      "role": "harness",
+      "models": ["models/observability.ryu"],
+      "symbols": [
+        "_make_trace",
+        "_critical_mean",
+        "test_uniform_generator_reproduces_binomial_expected_max",
+        "test_clustered_generator_separates_topologies",
+        "test_single_row_selection_excludes_multirow_forwards",
+        "test_last_step_runs_select_request_tail",
+        "test_boundary_sweep_marks_balanced_uniform_cut"
+      ],
+      "notes": "CPU harness contract for uniform analytic maximum, clustered topology separation, single-row filtering, tail-run selection, and exhaustive boundary count. It is not itself modeled as runtime behavior and was not run by this agent."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "role": "dependency",
+      "models": ["models/observability.ryu"],
+      "symbols": [
+        "HybridRoutedExperts._first_forward_setup",
+        "HybridRoutedExperts._observe_route_trace",
+        "HybridRoutedExperts.forward_modular",
+        "HybridRoutedExperts._hybrid_forward_modular"
+      ],
+      "notes": "Relevant call-site boundary: lazily creates observers from qualified geometry, observes global IDs above all-CUDA/placement remapping, executes detailed trace copy through an eager break, and places seam marks around local/take/add work. Hybrid compute itself belongs to another model."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/__init__.py",
+      "role": "dependency",
+      "models": ["models/observability.ryu"],
+      "symbols": ["_patch_seam_trace_step"],
+      "notes": "Relevant call-site boundary wrapping Worker.execute_model with seam step begin/end timing and profiler trigger. Plugin registration and other patches belong to integration/admission models."
+    }
+  ],
+  "assumptions": [
+    "The bounded model receives records after read_trace validation and in (step,row) order; monotonic coordinates make duplicate keys unreachable inside the model.",
+    "The model fixes one layer, top_k=2, expert IDs 0..3, at most four records, LRU capacity two, CUDA prefix [0,1), and configured contiguous boundary 2; these are finite exploration bounds, not production geometry.",
+    "Jaccard is stored in sixths because every top-2 set pair has score 0, 1/3, or 1; general floating-point reduction is outside the model.",
+    "Kernel knots are copied from KERNEL_US as tenths of microseconds for route counts 0..2. They are source accounting inputs, not a new performance claim or prediction.",
+    "Histogram and detailed trace observe global expert IDs before compact placement remapping, as enforced by the routed_experts call sites.",
+    "Version-1 traces do not identify request or prefill/decode phase. Single-row selection is only a concurrency-1 decode proxy and requires the documented capture procedure.",
+    "LRU order processes expert IDs in stored record order and continues across step gaps, while Jaccard and working-set windows reset at row/step discontinuities.",
+    "Telemetry reads occur through collective_rpc between engine steps; absent keys retain the source meaning inactive rather than enabled-and-zero.",
+    "A provider health delta is meaningful only within one generation and with a nondecreasing monotonic dispatch count.",
+    "Seam timestamp/event numerics and file serialization are external observations; the model preserves enable/sample/skip/dump ordering only.",
+    "The calibration Python and shell path mismatches are preserved as checked-in contradictions; no external symlink or module installation is assumed."
+  ],
+  "implementation_checks": [
+    {
+      "source": "benchmarks/route_locality.py",
+      "symbol": "_consecutive_runs",
+      "description": "Construct top-2 records at steps 0,1,3,4 for one row and compare Python run boundaries [(0,1),(3,4)] with Reyu continuesRun decisions."
+    },
+    {
+      "source": "benchmarks/route_locality.py",
+      "symbol": "_lru_counts",
+      "description": "Feed ordered experts [0,1],[0,2],[2,3],[2,3] at capacity two; compare Python hits=4 and requests=8 directly with lruCapacityTwoHits([0,1,0,2,2,3,2,3]), then compare per-access hit/MRU/LRU states with lruCapacityTwoHit/NextRecent/NextOlder."
+    },
+    {
+      "source": "benchmarks/route_locality.py",
+      "symbol": "analyze_trace",
+      "description": "Write/read the four-record SBRTv1 fixture and compare two Jaccard comparisons (sum 4/3), two width-two working sets (distinct sum 5), and capacity-two LRU totals with witnessExactLocality."
+    },
+    {
+      "source": "benchmarks/route_locality.py",
+      "symbol": "read_trace",
+      "description": "CPU-generate bad magic/version/record-size, duplicate expert, duplicate coordinate, out-of-range ID, and truncated payload cases; confirm rejection corresponds to rejectMalformedTrace."
+    },
+    {
+      "source": "benchmarks/route_topology.py",
+      "symbol": "simulate_topologies",
+      "description": "Use the four-record fixture with CUDA prefix 1 and split boundary 2; compare contiguous critical total 6/cost 126.0 us, replicated total 4/cost 123.2 us, and single-card accumulators with the model actions."
+    },
+    {
+      "source": "benchmarks/route_topology.py",
+      "symbol": "sweep_boundaries",
+      "description": "Sweep the four-expert fixture with CUDA prefix 1 and confirm boundary 3 has the lower accumulated max count than boundary 2 and is selected by witnessBoundaryThree."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/telemetry.py",
+      "symbol": "_provider_health_stats",
+      "description": "CPU-call with baseline (generation=1,dispatches=10): verify (1,14) yields delta 4, generation 2 is unavailable, and same-generation raw dispatches below 10 are unavailable."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/route_stats.py",
+      "symbol": "RouteTrace.flush",
+      "description": "With CPU top-k tensors, observe one record, flush, observe another, close, and read both; compare the allowed flushThenResume transition and final durability."
+    },
+    {
+      "source": "src/phase7/calibrate_routes.sh",
+      "symbol": "",
+      "description": "Source-inspect path resolution after cd: confirm the launcher targets src/src/phase7/calibrate_routes.py and the Python sys.path insertion targets src/benchmarks in this checkout; record as a contradiction rather than executing the hardware workflow."
+    }
+  ]
+}

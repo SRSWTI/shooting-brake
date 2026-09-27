@@ -1,0 +1,164 @@
+{
+  "id": "campaign",
+  "title": "Profiling campaigns, measurement attribution, and interactive scheduler policy",
+  "models": [
+    {
+      "path": "models/campaign.ryu",
+      "main": "campaign",
+      "invariant": "inv",
+      "witnesses": [
+        "acceptedCampaign",
+        "missingLatencyWitness",
+        "zeroNativeServiceWitness",
+        "profilerSeparatedWitness",
+        "bundledDeliveryWitness"
+      ]
+    },
+    {
+      "path": "models/scheduler.ryu",
+      "main": "scheduler",
+      "invariant": "inv",
+      "witnesses": [
+        "cappedDecodeWitness",
+        "coldPrefillWitness",
+        "smallerBaselineWitness",
+        "restoredAfterFailureWitness",
+        "qualificationSuccessWitness"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "experiments/analyze_campaign_profile.py",
+      "role": "functional",
+      "models": ["models/campaign.ryu"],
+      "symbols": ["merge_intervals", "duration", "intersection_duration", "category", "analyse", "main"],
+      "notes": "Models exact nonnegative interval length, two-interval union/intersection, uncovered-time clamping, and fail-closed correlation conceptually. SQLite schema access, arbitrary interval lists, kernel-name details, statistics, and file I/O remain implementation evidence."
+    },
+    {
+      "path": "experiments/campaign_worker.py",
+      "role": "behavior",
+      "models": ["models/campaign.ryu"],
+      "symbols": ["CampaignWorkerExtension", "campaign_snapshot", "_campaign_clock_samples", "campaign_start", "campaign_stop"],
+      "notes": "Models exclusive bounded control windows, optional and separately tracked profiler state, clock-bound checks, dispatch/row/native-error coverage, exclusive worker evidence, and stop-time cleanup. CUDA synchronization, NVTX, ctypes and poller trace payloads are atomic observations."
+    },
+    {
+      "path": "experiments/interactive_scheduler.py",
+      "role": "behavior",
+      "models": ["models/scheduler.ryu"],
+      "symbols": ["interactive_budget", "InteractiveScheduler", "__init__", "schedule"],
+      "notes": "Models the exact output/computed/prompt decode predicate, min(baseline, cap), constructor exclusions, and finally restoration. Inherited vLLM scheduling, allocation and fairness remain external."
+    },
+    {
+      "path": "experiments/profile_workloads.py",
+      "role": "behavior",
+      "models": ["models/campaign.ryu"],
+      "symbols": ["rpc", "run", "main"],
+      "notes": "Models endpoint/output/cache-policy admission, manifest identity, warmup, cold/concurrent/mixed/capacity/cache branches, mixed injection ordering, request/trace fail-closed checks, fixed output lengths, and collector cleanup. Prompt text, HTTP concurrency, subprocesses and telemetry payloads are abstract."
+    },
+    {
+      "path": "experiments/qualify_interactive_scheduler.py",
+      "role": "harness",
+      "models": ["models/scheduler.ryu"],
+      "symbols": ["main"],
+      "notes": "Models the qualification verdict over exactly two complete 32-token outputs, finite prompt/generated logprobs, full trace coverage and exact devices 0 and 1. The source calls this correctness qualification, not performance measurement."
+    },
+    {
+      "path": "tests/test_campaign_logging.py",
+      "role": "harness",
+      "models": ["models/campaign.ryu"],
+      "symbols": ["test_failed_connection_keeps_error_record_and_picologging_traceback"],
+      "notes": "Contract evidence that a connection failure remains an unsuccessful record with an error and traceback rather than becoming a latency sample."
+    },
+    {
+      "path": "tests/test_campaign_measurements.py",
+      "role": "harness",
+      "models": ["models/campaign.ryu"],
+      "symbols": ["server", "test_token_usage_and_first_delivery_event", "test_http_failure_is_not_a_successful_latency_sample", "test_trace_rows_cover_actual_autoregressive_work"],
+      "notes": "Optional isolated real-server harness for continuous-usage token accounting, first-delivery timing, bundled ITL missingness, HTTP failure exclusion, per-layer row totals, trace/counter agreement and clock bounds. It forbids production port 8017."
+    },
+    {
+      "path": "tests/test_campaign_profile_analysis.py",
+      "role": "harness",
+      "models": ["models/campaign.ryu"],
+      "symbols": ["test_union_does_not_double_count_concurrent_engines", "test_overlap_and_exposed_service_partition_native_time", "test_empty_and_touching_intervals_have_no_overlap", "test_invalid_interval_is_rejected"],
+      "notes": "CPU contract examples for interval union, symmetric intersection, touching/empty intervals and negative-span rejection."
+    },
+    {
+      "path": "tests/test_interactive_scheduler.py",
+      "role": "harness",
+      "models": ["models/scheduler.ryu"],
+      "symbols": ["request", "test_cold_prefill_and_empty_queue_keep_original_budget", "test_decode_caps_mixed_steps_without_increasing_smaller_budget", "test_preempted_decode_does_not_throttle_prompt_recomputation"],
+      "notes": "CPU policy examples for empty, cold, true decode, smaller baseline and recomputation branches."
+    },
+    {
+      "path": "benchmarks/slo_split_matrix.py",
+      "role": "dependency",
+      "models": ["models/campaign.ryu"],
+      "symbols": ["build_prompt", "one_request", "summarize"],
+      "notes": "Campaign dependency that supplies deterministic prompts, authoritative continuous-usage request records, missing bundled ITL, error retention and successful-only summary aggregation; not part of the assigned ownership inventory."
+    },
+    {
+      "path": "benchmarks/matrix_runner.py",
+      "role": "dependency",
+      "models": ["models/campaign.ryu"],
+      "symbols": ["_scrape_metrics"],
+      "notes": "Campaign reuses its Prometheus scraper as a background collector; sampling and JSONL I/O are abstract, and this file is not part of the assigned ownership inventory."
+    },
+    {
+      "path": "benchmarks/server_context_probe.py",
+      "role": "dependency",
+      "models": ["models/campaign.ryu"],
+      "symbols": ["PcieSampler"],
+      "notes": "Campaign reuses the PCIe sampler with fixed watched addresses; sysfs details are abstract, and this file is not part of the assigned ownership inventory."
+    }
+  ],
+  "assumptions": [
+    "The finite request slots and small integer examples preserve ordering, missingness and policy branches but do not represent production scale or timing.",
+    "A tracing-disabled campaign still has a live control window, native counter/trace collection and worker evidence; profiler state is independent.",
+    "ObservedZero denotes a successfully observed zero duration or count, while Missing denotes unavailable or invalid evidence; failed requests and bundled per-token delivery are not coerced to zero.",
+    "Worker control is modeled for the one-CUDA-worker contract enforced by rpc; collective multi-worker behavior is rejected by source.",
+    "Native trace coverage is an accounting predicate, not proof of output correctness, causality, kernel critical path or unprofiled performance.",
+    "The analyzer's native service interval is a host-observed envelope; it is not Intel kernel duration.",
+    "The interactive scheduler is opt-in and not production-registered. vLLM request allocation, ordering, preemption and fairness remain an external dependency.",
+    "Qualifying probability data and trace coverage establishes the harness's correctness verdict only; it does not establish latency improvement or production promotion.",
+    "No contradiction was observed between the assigned implementations and their focused tests; historical or documentation performance claims are outside this inventory."
+  ],
+  "implementation_checks": [
+    {
+      "source": "experiments/interactive_scheduler.py",
+      "symbol": "interactive_budget",
+      "description": "CPU-enumerate output/computed/prompt counters for two requests plus baseline/cap, and differentially compare with scheduler.isGenuineDecode and scheduler.interactiveBudget; assert the returned budget never exceeds baseline."
+    },
+    {
+      "source": "experiments/interactive_scheduler.py",
+      "symbol": "InteractiveScheduler.schedule",
+      "description": "Source-inspect that the temporary max_num_scheduled_tokens assignment surrounds exactly the inherited schedule call and baseline restoration remains in finally for normal and exceptional exits."
+    },
+    {
+      "source": "experiments/analyze_campaign_profile.py",
+      "symbol": "merge_intervals",
+      "description": "CPU-enumerate short nonnegative interval lists and compare union duration with an independent sweep/point-set oracle; separately confirm negative intervals raise ValueError."
+    },
+    {
+      "source": "experiments/analyze_campaign_profile.py",
+      "symbol": "intersection_duration",
+      "description": "CPU-compare overlapLength and unionLength from campaign.ryu against source results for disjoint, touching, overlapping, containing and identical two-interval cases, including symmetry."
+    },
+    {
+      "source": "benchmarks/slo_split_matrix.py",
+      "symbol": "summarize",
+      "description": "On CPU, feed synthetic success, bundled-ITL, failure and no-success records and confirm only successful requests enter latency aggregates, None ITL stays missing, and failed records remain counted with errors."
+    },
+    {
+      "source": "experiments/analyze_campaign_profile.py",
+      "symbol": "analyse",
+      "description": "Using a temporary synthetic SQLite database and worker JSON, compare phase classification, clock-bound intersection, orphan CUDA activity, unmatched native entries, unioned durations and refusal to overwrite an existing output; no hardware is required."
+    },
+    {
+      "source": "experiments/profile_workloads.py",
+      "symbol": "run",
+      "description": "Source-inspect workload enumeration and fail-closed predicates: warmup exclusion from tracing, mixed leader-before-prefill ordering, exact output length, trace coverage, loopback-only endpoint and production-port refusal."
+    }
+  ]
+}

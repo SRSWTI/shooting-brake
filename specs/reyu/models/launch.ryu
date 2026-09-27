@@ -1,0 +1,155 @@
+/// Executable serving-recipe and production-wrapper model.
+/// Sources: serve_production.sh and benchmarks/serve_*.sh.
+/// Abstraction: process control, HTTP and JSON parsing are boolean outcomes;
+/// bounded health attempts replace wall-clock seconds. The production shell has
+/// pipefail but not errexit, so a failed post-health smoke does not suppress its
+/// READY banner. vLLM scheduling remains an external dependency.
+module launch {
+  type Phase = Idle | Prepared | OldServerStopped | Booting | Healthy | Inspected | Smoked | Ready | TimedOut | DirectExec
+  type Recipe = ProductionR15 | Hybrid35 | Split88 | Split88Long | Split88Profile | Dual99 | JotaR20 | ExternalR15
+  type Batch = Tokens256 | Tokens512 | Tokens2048 | Tokens8192 | CustomBatch
+  type Override = NoOverride | Override512 | OverrideCustom
+  type Source = RecipeDefault | NamedEnvironment | TrailingExtraArgs | DirectRecipe
+  type ModelsReply = ModelCatalog | ModelsCurlFailure | ModelsJsonFailure
+  type CompletionReply = CompletionContent | CompletionCurlFailure | CompletionJsonFailure
+  type State = {
+    phase: Phase,
+    recipe: Recipe,
+    attempts: int,
+    batch: Batch,
+    batchSource: Source,
+    prefixCaching: bool,
+    kvFromWrapper: bool,
+    modelsValid: bool,
+    smokeValid: bool,
+    bannerPrinted: bool,
+    actualAsymmetricSplit: bool,
+    bannerClaimsEqualSplit: bool,
+  }
+  var s: State
+
+  pure def chosenBatch(named: Override, trailing: Override): Batch =
+    if (trailing == Override512) Tokens512
+    else if (trailing == OverrideCustom) CustomBatch
+    else if (named == Override512) Tokens512
+    else if (named == OverrideCustom) CustomBatch
+    else Tokens2048
+  pure def chosenSource(named: Override, trailing: Override): Source =
+    if (trailing != NoOverride) TrailingExtraArgs
+    else if (named != NoOverride) NamedEnvironment
+    else RecipeDefault
+
+  action init = s' = {
+    phase: Idle, recipe: ProductionR15, attempts: 0,
+    batch: Tokens2048, batchSource: RecipeDefault,
+    prefixCaching: false, kvFromWrapper: false,
+    modelsValid: false, smokeValid: false, bannerPrinted: false,
+    actualAsymmetricSplit: false, bannerClaimsEqualSplit: false,
+  }
+
+  /// serve_production prepends its KV and prefix flags to inherited SB_EXTRA_ARGS;
+  /// the inherited tail is therefore later on the vLLM CLI and can override them.
+  action prepareProduction(namedBatch: Override, trailingBatch: Override,
+    inheritedDisablesPrefix: bool, inheritedOverridesKv: bool): bool = all {
+    s.phase == Idle,
+    s' = { ...s, phase: Prepared, recipe: ProductionR15,
+      batch: chosenBatch(namedBatch, trailingBatch),
+      batchSource: chosenSource(namedBatch, trailingBatch),
+      prefixCaching: not(inheritedDisablesPrefix),
+      kvFromWrapper: not(inheritedOverridesKv),
+      actualAsymmetricSplit: true, bannerClaimsEqualSplit: true },
+  }
+  action stopOldServer = all {
+    s.phase == Prepared,
+    s' = { ...s, phase: OldServerStopped },
+  }
+  action spawnTrackedRecipe = all {
+    s.phase == OldServerStopped,
+    s' = { ...s, phase: Booting },
+  }
+  action pollUnhealthy = all {
+    s.phase == Booting, s.attempts < 2,
+    s' = { ...s, attempts: s.attempts + 1 },
+  }
+  action observeHealthy = all {
+    s.phase == Booting,
+    s' = { ...s, phase: Healthy },
+  }
+  action healthTimeout = all {
+    s.phase == Booting, s.attempts == 2,
+    s' = { ...s, phase: TimedOut },
+  }
+  action inspectServer(reply: ModelsReply): bool = all {
+    s.phase == Healthy,
+    s' = { ...s, phase: Inspected, modelsValid: reply == ModelCatalog },
+  }
+  action requestSmoke(reply: CompletionReply): bool = all {
+    s.phase == Inspected,
+    s' = { ...s, phase: Smoked, smokeValid: reply == CompletionContent },
+  }
+  /// No `set -e` is active: command-substitution/pipeline failure can leave an
+  /// empty smoke value and the script still prints READY.
+  action printBanner = all {
+    s.phase == Smoked,
+    s' = { ...s, phase: Ready, bannerPrinted: true },
+  }
+
+  /// Direct benchmark recipes exec vLLM and contain no production health loop
+  /// or completion smoke. Recipe-specific flags are documented in the chapter.
+  action execDirect(recipe: Recipe): bool = all {
+    s.phase == Idle, recipe != ProductionR15,
+    s' = { ...s, phase: DirectExec, recipe: recipe,
+      batch: if (recipe == JotaR20) Tokens512
+        else if (recipe == Split88Long or recipe == Split88Profile) Tokens8192
+        else if (recipe == Split88) Tokens256
+        else Tokens2048,
+      batchSource: DirectRecipe,
+      prefixCaching: recipe != ExternalR15 },
+  }
+  action stay = s' = s
+  action step = any {
+    stopOldServer, spawnTrackedRecipe, pollUnhealthy, observeHealthy,
+    prepareProduction(NoOverride, NoOverride, false, false),
+    prepareProduction(OverrideCustom, Override512, true, true),
+    healthTimeout,
+    inspectServer(ModelCatalog), inspectServer(ModelsCurlFailure), inspectServer(ModelsJsonFailure),
+    requestSmoke(CompletionContent), requestSmoke(CompletionCurlFailure),
+    requestSmoke(CompletionJsonFailure), printBanner,
+    execDirect(Hybrid35), execDirect(Split88), execDirect(Split88Long),
+    execDirect(Split88Profile), execDirect(Dual99), execDirect(JotaR20),
+    execDirect(ExternalR15), stay,
+  }
+
+  val inv = and {
+    s.phase == Ready implies s.bannerPrinted,
+    s.smokeValid implies s.phase != Booting,
+    s.phase == TimedOut implies not(s.bannerPrinted),
+    s.batchSource == RecipeDefault implies s.batch == Tokens2048,
+    s.kvFromWrapper implies s.recipe == ProductionR15,
+  }
+  val readyWitness = s.phase == Ready and s.modelsValid and s.smokeValid
+  val smokeNotAGateWitness = s.phase == Ready and not(s.smokeValid)
+  val timeoutWitness = s.phase == TimedOut and not(s.bannerPrinted)
+  val precedenceWitness = s.batchSource == TrailingExtraArgs and s.batch == Tokens512
+  val sourceContradictionWitness = s.actualAsymmetricSplit and s.bannerClaimsEqualSplit
+
+  run productionHealthySmokeTest = init
+    .then(prepareProduction(NoOverride, NoOverride, false, false))
+    .then(stopOldServer).then(spawnTrackedRecipe).then(pollUnhealthy)
+    .then(observeHealthy).then(inspectServer(ModelCatalog)).then(requestSmoke(CompletionContent))
+    .then(printBanner).expect(readyWitness and sourceContradictionWitness and inv)
+  run trailingArgumentsWinTest = init
+    .then(prepareProduction(OverrideCustom, Override512, true, true))
+    .expect(precedenceWitness and not(s.prefixCaching) and not(s.kvFromWrapper) and inv)
+  run healthTimeoutStopsReadinessTest = init
+    .then(prepareProduction(NoOverride, NoOverride, false, false))
+    .then(stopOldServer).then(spawnTrackedRecipe).then(pollUnhealthy)
+    .then(pollUnhealthy).then(healthTimeout).expect(timeoutWitness and inv)
+  run failedSmokeStillPrintsBannerTest = init
+    .then(prepareProduction(NoOverride, NoOverride, false, false))
+    .then(stopOldServer).then(spawnTrackedRecipe).then(observeHealthy)
+    .then(inspectServer(ModelCatalog)).then(requestSmoke(CompletionCurlFailure)).then(printBanner)
+    .expect(smokeNotAGateWitness and inv)
+  run directProfileHasNoHealthGateTest = init.then(execDirect(Split88Profile))
+    .expect(s.phase == DirectExec and s.batch == Tokens8192 and not(s.bannerPrinted) and inv)
+}

@@ -1,0 +1,187 @@
+/// Opt-in interactive scheduling policy; it is not production-registered.
+/// Source: experiments/interactive_scheduler.py::interactive_budget,
+/// InteractiveScheduler.__init__, InteractiveScheduler.schedule; qualification in
+/// experiments/qualify_interactive_scheduler.py::main.
+/// Abstraction: two request slots are enough to expose empty, prefill, decode,
+/// mixed and recomputation branches. vLLM allocation/order remains external.
+module scheduler {
+  type Phase = Constructing | Ready | Scheduling | Qualified | Rejected
+  type RequestKind = Empty | ColdPrefill | PromptComplete | Decode | Recompute
+  type Qualification = NotRun | Passed | Failed
+  type SchedulerState = {
+    phase: Phase,
+    baseline: int,
+    effective: int,
+    cap: int,
+    maxRunning: int,
+    speculative: bool,
+    first: RequestKind,
+    second: RequestKind,
+    decodePresent: bool,
+    qualification: Qualification,
+    budgetRestored: bool,
+  }
+
+  var s: SchedulerState
+
+  /// Exact source predicate over vLLM request counters.
+  pure def isGenuineDecode(outputTokens: int, computedTokens: int, promptTokens: int): bool =
+    outputTokens > 0 and computedTokens >= promptTokens
+  pure def smaller(a: int, b: int): int = if (a <= b) a else b
+  /// CPU-comparison surface for two request slots. An empty slot is encoded
+  /// with all three counters zero.
+  pure def interactiveBudget(
+    firstOutput: int, firstComputed: int, firstPrompt: int,
+    secondOutput: int, secondComputed: int, secondPrompt: int,
+    baseline: int, cap: int,
+  ): int =
+    if (
+      isGenuineDecode(firstOutput, firstComputed, firstPrompt) or
+      isGenuineDecode(secondOutput, secondComputed, secondPrompt)
+    ) smaller(baseline, cap) else baseline
+  /// Finite request kinds drive the state machine; this is the same predicate.
+  pure def genuineDecode(request: RequestKind): bool = request == Decode
+  pure def interactiveBudgetKinds(first: RequestKind, second: RequestKind, baseline: int, cap: int): int =
+    if (genuineDecode(first) or genuineDecode(second)) smaller(baseline, cap) else baseline
+
+  action init = s' = {
+    phase: Constructing, baseline: 0, effective: 0, cap: 0, maxRunning: 0,
+    speculative: false, first: Empty, second: Empty, decodePresent: false,
+    qualification: NotRun, budgetRestored: true,
+  }
+
+  /// Constructor rejects a cap smaller than max_num_running_reqs and any
+  /// speculative configuration. The production scheduler is not replaced by default.
+  action admit(baseline: int, cap: int, maxRunning: int): bool = all {
+    s.phase == Constructing, baseline > 0, cap >= maxRunning, maxRunning > 0,
+    s' = { ...s,
+      phase: Ready, baseline: baseline, effective: baseline, cap: cap,
+      maxRunning: maxRunning, speculative: false, budgetRestored: true,
+    },
+  }
+  action rejectSmallCap = all {
+    s.phase == Constructing,
+    s' = { ...s, phase: Rejected, cap: 1, maxRunning: 2 },
+  }
+  action rejectSpeculation = all {
+    s.phase == Constructing,
+    s' = { ...s, phase: Rejected, speculative: true },
+  }
+
+  /// schedule temporarily changes only max_num_scheduled_tokens. The inherited
+  /// async scheduler still owns allocation, ordering and throttle_prefills.
+  action beginSchedule(first: RequestKind, second: RequestKind): bool = all {
+    s.phase == Ready,
+    s' = { ...s,
+      phase: Scheduling, first: first, second: second,
+      decodePresent: genuineDecode(first) or genuineDecode(second),
+      effective: interactiveBudgetKinds(first, second, s.baseline, s.cap),
+      budgetRestored: false,
+    },
+  }
+
+  /// Both normal return and exception execute the Python finally clause.
+  action finishSchedule = all {
+    s.phase == Scheduling,
+    s' = { ...s, phase: Ready, effective: s.baseline, budgetRestored: true },
+  }
+  action failSchedule = all {
+    s.phase == Scheduling,
+    s' = { ...s,
+      phase: Ready, effective: s.baseline, budgetRestored: true,
+      qualification: Failed,
+    },
+  }
+
+  /// Concrete bounded observations from the real qualifier. Invalid counts are
+  /// the number of missing/nonfinite probability or trace conditions observed.
+  action qualify(
+    outputCount: int, firstTokens: int, secondTokens: int,
+    promptInvalid: int, generatedInvalid: int, traceFailures: int, deviceCount: int,
+  ): bool = all {
+    s.phase == Ready,
+    outputCount >= 0, outputCount <= 2,
+    firstTokens >= 0, firstTokens <= 32, secondTokens >= 0, secondTokens <= 32,
+    promptInvalid >= 0, generatedInvalid >= 0, traceFailures >= 0,
+    deviceCount >= 0, deviceCount <= 2,
+    s' = { ...s,
+      phase: if (
+        outputCount == 2 and firstTokens == 32 and secondTokens == 32 and
+        promptInvalid == 0 and generatedInvalid == 0 and traceFailures == 0 and
+        deviceCount == 2
+      ) Qualified else Ready,
+      qualification: if (
+        outputCount == 2 and firstTokens == 32 and secondTokens == 32 and
+        promptInvalid == 0 and generatedInvalid == 0 and traceFailures == 0 and
+        deviceCount == 2
+      ) Passed else Failed,
+    },
+  }
+  action stay = s' = s
+
+  action step = any {
+    admit(2048, 512, 2), admit(128, 512, 2), rejectSmallCap, rejectSpeculation,
+    beginSchedule(Empty, Empty), beginSchedule(ColdPrefill, Empty),
+    beginSchedule(PromptComplete, Empty), beginSchedule(Decode, Empty),
+    beginSchedule(ColdPrefill, Decode), beginSchedule(Recompute, Empty),
+    finishSchedule, failSchedule,
+    qualify(2, 32, 32, 0, 0, 0, 2), qualify(1, 32, 0, 0, 0, 0, 2),
+    qualify(2, 32, 32, 1, 0, 0, 2), qualify(2, 32, 32, 0, 1, 0, 2),
+    qualify(2, 32, 32, 0, 0, 1, 2), qualify(2, 32, 32, 0, 0, 0, 1), stay,
+  }
+
+  val inv = and {
+    s.baseline >= 0, s.effective >= 0, s.cap >= 0, s.maxRunning >= 0,
+    (s.phase == Ready or s.phase == Qualified) implies s.effective == s.baseline,
+    s.phase == Scheduling implies and {
+      s.effective <= s.baseline,
+      s.effective == interactiveBudgetKinds(s.first, s.second, s.baseline, s.cap),
+      not(s.budgetRestored),
+    },
+    s.decodePresent implies (s.phase == Scheduling or s.phase == Ready or s.phase == Qualified),
+    s.qualification == Passed implies s.phase == Qualified,
+  }
+  val cappedDecodeWitness = s.phase == Scheduling and s.decodePresent and s.effective == 512
+  val coldPrefillWitness = s.phase == Scheduling and not(s.decodePresent) and s.effective == s.baseline
+  val smallerBaselineWitness = s.phase == Scheduling and s.decodePresent and s.effective == 128
+  val restoredAfterFailureWitness = s.phase == Ready and s.qualification == Failed and s.budgetRestored
+  val qualificationSuccessWitness = s.phase == Qualified and s.qualification == Passed
+
+  run exactCounterPolicyTest = init.expect(and {
+    interactiveBudget(0, 100, 100, 0, 0, 0, 2048, 512) == 2048,
+    interactiveBudget(1, 100, 100, 0, 0, 0, 2048, 512) == 512,
+    interactiveBudget(1, 99, 100, 0, 0, 0, 2048, 512) == 2048,
+    interactiveBudget(1, 100, 100, 0, 0, 0, 128, 512) == 128,
+    inv,
+  })
+  run emptyQueueKeepsBudgetTest = init.then(admit(2048, 512, 2))
+    .then(beginSchedule(Empty, Empty)).expect(coldPrefillWitness and inv)
+  run emptyQueueRestoresBudgetTest = init.then(admit(2048, 512, 2))
+    .then(beginSchedule(Empty, Empty)).then(finishSchedule)
+    .expect(s.budgetRestored and s.effective == 2048 and inv)
+  run coldPrefillKeepsBudgetTest = init.then(admit(2048, 512, 2))
+    .then(beginSchedule(ColdPrefill, Empty)).expect(coldPrefillWitness and inv)
+  run promptCompleteWithoutOutputKeepsBudgetTest = init.then(admit(2048, 512, 2))
+    .then(beginSchedule(PromptComplete, Empty)).expect(coldPrefillWitness and inv)
+  run mixedDecodeCapsBudgetTest = init.then(admit(2048, 512, 2))
+    .then(beginSchedule(ColdPrefill, Decode)).expect(cappedDecodeWitness and inv)
+  run mixedDecodeRestoresBudgetTest = init.then(admit(2048, 512, 2))
+    .then(beginSchedule(ColdPrefill, Decode)).then(finishSchedule)
+    .expect(s.effective == 2048 and s.budgetRestored and inv)
+  run smallerBaselineNeverRaisedTest = init.then(admit(128, 512, 2))
+    .then(beginSchedule(Decode, Empty)).expect(smallerBaselineWitness and inv)
+  run recomputationIsNotThrottledTest = init.then(admit(2048, 512, 2))
+    .then(beginSchedule(Recompute, Empty)).expect(coldPrefillWitness and inv)
+  run exceptionRestoresBudgetTest = init.then(admit(2048, 512, 2))
+    .then(beginSchedule(Decode, Empty)).then(failSchedule)
+    .expect(restoredAfterFailureWitness and inv)
+  run speculativeModeRejectedTest = init.then(rejectSpeculation)
+    .then(beginSchedule(Decode, Empty).fail())
+  run smallCapRejectedTest = init.then(rejectSmallCap)
+    .then(beginSchedule(Decode, Empty).fail())
+  run qualificationPassTest = init.then(admit(2048, 512, 2))
+    .then(qualify(2, 32, 32, 0, 0, 0, 2)).expect(qualificationSuccessWitness and inv)
+  run qualificationFailureTest = init.then(admit(2048, 512, 2))
+    .then(qualify(2, 32, 32, 1, 0, 0, 2))
+    .expect(s.phase == Ready and s.qualification == Failed and inv)
+}

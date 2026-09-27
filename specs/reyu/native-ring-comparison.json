@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "compile_command": "g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -pthread -Isrc/phase2 specs/reyu/ring_correspondence.cpp src/phase2/shared_ring.cpp -o /tmp/shooting-brake-ring-correspondence",
+  "run_command": "/tmp/shooting-brake-ring-correspondence",
+  "compile_returncode": 0,
+  "run_returncode": 0,
+  "observed_results": {
+    "successAndSafeReuseTest": "matched",
+    "preclaimCancellationTombstoneTest": "matched",
+    "postclaimDeadlineQuarantineTest": "matched-cancel-variant",
+    "staleCompletionNeverExposesOutputTest": "matched",
+    "retirementRequiresFreshGenerationTest": "matched"
+  },
+  "limitations": [
+    "Sequential CPU API scenarios, not concurrency stress",
+    "Post-claim quarantine exercised by cancellation, not deadline expiry",
+    "No GPU provider or serving integration"
+  ],
+  "sources": [
+    {
+      "path": "src/phase2/shared_ring.cpp",
+      "sha256": "c4874b46e1a0fdf74b457b91310ca54ac73347a50704e814524179c6196728b2"
+    },
+    {
+      "path": "src/phase2/shared_ring.hpp",
+      "sha256": "b3971acf81809f5a716f61aa7faa07da75d08fcb669a6612d30ab87045421e97"
+    },
+    {
+      "path": "specs/reyu/ring_correspondence.cpp",
+      "sha256": "dd7bec1afa56c2f3d3e904b38cd628046fe51c8998ddbad92ffca6f6913c3d6b"
+    }
+  ]
+}

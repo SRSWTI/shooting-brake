@@ -1,0 +1,285 @@
+/// Routed-expert mode selection, remote masking, overlap, release, and joining.
+/// Sources: routed_experts.py::HybridRoutedExperts.forward_modular,
+/// ::_hybrid_forward_modular, ::_b70_issue, ::_b70_take,
+/// ::_b70_issue_graph, ::_b70_take_graph, ::_prefill_forward_offloaded.
+/// Abstraction: experts 0/1/2 stand for CUDA/B70/CPU ownership; tensor values
+/// become contribution identities. Issue/take ordering is retained, while each
+/// CUDA/native numerical kernel is atomic. Doorbell mechanics, placement policy,
+/// and prefill engines are separate branches referenced by the chapter.
+module hybrid {
+  import architecture.* from "./architecture"
+
+  type Mode = Unselected | AllCuda | EagerReference | EagerSync | EagerAsync | GraphHybrid | PrefillHybrid
+  type Phase = Configuring | Ready | Routed | Working | Joined | Failed
+  type State = {
+    mode: Mode,
+    phase: Phase,
+    cudaRoutes: Set[int],
+    remoteRoutes: Set[int],
+    cpuRoutes: Set[int],
+    required: Set[int],
+    issued: Set[int],
+    released: Set[int],
+    valid: Set[int],
+    localDone: bool,
+    localMasked: bool,
+    resultJoined: bool,
+    staticOutput: bool,
+    errorObserved: bool,
+  }
+  pure val ROUTES = Set(0, 1, 2)
+  pure val B70 = 0
+  pure val CPU = 1
+  var s: State
+
+  action init = s' = {
+    mode: Unselected,
+    phase: Configuring,
+    cudaRoutes: Set(),
+    remoteRoutes: Set(),
+    cpuRoutes: Set(),
+    required: Set(),
+    issued: Set(),
+    released: Set(),
+    valid: Set(),
+    localDone: false,
+    localMasked: false,
+    resultJoined: false,
+    staticOutput: false,
+    errorObserved: false,
+  }
+
+  action choose(mode: Mode): bool = all {
+    s.phase == Configuring,
+    mode != Unselected,
+    s' = { ...s, mode: mode, phase: Ready },
+  }
+
+  /// An all-local layer bypasses partitioning and the legacy seam only records it.
+  action routeAllCuda = all {
+    s.phase == Ready,
+    s.mode == AllCuda,
+    s' = { ...s,
+      phase: Routed,
+      cudaRoutes: ROUTES,
+      required: Set(),
+      localMasked: false,
+    },
+  }
+  action finishAllCuda = all {
+    s.phase == Routed,
+    s.mode == AllCuda,
+    s' = { ...s,
+      phase: Joined,
+      localDone: true,
+      resultJoined: true,
+    },
+  }
+
+  /// Route 0 stays local, route 1 is B70-owned, route 2 is CPU-owned only in
+  /// graph/prefill all-out mode. Offloaded weights are excluded from CUDA.
+  action routeHybrid = all {
+    s.phase == Ready,
+    s.mode != AllCuda,
+    s.mode != Unselected,
+    s' = { ...s,
+      phase: Routed,
+      cudaRoutes: Set(0),
+      remoteRoutes: Set(1),
+      cpuRoutes: if (s.mode == GraphHybrid or s.mode == PrefillHybrid) Set(2) else Set(),
+      required: if (s.mode == GraphHybrid or s.mode == PrefillHybrid) Set(B70, CPU) else Set(B70),
+      localMasked: true,
+    },
+  }
+
+  /// Eager reference has no B70 device: the remote mask is recomputed by CUDA.
+  action computeReference = all {
+    s.phase == Routed,
+    s.mode == EagerReference,
+    s.localMasked,
+    s' = { ...s,
+      phase: Joined,
+      localDone: true,
+      issued: Set(B70),
+      released: Set(B70),
+      valid: Set(B70),
+      resultJoined: true,
+      staticOutput: true,
+    },
+  }
+
+  /// Synchronous eager computes local first, then provider.dispatch and joins.
+  action computeLocalSync = all {
+    s.phase == Routed,
+    s.mode == EagerSync,
+    s' = { ...s, phase: Working, localDone: true },
+  }
+  action dispatchSync = all {
+    s.phase == Working,
+    s.mode == EagerSync,
+    s.localDone,
+    s.issued.size() == 0,
+    s' = { ...s,
+      phase: Joined,
+      issued: Set(B70),
+      released: Set(B70),
+      valid: Set(B70),
+      resultJoined: true,
+      staticOutput: true,
+    },
+  }
+
+  /// Asynchronous eager issues every lane before local CUDA, then takes results.
+  action issueAsync = all {
+    s.phase == Routed,
+    s.mode == EagerAsync,
+    s' = { ...s, phase: Working, issued: Set(B70) },
+  }
+  action computeLocalAsync = all {
+    s.phase == Working,
+    s.mode == EagerAsync,
+    s.issued.contains(B70),
+    not(s.localDone),
+    s' = { ...s, localDone: true },
+  }
+  action takeAsync = all {
+    s.phase == Working,
+    s.mode == EagerAsync,
+    s.localDone,
+    s' = { ...s,
+      phase: Joined,
+      released: Set(B70),
+      valid: Set(B70),
+      resultJoined: true,
+      staticOutput: true,
+    },
+  }
+
+  /// Graph mode rings CPU and B70 before local CUDA; captured waits release each
+  /// lane and returned partials are added only after all required completions.
+  action issueGraphRemotes = all {
+    s.phase == Routed,
+    s.mode == GraphHybrid,
+    s' = { ...s, phase: Working, issued: s.required },
+  }
+  action computeLocalGraph = all {
+    s.phase == Working,
+    s.mode == GraphHybrid,
+    s.issued == s.required,
+    s' = { ...s, localDone: true },
+  }
+  action releaseGraph(lane: int, ok: bool): bool = all {
+    s.phase == Working,
+    s.mode == GraphHybrid,
+    s.required.contains(lane),
+    s.issued.contains(lane),
+    not(s.released.contains(lane)),
+    s' = { ...s,
+      released: s.released.union(Set(lane)),
+      valid: if (ok) s.valid.union(Set(lane)) else s.valid,
+    },
+  }
+
+  /// Prefill first computes masked local, then obtains CPU and B70 partials by
+  /// their selected stream/chunk engines. Engine internals are abstract here.
+  action computePrefillLocal = all {
+    s.phase == Routed,
+    s.mode == PrefillHybrid,
+    s' = { ...s, phase: Working, localDone: true, issued: s.required },
+  }
+  action finishPrefillRemotes = all {
+    s.phase == Working,
+    s.mode == PrefillHybrid,
+    s.localDone,
+    s' = { ...s, released: s.required, valid: s.required },
+  }
+
+  action join = all {
+    s.phase == Working,
+    allPartsReleased(s.localDone, s.released, s.required),
+    s' = { ...s,
+      phase: Joined,
+      resultJoined: true,
+      staticOutput: s.mode != GraphHybrid and s.mode != PrefillHybrid,
+    },
+  }
+
+  /// Poller completion can release a captured wait after failure; validity is
+  /// checked later, on the next eager Python-visible forward.
+  action observeReleasedFailure = all {
+    s.phase == Joined,
+    s.valid != s.required,
+    s' = { ...s, phase: Failed, errorObserved: true },
+  }
+
+  /// Large offloaded prefill without graph/Tier-3 fails rather than dropping routes.
+  action rejectUnsafePrefill = all {
+    s.phase == Ready,
+    s.mode == EagerReference or s.mode == EagerSync or s.mode == EagerAsync,
+    s' = { ...s, phase: Failed, errorObserved: true },
+  }
+
+  action stay = s' = s
+  action step = any {
+    choose(AllCuda), choose(EagerReference), choose(EagerSync),
+    choose(EagerAsync), choose(GraphHybrid), choose(PrefillHybrid),
+    routeAllCuda, finishAllCuda, routeHybrid, computeReference,
+    computeLocalSync, dispatchSync, issueAsync, computeLocalAsync, takeAsync,
+    issueGraphRemotes, computeLocalGraph,
+    releaseGraph(B70, true), releaseGraph(B70, false),
+    releaseGraph(CPU, true), releaseGraph(CPU, false),
+    computePrefillLocal, finishPrefillRemotes, join,
+    observeReleasedFailure, rejectUnsafePrefill, stay,
+  }
+
+  val inv = and {
+    s.cudaRoutes.subseteq(ROUTES),
+    s.remoteRoutes.subseteq(ROUTES),
+    s.cpuRoutes.subseteq(ROUTES),
+    disjointOwners(s.cudaRoutes, s.remoteRoutes),
+    disjointOwners(s.cudaRoutes, s.cpuRoutes),
+    disjointOwners(s.remoteRoutes, s.cpuRoutes),
+    s.issued.subseteq(s.required),
+    s.released.subseteq(s.issued),
+    s.valid.subseteq(s.released),
+    s.resultJoined implies s.localDone,
+    s.localMasked implies disjointOwners(s.cudaRoutes, s.remoteRoutes.union(s.cpuRoutes)),
+    s.errorObserved implies s.phase == Failed,
+  }
+  val witnessAllCuda = s.phase == Joined and s.mode == AllCuda and s.resultJoined
+  val witnessMaskedSplit = s.localMasked and s.cudaRoutes == Set(0) and s.remoteRoutes == Set(1)
+  val witnessAsyncJoin = s.phase == Joined and s.mode == EagerAsync and s.valid == Set(B70)
+  val witnessGraphJoin = s.phase == Joined and s.mode == GraphHybrid and s.valid == s.required
+  val witnessPrefillJoin = s.phase == Joined and s.mode == PrefillHybrid and s.valid == s.required
+  val witnessReleasedInvalid = s.resultJoined and s.valid != s.required
+
+  run allCudaPassthroughTest = init.then(choose(AllCuda)).then(routeAllCuda)
+    .then(finishAllCuda).expect(witnessAllCuda and inv)
+  run eagerReferenceMaskJoinTest = init.then(choose(EagerReference))
+    .then(routeHybrid).then(computeReference)
+    .expect(witnessMaskedSplit and inv)
+  run synchronousEagerTest = init.then(choose(EagerSync)).then(routeHybrid)
+    .then(computeLocalSync).then(dispatchSync).expect(s.resultJoined and inv)
+  run asynchronousCannotTakeBeforeLocalTest =
+    init.then(choose(EagerAsync)).then(routeHybrid).then(issueAsync)
+    .then(takeAsync.fail())
+  run asynchronousOverlapTest = init.then(choose(EagerAsync)).then(routeHybrid)
+    .then(issueAsync).then(computeLocalAsync).then(takeAsync)
+    .expect(witnessAsyncJoin and inv)
+  run graphCannotJoinEarlyTest = init.then(choose(GraphHybrid)).then(routeHybrid)
+    .then(issueGraphRemotes).then(computeLocalGraph)
+    .then(releaseGraph(CPU, true)).then(join.fail())
+  run graphHybridJoinTest = init.then(choose(GraphHybrid)).then(routeHybrid)
+    .then(issueGraphRemotes).then(computeLocalGraph)
+    .then(releaseGraph(CPU, true)).then(releaseGraph(B70, true)).then(join)
+    .expect(witnessGraphJoin and inv)
+  run graphFailureReleaseTest = init.then(choose(GraphHybrid)).then(routeHybrid)
+    .then(issueGraphRemotes).then(computeLocalGraph)
+    .then(releaseGraph(B70, false)).then(releaseGraph(CPU, true)).then(join)
+    .then(observeReleasedFailure).expect(s.errorObserved and inv)
+  run prefillPartialJoinTest = init.then(choose(PrefillHybrid)).then(routeHybrid)
+    .then(computePrefillLocal).then(finishPrefillRemotes).then(join)
+    .expect(witnessPrefillJoin and inv)
+  run unsafePrefillRejectedTest = init.then(choose(EagerSync))
+    .then(rejectUnsafePrefill).expect(s.errorObserved and inv)
+}

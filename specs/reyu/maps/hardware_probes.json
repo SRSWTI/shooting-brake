@@ -1,0 +1,390 @@
+{
+  "id": "hardware_probes",
+  "title": "Hardware, transport, worker, and reproduction probes",
+  "models": [
+    {
+      "path": "models/hardware_probes.ryu",
+      "main": "hardware_probes",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessRegisteredHostRoundTrip",
+        "witnessPinnedWithoutValidation",
+        "witnessImportedDmaBuf",
+        "witnessConcurrentQueues",
+        "witnessCommandOrderingFailure",
+        "witnessProviderOracle",
+        "witnessFalsePassRisk",
+        "witnessUnavailableRuntime"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "experiments/attention_decode_probe.py",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["reference_attention", "check_output", "main"],
+      "notes": "Models backend admission, pre-capture and post-replay oracle checks, graph replay ordering and per-backend failure recording. The float64 reference is CUDA-resident, not a CPU implementation; projections, routing, transport, scheduling and HTTP are excluded."
+    },
+    {
+      "path": "experiments/b13_doorbell_flag_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["cu_check", "summarize", "print_stats", "main"],
+      "notes": "Models one CUDA-mapped allocation containing signal/completion, captured WRITE-then-WAIT ordering, CPU polling and completion publication. A five-second signal timeout ends measurement but still permits return zero."
+    },
+    {
+      "path": "experiments/b13_sweep_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["cu_check", "p50", "p99", "main"],
+      "notes": "Models independently mapped flag pages and synchronized GPU write followed by CPU sweep/prefix scans. This is host scan cost, not concurrent doorbell detection; zero layer count is not validated."
+    },
+    {
+      "path": "experiments/b13_wait_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["summarize", "print_stats", "main"],
+      "notes": "Models identical H2D-kernel-D2H submissions observed by blocking SYCL wait, SYCL status polling, or native zeEventQueryStatus. Native-handle failure omits that arm and all polling is unbounded."
+    },
+    {
+      "path": "experiments/b5_fused_h2d_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["summarize", "row", "main"],
+      "notes": "Models split versus fused host-to-device submissions and event-status completion. It times a kill hypothesis but does not validate bytes; ids and weights are uninitialized and only a kernel prefix is written."
+    },
+    {
+      "path": "experiments/b70_122b_pilot_smoke.py",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["read_bank_planes", "oracle", "main"],
+      "notes": "Models SBINT401 plane extraction, provider load/issue/take, deterministic two-layer dispatch and same-bank float64 CPU oracle with peak-relative threshold. Exceptional paths do not guarantee provider teardown."
+    },
+    {
+      "path": "experiments/b70_b70_dmabuf_control.cpp",
+      "role": "artifact",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": [],
+      "notes": "The tracked .cpp object is entirely NUL bytes and contains no declarations or executable behavior. It is an explicit contradiction/artifact boundary, not evidence for a B70-to-B70 dma-buf control path."
+    },
+    {
+      "path": "experiments/b70_baked_chain_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["GateUpBaked", "W2EpilogueBaked", "row_dot", "main"],
+      "notes": "Models pointer-only native kernel binding and a fixed closed WAIT-reset-kernels-D2H-completion list, including timeout and bit-exact SYCL-reference observation. No per-submit command-list patching occurs."
+    },
+    {
+      "path": "experiments/b70_baked_kernel_ab.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["main"],
+      "notes": "Models shipped baked kernel handles and mixed pointer/u32 bindings against the split SYCL result, plus optional foreign CUDA-pinned H2D/D2H plumbing. Missing CUDA runtime skips only the foreign-host stage."
+    },
+    {
+      "path": "experiments/b70_captured_replay.py",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["extract_row", "main"],
+      "notes": "Models a temporary one-row SBEXP001 bank, captured-route compaction, provider dispatch, health and nonfinite observations, immutable digests and finally-protected shutdown. It has no numerical oracle."
+    },
+    {
+      "path": "experiments/b70_compute_sanity.py",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["bench_matmul", "main"],
+      "notes": "Models XPU availability and timed GEMMs only. The claimed reference remains on XPU, no numerical threshold is enforced, and PASSED is printed unconditionally after available-device execution."
+    },
+    {
+      "path": "experiments/b70_cs_doorbell_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["report", "main"],
+      "notes": "Models zex WAIT/WRITE acceptance, submit-before-ring ordering, host release-store and optional CUDA-DMA ringing. CUDA timeout performs a host rescue so timeouts can still end with process status zero."
+    },
+    {
+      "path": "experiments/b70_cs_harness.py",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["main"],
+      "notes": "Models real provider/poller ABI setup, 47 registered pinned lanes, serial/burst publication, explicit CS arming, wedge replay, signal scrubbing, error accounting and normal stop/destroy. Internal list construction/patching belongs to the provider library."
+    },
+    {
+      "path": "experiments/b70_dispatch_latency.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["bench_launch", "bench_copy", "bench_dispatch", "bench_environment", "bench_int4_graph", "bench_persistent", "bench_queues", "main"],
+      "notes": "Models distinct launch/copy/environment/graph/persistent/queue modes. Default all omits several modes and unknown modes return success; the INT4 graph branch uniquely compares eager replay and a host CPU reference."
+    },
+    {
+      "path": "experiments/b70_dual_card_smoke.py",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["detect_format", "_dequant_nvfp4", "_cpu_nvfp4_partial", "Lane", "fixture", "peak_relative", "main"],
+      "notes": "Models two disjoint provider/poller lanes, CUDA issue-all-before-take-all graph ordering, same-bank CPU oracles, card-isolation sentinels, replay stress, error counters and lane teardown."
+    },
+    {
+      "path": "experiments/b70_dual_queue_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["busy_kernel", "Arm", "main"],
+      "notes": "Models serial, dual in-order and out-of-order dependency chains, endpoint payload checks and an overlap ratio verdict. Timing work buffers are uninitialized and not numerical outputs."
+    },
+    {
+      "path": "experiments/b70_esimd_worker.py",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["main"],
+      "notes": "Models controller-owned shared-memory sequence handoff and output completion. Contrary to its name it never calls the imported ESIMD module, ignores routed expert IDs and runs positional Torch FP16 matmuls."
+    },
+    {
+      "path": "experiments/b70_expert_sycl.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["main"],
+      "notes": "Models synthetic oneMKL MoE timing and printed CPU comparison. The CPU side reuses expert-0 weights for routes 0/1/2 and PASS/CHECK never changes exit status, so it is not an enforced multi-expert oracle."
+    },
+    {
+      "path": "experiments/b70_hostflag_spin_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["queue_group_recon", "main"],
+      "notes": "Models uncached resident-device polling, system-scope acknowledgement, x86 flush/fence publication, abort/guard status and idle/contended arms. A failed busy allocation weakens the contended arm without refusing it."
+    },
+    {
+      "path": "experiments/b70_mem_topology_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["mem_available_gib", "discover", "bandwidth_gib_s", "report_bandwidth", "report_allocation_ladder", "report_concurrent", "report_host_commit", "report_all_cards_then_host", "main"],
+      "notes": "Models per-card/concurrent bandwidth, touched device residency, Linux memory accounting and pageable CPU commitment. Discovery/cleanup limitations and nonfatal allocation refusal remain explicit."
+    },
+    {
+      "path": "experiments/b70_multi_topology.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["median", "h2d_gbps", "main"],
+      "notes": "Models solo asymmetry, concurrent shared-uplink contention, peer capability query and opt-in peer copy, plus the host-mediated baseline. Fewer than two devices returns success without a test."
+    },
+    {
+      "path": "experiments/b70_onednn_nvfp4_bench.sh",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["sizes"],
+      "notes": "Models grouped benchdnn correctness/performance invocation. The commented ref-implementation disqualifier is not enforced and lack of set -e permits an earlier failed pipeline to be masked by the final pipeline."
+    },
+    {
+      "path": "experiments/b70_pcie_bw.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["elapsed_s", "median", "main"],
+      "notes": "Models synchronous pinned-host H2D/D2H sweep and link-band diagnosis. Generic device selection and invalid iteration counts limit hardware identity and statistics."
+    },
+    {
+      "path": "experiments/b70_profile.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["main"],
+      "notes": "Models synthetic profiling and serialized dispatch timing. No output is checked; the nominal fused gate/up phase derives both operands from the same expression."
+    },
+    {
+      "path": "experiments/b70_sycl_zex_interop_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["main"],
+      "notes": "Models zex operations appended to a SYCL-owned immediate list and the load-bearing CCS marker after a possibly BCS D2H. A native command-queue handle is explicitly unavailable for this experiment."
+    },
+    {
+      "path": "experiments/b70_u32_abi_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["MixedArgs", "main"],
+      "notes": "Models declaration-order binding of two pointers and three u32 values and exact output comparison. Native API failures are mostly diagnostic and become fatal only when output differs."
+    },
+    {
+      "path": "experiments/b70_worker.py",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["main"],
+      "notes": "Models controller-owned shared-memory sequence publication, routed random-weight Torch XPU compute, output copy and matching completion. It has no timeout, input bounds, atomics or numerical oracle."
+    },
+    {
+      "path": "experiments/b70_xpu_register_smoke.py",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["TraceEntry", "main"],
+      "notes": "Models real provider/poller registration arms, deterministic repeated dispatch, epsilon replay stability, health/error counters and trace timing. It compares registered versus unregistered staging, not CPU numerical output."
+    },
+    {
+      "path": "experiments/dual_gpu_test.py",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["compute_cuda", "main"],
+      "notes": "Models controller/worker shared-memory sequencing and overlap timing. CPU, CUDA and worker weights are unrelated, B70 output is not combined, and early worker death can skip normal cleanup."
+    },
+    {
+      "path": "experiments/rbar_dmabuf_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["die", "cu_check", "ze_check", "time_copies", "main"],
+      "notes": "Models CUDA VRAM dma-buf export, Level Zero import, full-pattern B70 write provenance, copy/compute-engine timing and pinned-host comparison. Failures are stage-labelled killed outcomes."
+    },
+    {
+      "path": "experiments/repro/bench_nvfp4_vs_mxfp4.py",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["rows_uniform", "build", "bench", "main"],
+      "notes": "Models synchronized throughput for NVFP4, MXFP4 and FP16 storage through one grouped kernel. Operands differ, output is unchecked, and caught per-case failures do not make main fail."
+    },
+    {
+      "path": "experiments/repro/build_device_usm_host_shadow.sh",
+      "role": "build",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": [],
+      "notes": "Self-contained oneAPI build harness for device_usm_host_shadow.cpp; shell has no declared function symbols. It conditionally sources setvars and compiles with icpx -fsycl, but contributes no runtime probe behavior."
+    },
+    {
+      "path": "experiments/repro/device_usm_host_shadow.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["HostMem", "scan_kv", "sample", "report", "main"],
+      "notes": "Models retained optional-touched device-USM chunks and system MemAvailable/MemFree versus process RSS. Non-divisible remainder is ignored and the after-free sample still occurs before queue/context destruction."
+    },
+    {
+      "path": "experiments/repro/l0v2_memset_crash.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["main"],
+      "notes": "Models repeated retained device allocation plus synchronized memset across externally selected adapter/queue modes. Null allocation breaks early but still prints PASS, yielding the modeled requested-versus-completed false-pass witness."
+    },
+    {
+      "path": "experiments/test_b70_int4_path.py",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["pack_s4", "decode_ipex", "load_abis", "dispatch_latency", "main"],
+      "notes": "Models exact converted INT4 layout checks, eight-route same-fixture CPU oracle with FP16 boundaries, cosine/MAE gates, warmed latency and finally-protected provider shutdown."
+    },
+    {
+      "path": "experiments/transport_debug.c",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["main"],
+      "notes": "Models the smallest immediate-list 4-KiB CUDA-pinned-host to Intel-device copy and fail-fast API lifecycle. It validates API completion, not bytes."
+    },
+    {
+      "path": "experiments/transport_debug2.c",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["now_us", "main"],
+      "notes": "Models immediate-list CUDA-device/pinned-host/B70 bounce and per-leg timing. Several sources are uninitialized and no content is checked; fixed enumeration arrays risk overflow."
+    },
+    {
+      "path": "experiments/transport_test.c",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["now_us", "main"],
+      "notes": "Models regular command-list reset/append/close/execute per cross-vendor pinned bounce plus four-leg timing. Success is API retirement; B70 output has no producer and payload is unchecked."
+    },
+    {
+      "path": "experiments/transport_test_v2.c",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["now_us", "main"],
+      "notes": "Models immediate-list successor with copy-group preference, one host sync for the timed L0 pair, individual leg timing and cleanup. Device labels are not enforced and bytes remain unchecked."
+    },
+    {
+      "path": "experiments/xvendor_p2p_probe.cpp",
+      "role": "behavior",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["report_kill", "die", "cu_check", "ze_check", "time_cuda_copy", "time_h2d", "main"],
+      "notes": "Models B70 dma-buf export, CUDA opaque-fd import/pull, full-word provenance, pinned-host comparator and stage-labelled survival. Resource lifetime is largely process exit."
+    },
+    {
+      "path": "tests/pinned_staging_probe/host_bench.cu",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["fill_pattern", "print_row", "main"],
+      "notes": "Models warmed memfd registration, fd/eventfd handoff, CUDA production and go/done reuse, plus private-pinned D2H reference. Full-route timing includes process and three PCIe copies; no payload is checked."
+    },
+    {
+      "path": "tests/pinned_staging_probe/host_side.cu",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["fill_pattern", "send_fd", "main"],
+      "notes": "Models cold memfd creation, portable CUDA registration, deterministic device fill, synchronized D2H, fd transfer and lifetime through provider ack. Ack status/value is ignored and there is no timeout."
+    },
+    {
+      "path": "tests/pinned_staging_probe/provider_bench.cpp",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["check_ze", "print_row", "main"],
+      "notes": "Models warmed provider fd/eventfd ownership, mapped-host H2D/D2H completion and done publication. It performs no payload validation; both nominal private reference event paths submit H2D."
+    },
+    {
+      "path": "tests/pinned_staging_probe/provider_side.cpp",
+      "role": "harness",
+      "models": ["models/hardware_probes.ryu"],
+      "symbols": ["recv_fd", "make_event_pool", "make_event", "main"],
+      "notes": "Models cold ordinary mmap of received memfd, Level Zero H2D/D2H, sparse page-start verification, ack and teardown. It intentionally does not externally import the anonymous memfd and can block the host indefinitely on early failure."
+    }
+  ],
+  "assumptions": [
+    "Probe models are qualification workflows, diagnostics and reproducers; they are not silently promoted into the production serving path.",
+    "Bounded counts 1 through 4 stand for concrete scenario fixtures, not production tensor sizes, layer counts, repetitions or proof over those ranges.",
+    "CUDA, SYCL, Level Zero, XPU, zex, dma-buf, IOMMU, cache coherence and timing effects are atomic external observations whose truth requires the named runtime and physical hardware.",
+    "A completion flag, event, sequence or successful API return does not imply valid bytes or numerical parity; those observations remain separate.",
+    "Generic, first-device or name-substring selection does not qualify an RTX 5090 or B70 unless the source explicitly checks it.",
+    "Unbounded source spins require external forward progress and are not liveness guarantees in this model.",
+    "Process-exit resource reclamation in dma-buf and diagnostic programs is represented as an experiment boundary, not reusable lifecycle quality.",
+    "The tracked b70_b70_dmabuf_control.cpp object is zero-filled and provides no behavior or symbols.",
+    "Pinned-staging files are scratch illustrations, not the qualified Phase-2 ring; their completion and timing claims exclude retries, backpressure and robust failure handling.",
+    "Performance outputs are deployment-specific measurements, not invariant throughput, latency, link width, overlap, or SLO claims."
+  ],
+  "implementation_checks": [
+    {
+      "source": "experiments/test_b70_int4_path.py",
+      "symbol": "main",
+      "description": "CPU-executable differential for exact converted quantized layout and scale values, followed by the same eight-route fixture through a CPU dequantized SwiGLU oracle with FP16 boundaries; hardware dispatch remains optional external evidence."
+    },
+    {
+      "source": "experiments/b70_122b_pilot_smoke.py",
+      "symbol": "oracle",
+      "description": "Using a small extracted SBINT401 fixture, compare the source CPU float64 dequantize/SwiGLU/weighted accumulation against retained expected arrays before requiring actual-provider parity on qualified hardware."
+    },
+    {
+      "source": "tests/pinned_staging_probe/provider_side.cpp",
+      "symbol": "main",
+      "description": "CPU-inspect and full-byte checksum the mapped deterministic pattern before H2D and full readback after D2H; compare with the current sparse page-start check to expose within-page corruption the source can miss."
+    },
+    {
+      "source": "tests/pinned_staging_probe/host_bench.cu",
+      "symbol": "main",
+      "description": "Add a CPU memcpy/checksum measurement over the same shared and private pinned buffers to establish a host-memory floor and localize page/cache/process overhead without calling it peer-to-peer bandwidth."
+    },
+    {
+      "source": "experiments/repro/device_usm_host_shadow.cpp",
+      "symbol": "main",
+      "description": "Repeat the same chunked allocate-touch-retain-free lifecycle with anonymous CPU memory while sampling MemAvailable and RSS, distinguishing ordinary Linux commitment from device-driver buffer-object backing."
+    },
+    {
+      "source": "experiments/repro/l0v2_memset_crash.cpp",
+      "symbol": "main",
+      "description": "Source-inspect and record requested versus actually completed allocations so early null allocation cannot be classified as a full pass; CPU allocation can distinguish generic exhaustion but cannot adjudicate the Level Zero adapter defect."
+    },
+    {
+      "source": "experiments/repro/bench_nvfp4_vs_mxfp4.py",
+      "symbol": "build",
+      "description": "At small seeded shapes, decode each storage format on CPU and compare grouped-GEMM outputs using identical logical weights/activations; keep throughput runs separate because the present random fixtures are not numerical equivalents."
+    },
+    {
+      "source": "experiments/b70_dispatch_latency.cpp",
+      "symbol": "int4_graph_cpu_reference",
+      "description": "Exercise the existing deterministic CPU reference against eager and captured stable-address INT4 graph results, including host-input mutation between replays and the documented static M=1 capture bound."
+    },
+    {
+      "source": "experiments/b70_compute_sanity.py",
+      "symbol": "main",
+      "description": "Source-inspect that the current reference tensors stay on XPU and that no threshold gates PASSED; a genuine CPU comparison must explicitly transfer seeded inputs and compute the reference on CPU."
+    }
+  ]
+}

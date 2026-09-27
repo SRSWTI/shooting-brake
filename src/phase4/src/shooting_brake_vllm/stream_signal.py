@@ -27,14 +27,12 @@ _WAIT_VALUE_EQ = 1
 
 # cuStreamWriteValue32_v2(stream, addr, value, flags)
 _write_fn = _cuda.cuStreamWriteValue32_v2
-_write_fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                      ctypes.c_uint, ctypes.c_uint]
+_write_fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
 _write_fn.restype = ctypes.c_int
 
-# cuStreamWaitValue32_v2(stream, addr, value, flags, type)
+# cuStreamWaitValue32_v2(stream, addr, value, flags)
 _wait_fn = _cuda.cuStreamWaitValue32_v2
-_wait_fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                     ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
+_wait_fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
 _wait_fn.restype = ctypes.c_int
 
 
@@ -61,7 +59,9 @@ def alloc_host_mapped_flag(initial: int = 0) -> tuple[int, int]:
     )
     dev_ptr = ctypes.c_void_p()
     _cudart.cudaHostGetDevicePointer(
-        ctypes.byref(dev_ptr), host_ptr, ctypes.c_uint(0),
+        ctypes.byref(dev_ptr),
+        host_ptr,
+        ctypes.c_uint(0),
     )
     ctypes.c_uint.from_address(host_ptr.value).value = initial
     return host_ptr.value, dev_ptr.value
@@ -98,16 +98,16 @@ def wait_flag(dev_ptr_int: int, target: int) -> None:
     kernel (44μs) finishes before the CUDA MoE kernel (100μs).
     """
     stream = ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
-    _wait_fn(stream, dev_ptr_int, target, 0, _WAIT_VALUE_EQ)
+    _wait_fn(stream, dev_ptr_int, target, _WAIT_VALUE_EQ)
 
 
 # Late import to avoid circular dependency at module load time.
-import torch  # noqa: E402
+import torch
 
 __all__ = [
     "alloc_host_mapped_flag",
     "read_flag",
-    "write_flag_host",
-    "write_flag",
     "wait_flag",
+    "write_flag",
+    "write_flag_host",
 ]

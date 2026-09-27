@@ -1,0 +1,264 @@
+/// Benchmark identity, execution, evidence, and comparison workflows.
+/// Sources: benchmarks/matrix_runner.py::RunConfig, _run_identity, _prepare_run,
+/// _resume_cells, _run_profile; offload_benchmark.py::apply_config_env, run,
+/// run_capacity_frontier; r15_cold_warm_matrix.py::run_pass, main;
+/// pipeline_identity_gate.py::capture, compare; weight_digest.py::compare.
+///
+/// Abstraction and atomicity: JSON canonicalization/SHA-256 is represented by a
+/// bounded positive identity integer. A runner subprocess, one cold/warm pass,
+/// or one in-process offload arm is one action. Tensor values and elapsed times
+/// remain external observations. `resultPresent` is separate from process exit,
+/// because matrix resume calls return_code==0 complete without checking reports.
+module benchmarks {
+  type Workflow = None | Matrix | ColdWarm | Offload | PipelineIdentity
+  type Phase = Empty | Prepared | Running | Recorded | Compared | Rejected
+  type Profile = Constant | Sweep | Poisson
+  type CachePass = NoPass | Cold | Warm
+  type OffloadMode = NoMode | AllCuda | Hybrid | AllOut
+  type Evidence = Missing | Measured | Derived | Inferred
+  type BenchmarkState = {
+    workflow: Workflow,
+    phase: Phase,
+    identity: int,
+    candidateIdentity: int,
+    contextTokens: int,
+    profile: Profile,
+    returnCode: int,
+    processSucceeded: bool,
+    resultPresent: bool,
+    metricsError: bool,
+    cachePass: CachePass,
+    coldDone: bool,
+    warmDone: bool,
+    prefixHitsObserved: bool,
+    promptDriftObserved: bool,
+    mode: OffloadMode,
+    routeEvidence: Evidence,
+    cpuEvidence: Evidence,
+    configMatched: bool,
+    bitwiseEqual: bool,
+  }
+
+  var s: BenchmarkState
+
+  pure def resumeCompatible(storedIdentity: int, candidateIdentity: int): bool =
+    storedIdentity > 0 and storedIdentity == candidateIdentity
+  pure def successfulReturn(returnCode: int): bool = returnCode == 0
+  pure def comparableIdentity(leftIdentity: int, rightIdentity: int): bool =
+    leftIdentity > 0 and leftIdentity == rightIdentity
+  pure def evidencePresent(evidence: Evidence): bool = evidence != Missing
+
+  action init = s' = {
+    workflow: None, phase: Empty, identity: 0, candidateIdentity: 0,
+    contextTokens: 0, profile: Constant, returnCode: -2,
+    processSucceeded: false, resultPresent: false, metricsError: false,
+    cachePass: NoPass, coldDone: false, warmDone: false,
+    prefixHitsObserved: false, promptDriftObserved: false,
+    mode: NoMode, routeEvidence: Missing, cpuEvidence: Missing,
+    configMatched: false, bitwiseEqual: false,
+  }
+
+  /// _prepare_run exclusively creates identity/config before HTTP preflight.
+  action prepareMatrix(identity: int): bool = all {
+    s.phase == Empty, identity > 0,
+    s' = { ...s, workflow: Matrix, phase: Prepared, identity: identity,
+      candidateIdentity: identity, configMatched: true },
+  }
+  /// Matching canonical content resumes; operational output paths are excluded.
+  action resumeMatrix(candidateIdentity: int): bool = all {
+    s.workflow == Matrix, s.phase == Prepared,
+    resumeCompatible(s.identity, candidateIdentity),
+    s' = { ...s, candidateIdentity: candidateIdentity, configMatched: true },
+  }
+  /// Mismatch is rejected before metrics/network activity and preserves evidence.
+  action rejectMatrixResume(candidateIdentity: int): bool = all {
+    s.workflow == Matrix, s.phase == Prepared,
+    not(resumeCompatible(s.identity, candidateIdentity)),
+    s' = { ...s, phase: Rejected, candidateIdentity: candidateIdentity,
+      configMatched: false },
+  }
+  action beginMatrixCell(contextTokens: int, profile: Profile): bool = all {
+    s.workflow == Matrix, s.phase == Prepared, contextTokens > 0,
+    s' = { ...s, phase: Running, contextTokens: contextTokens, profile: profile,
+      returnCode: -2, processSucceeded: false, resultPresent: false,
+      metricsError: false },
+  }
+  /// Metric scrape errors are appended as evidence records and do not fail GuideLLM.
+  action observeMetricsError = all {
+    s.workflow == Matrix, s.phase == Running,
+    s' = { ...s, metricsError: true },
+  }
+  /// A null/in-progress manifest is abstracted as -1; nonzero is retryable failure.
+  action finishMatrixCell(returnCode: int, resultPresent: bool): bool = all {
+    s.workflow == Matrix, s.phase == Running, returnCode >= -1,
+    s' = { ...s, phase: Recorded, returnCode: returnCode,
+      processSucceeded: successfulReturn(returnCode), resultPresent: resultPresent },
+  }
+  action retryMatrixCell = all {
+    s.workflow == Matrix, s.phase == Recorded, not(s.processSucceeded),
+    s' = { ...s, phase: Running, returnCode: -2, resultPresent: false,
+      metricsError: false },
+  }
+
+  /// Here cold/warm means prefix-cache miss/repeat, never the CPU cold tier.
+  action prepareColdWarm(identity: int, contextTokens: int): bool = all {
+    s.phase == Empty, identity > 0, contextTokens > 0,
+    s' = { ...s, workflow: ColdWarm, phase: Prepared, identity: identity,
+      candidateIdentity: identity, contextTokens: contextTokens,
+      configMatched: true },
+  }
+  action beginCold = all {
+    s.workflow == ColdWarm, s.phase == Prepared, not(s.coldDone),
+    s' = { ...s, phase: Running, cachePass: Cold },
+  }
+  /// Source records request errors, cold hits, and prompt drift but does not reject.
+  action recordCold(ok: bool, prefixHits: bool, promptDrift: bool): bool = all {
+    s.workflow == ColdWarm, s.phase == Running, s.cachePass == Cold,
+    s' = { ...s, phase: Recorded, coldDone: true,
+      processSucceeded: ok, prefixHitsObserved: prefixHits,
+      promptDriftObserved: promptDrift, routeEvidence: if (ok) Measured else Missing },
+  }
+  action beginWarm = all {
+    s.workflow == ColdWarm, s.phase == Recorded, s.coldDone, not(s.warmDone),
+    s' = { ...s, phase: Running, cachePass: Warm, processSucceeded: false },
+  }
+  action recordWarm(ok: bool): bool = all {
+    s.workflow == ColdWarm, s.phase == Running, s.cachePass == Warm,
+    s' = { ...s, phase: Recorded, warmDone: true, processSucceeded: ok,
+      routeEvidence: if (ok) Measured else s.routeEvidence },
+  }
+  /// Resume keys only context+concurrency in source; this action exposes that a
+  /// different full configuration can still be compared/resumed positionally.
+  action compareColdWarm(candidateIdentity: int): bool = all {
+    s.workflow == ColdWarm, s.phase == Recorded, s.coldDone, s.warmDone,
+    s' = { ...s, phase: Compared, candidateIdentity: candidateIdentity,
+      configMatched: comparableIdentity(s.identity, candidateIdentity) },
+  }
+
+  /// Construction-time modes: all-out is CUDA+B70+CPU; CPU is opt-in in the sweep.
+  action prepareOffload(identity: int, mode: OffloadMode): bool = all {
+    s.phase == Empty, identity > 0, mode != NoMode,
+    s' = { ...s, workflow: Offload, phase: Prepared, identity: identity,
+      candidateIdentity: identity, mode: mode, configMatched: true },
+  }
+  action beginOffload = all {
+    s.workflow == Offload, s.phase == Prepared,
+    s' = { ...s, phase: Running },
+  }
+  /// Frontier exceptions/zero-output terminate collection without a distinct
+  /// failure artifact; ok=false therefore stays a recorded incomplete arm.
+  action recordOffload(ok: bool, routesObserved: bool, cpuObserved: bool): bool = all {
+    s.workflow == Offload, s.phase == Running,
+    not(cpuObserved) or s.mode == AllOut,
+    s' = { ...s, phase: Recorded, processSucceeded: ok,
+      resultPresent: true,
+      routeEvidence: if (routesObserved) Measured else Missing,
+      cpuEvidence: if (cpuObserved) Measured else Missing },
+  }
+  /// Existing reducers permit unmatched artifacts and derive ratios anyway.
+  action compareOffload(candidateIdentity: int): bool = all {
+    s.workflow == Offload, s.phase == Recorded,
+    s' = { ...s, phase: Compared, candidateIdentity: candidateIdentity,
+      configMatched: comparableIdentity(s.identity, candidateIdentity) },
+  }
+
+  action preparePipelineIdentity(identity: int): bool = all {
+    s.phase == Empty, identity > 0,
+    s' = { ...s, workflow: PipelineIdentity, phase: Prepared,
+      identity: identity, candidateIdentity: identity, configMatched: true },
+  }
+  action beginPipelineCapture = all {
+    s.workflow == PipelineIdentity, s.phase == Prepared,
+    s' = { ...s, phase: Running },
+  }
+  /// compare() enforces pairwise bytes only; the documented three-run envelope
+  /// is not implemented and is deliberately not inferred here.
+  action comparePipelinePair(bitwiseEqual: bool): bool = all {
+    s.workflow == PipelineIdentity, s.phase == Running,
+    s' = { ...s, phase: Compared, bitwiseEqual: bitwiseEqual,
+      processSucceeded: bitwiseEqual, resultPresent: true,
+      routeEvidence: Derived },
+  }
+
+  action stay = s' = s
+  action step = any {
+    prepareMatrix(101), prepareMatrix(202), resumeMatrix(101),
+    rejectMatrixResume(202), beginMatrixCell(1024, Constant),
+    beginMatrixCell(4096, Sweep), beginMatrixCell(8192, Poisson),
+    observeMetricsError, finishMatrixCell(0, true),
+    finishMatrixCell(0, false), finishMatrixCell(1, false),
+    finishMatrixCell(-1, false), retryMatrixCell,
+    prepareColdWarm(301, 4096), beginCold,
+    recordCold(true, false, false), recordCold(true, true, true),
+    recordCold(false, false, false), beginWarm, recordWarm(true),
+    recordWarm(false), compareColdWarm(301), compareColdWarm(302),
+    prepareOffload(401, AllCuda), prepareOffload(401, Hybrid),
+    prepareOffload(401, AllOut), beginOffload,
+    recordOffload(true, true, false), recordOffload(true, true, true),
+    recordOffload(false, false, false), compareOffload(401),
+    compareOffload(402), preparePipelineIdentity(501),
+    beginPipelineCapture, comparePipelinePair(true),
+    comparePipelinePair(false), stay,
+  }
+
+  val inv = and {
+    s.identity >= 0, s.candidateIdentity >= 0, s.contextTokens >= 0,
+    s.phase != Empty implies s.workflow != None,
+    s.phase == Running implies s.workflow != None,
+    s.processSucceeded implies s.phase == Recorded or s.phase == Compared,
+    s.cpuEvidence != Missing implies s.mode == AllOut,
+    s.workflow == Matrix and s.phase == Recorded implies
+      s.processSucceeded == successfulReturn(s.returnCode),
+    s.workflow == ColdWarm and s.warmDone implies s.coldDone,
+    s.workflow == PipelineIdentity and s.phase == Compared implies
+      s.processSucceeded == s.bitwiseEqual,
+  }
+
+  val completedWithoutReportWitness = s.workflow == Matrix and s.phase == Recorded and
+    s.processSucceeded and not(s.resultPresent)
+  val immutableIdentityRejectionWitness = s.workflow == Matrix and s.phase == Rejected and
+    not(s.configMatched)
+  val recordedColdContaminationWitness = s.workflow == ColdWarm and s.coldDone and
+    (s.prefixHitsObserved or s.promptDriftObserved)
+  val unmatchedComparisonWitness = s.phase == Compared and not(s.configMatched)
+  val cpuComparisonEvidenceWitness = s.workflow == Offload and s.mode == AllOut and
+    s.cpuEvidence == Measured
+  val pairwiseIdentityFailureWitness = s.workflow == PipelineIdentity and
+    s.phase == Compared and not(s.bitwiseEqual)
+
+  run matrixSuccessNeedsNoReportTest = init.then(prepareMatrix(101))
+    .then(beginMatrixCell(1024, Constant)).then(finishMatrixCell(0, false))
+    .expect(completedWithoutReportWitness and inv)
+  run matrixMetricErrorIsNonfatalTest = init.then(prepareMatrix(101))
+    .then(beginMatrixCell(4096, Sweep)).then(observeMetricsError)
+    .then(finishMatrixCell(0, true)).expect(s.processSucceeded and s.metricsError and inv)
+  run failedCellRetriesTest = init.then(prepareMatrix(101))
+    .then(beginMatrixCell(8192, Poisson)).then(finishMatrixCell(1, false))
+    .then(retryMatrixCell).expect(s.phase == Running and inv)
+  run fragmentedWrapperIdentityRejectedTest = init.then(prepareMatrix(101))
+    .then(rejectMatrixResume(202)).expect(immutableIdentityRejectionWitness and inv)
+  run matchingResumeTest = init.then(prepareMatrix(101)).then(resumeMatrix(101))
+    .expect(s.configMatched and inv)
+  run coldWarningsDoNotRejectTest = init.then(prepareColdWarm(301, 4096))
+    .then(beginCold).then(recordCold(true, true, true))
+    .expect(recordedColdContaminationWitness and inv)
+    .then(beginWarm).then(recordWarm(true)).then(compareColdWarm(301))
+    .expect(s.configMatched and inv)
+  run coldWarmMismatchedResumeTest = init.then(prepareColdWarm(301, 4096))
+    .then(beginCold).then(recordCold(true, false, false))
+    .then(beginWarm).then(recordWarm(true)).then(compareColdWarm(302))
+    .expect(unmatchedComparisonWitness and inv)
+  run allOutCpuEvidenceTest = init.then(prepareOffload(401, AllOut))
+    .then(beginOffload).then(recordOffload(true, true, true))
+    .expect(cpuComparisonEvidenceWitness and inv)
+    .then(compareOffload(401)).expect(s.configMatched and inv)
+  run offloadReducerDoesNotGateIdentityTest = init.then(prepareOffload(401, Hybrid))
+    .then(beginOffload).then(recordOffload(true, true, false))
+    .then(compareOffload(402)).expect(unmatchedComparisonWitness and inv)
+  run pipelineByteIdentityTest = init.then(preparePipelineIdentity(501))
+    .then(beginPipelineCapture).then(comparePipelinePair(true))
+    .expect(s.processSucceeded and inv)
+  run pipelineEnvelopeIsNotImplementedTest = init.then(preparePipelineIdentity(501))
+    .then(beginPipelineCapture).then(comparePipelinePair(false))
+    .expect(pairwiseIdentityFailureWitness and inv)
+}

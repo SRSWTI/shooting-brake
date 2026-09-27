@@ -1,0 +1,2612 @@
+{
+  "schema_version": 1,
+  "scope": "source hashes, model compilation, concrete runs and sampled invariants",
+  "proof_claim": "None: neither simulation nor source linkage establishes implementation equivalence.",
+  "inventory_files": 427,
+  "branches": 21,
+  "catalog_errors": [],
+  "samples_per_model": 100,
+  "max_steps": 80,
+  "seed": 42,
+  "models": [
+    {
+      "model": "models/admission.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/admission.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7671
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/admission.ryu",
+            "--main",
+            "admission",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-vl7vbcrn/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.9255,
+          "artifact_sha256": "f51da0a250d38ccf09fcf1c6651ca3bfe53dc93303ad790421e1034973b83d48",
+          "artifact_bytes": 2374568,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/admission.ryu",
+            "--main",
+            "admission",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  admission\n    ok nvfp4HybridAdmissionTest passed 1 test(s)\n    ok allCudaMissingBankTest passed 1 test(s)\n    ok pluginDisabledNoopTest passed 1 test(s)\n    ok fileOverrideCannotEnableSkippedPluginTest passed 1 test(s)\n    ok wrongBankGeometryRejectedTest passed 1 test(s)\n    ok int4RequiresExplicitOptInTest passed 1 test(s)\n    ok foreignReplacementRejectedTest passed 1 test(s)\n\n  7 passing (102ms)\n",
+          "stderr": "",
+          "seconds": 0.8441,
+          "passing_scenarios": 7
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/admission.ryu",
+            "--main",
+            "admission",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "registeredWitness",
+            "disabledWitness",
+            "failClosedBankWitness",
+            "conflictWitness"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (117ms at 855 traces/second).\nWitnesses:\nregisteredWitness was witnessed in 32 trace(s) out of 100 explored (32.00%)\ndisabledWitness was witnessed in 0 trace(s) out of 100 explored (0.00%)\nfailClosedBankWitness was witnessed in 0 trace(s) out of 100 explored (0.00%)\nconflictWitness was witnessed in 0 trace(s) out of 100 explored (0.00%)\nUse --seed=0x1b14a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.8046
+        }
+      ]
+    },
+    {
+      "model": "models/launch.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/launch.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6315
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/launch.ryu",
+            "--main",
+            "launch",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-cjfgx8z1/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7433,
+          "artifact_sha256": "f76f4f9b54ac51cadde3534accb0831326c94fbc8d6c596472a499463d79a07b",
+          "artifact_bytes": 1251338,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/launch.ryu",
+            "--main",
+            "launch",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  launch\n    ok productionHealthySmokeTest passed 1 test(s)\n    ok trailingArgumentsWinTest passed 1 test(s)\n    ok healthTimeoutStopsReadinessTest passed 1 test(s)\n    ok failedSmokeStillPrintsBannerTest passed 1 test(s)\n    ok directProfileHasNoHealthGateTest passed 1 test(s)\n\n  5 passing (76ms)\n",
+          "stderr": "",
+          "seconds": 0.6722,
+          "passing_scenarios": 5
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/launch.ryu",
+            "--main",
+            "launch",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "readyWitness",
+            "smokeNotAGateWitness",
+            "timeoutWitness",
+            "precedenceWitness",
+            "sourceContradictionWitness"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (65ms at 1538 traces/second).\nWitnesses:\nreadyWitness was witnessed in 0 trace(s) out of 100 explored (0.00%)\nsmokeNotAGateWitness was witnessed in 8 trace(s) out of 100 explored (8.00%)\ntimeoutWitness was witnessed in 4 trace(s) out of 100 explored (4.00%)\nprecedenceWitness was witnessed in 10 trace(s) out of 100 explored (10.00%)\nsourceContradictionWitness was witnessed in 17 trace(s) out of 100 explored (17.00%)\nUse --seed=0x2a8ca --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.6335
+        }
+      ]
+    },
+    {
+      "model": "models/banks.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/banks.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7694
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/banks.ryu",
+            "--main",
+            "banks",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-_t6wkag3/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.9695,
+          "artifact_sha256": "9faa50cf92ee6f1958f4b6f2460223427492f7d915599fa1c202664269183477",
+          "artifact_bytes": 1653555,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/banks.ryu",
+            "--main",
+            "banks",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  banks\n    ok nvfp4ExtractionTest passed 1 test(s)\n    ok int4ExplicitResidentMapTest passed 1 test(s)\n    ok int4V2QzeroConventionTest passed 1 test(s)\n    ok marlinDirectDestinationEdgeTest passed 1 test(s)\n    ok b12xUnderflowAvoidanceTest passed 1 test(s)\n    ok invalidGeometryTest passed 1 test(s)\n    ok foreignInt4PayloadTest passed 1 test(s)\n    ok rejectedPayloadCannotPublishTest passed 1 test(s)\n    ok nontrivialGidxDisabledTest passed 1 test(s)\n    ok marlinRssGuardTest passed 1 test(s)\n\n  10 passing (167ms)\n",
+          "stderr": "",
+          "seconds": 0.9134,
+          "passing_scenarios": 10
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/banks.ryu",
+            "--main",
+            "banks",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessNVFP4Published",
+            "witnessInt4Published",
+            "witnessMarlinDirectPublication",
+            "witnessB12xScaleFactorization",
+            "witnessRejectedArtifact",
+            "witnessFrozenNVFP4Layout",
+            "witnessTinyInt4Layout"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (82ms at 1220 traces/second).\nWitnesses:\nwitnessNVFP4Published was witnessed in 4 trace(s) out of 100 explored (4.00%)\nwitnessInt4Published was witnessed in 4 trace(s) out of 100 explored (4.00%)\nwitnessMarlinDirectPublication was witnessed in 2 trace(s) out of 100 explored (2.00%)\nwitnessB12xScaleFactorization was witnessed in 2 trace(s) out of 100 explored (2.00%)\nwitnessRejectedArtifact was witnessed in 88 trace(s) out of 100 explored (88.00%)\nwitnessFrozenNVFP4Layout was witnessed in 100 trace(s) out of 100 explored (100.00%)\nwitnessTinyInt4Layout was witnessed in 100 trace(s) out of 100 explored (100.00%)\nUse --seed=0x24bfa --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.8018
+        }
+      ]
+    },
+    {
+      "model": "models/reference.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/reference.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7886
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/reference.ryu",
+            "--main",
+            "reference",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-btpccse_/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.8092,
+          "artifact_sha256": "655f91de4f47abdac84ab4053a8e173826a5c1a75c82a0cf5b404e36d98a4bd6",
+          "artifact_bytes": 1248307,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/reference.ryu",
+            "--main",
+            "reference",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  reference\n    ok authenticatedReferenceTest passed 1 test(s)\n    ok successfulWireBudgetTest passed 1 test(s)\n    ok zeroRemoteNoPublicationTest passed 1 test(s)\n    ok badFixtureDigestTest passed 1 test(s)\n    ok badFixtureCannotBeAuditedTest passed 1 test(s)\n    ok truncatedFixtureTest passed 1 test(s)\n    ok bankRecordMismatchTest passed 1 test(s)\n    ok mismatchedRecordCannotAcceptQualityTest passed 1 test(s)\n    ok qualityThresholdFailureTest passed 1 test(s)\n    ok outputBudgetFailureTest passed 1 test(s)\n    ok splitFailurePreservesPoisonTest passed 1 test(s)\n    ok fusedFailurePreservesPoisonTest passed 1 test(s)\n\n  12 passing (217ms)\n",
+          "stderr": "",
+          "seconds": 0.8646,
+          "passing_scenarios": 12
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/reference.ryu",
+            "--main",
+            "reference",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessAuthenticatedOracle",
+            "witnessAcceptedComparison",
+            "witnessZeroRemoteBypass",
+            "witnessPoisonPreservedFailure",
+            "witnessRejectedProvenance"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (121ms at 826 traces/second).\nWitnesses:\nwitnessAuthenticatedOracle was witnessed in 6 trace(s) out of 100 explored (6.00%)\nwitnessAcceptedComparison was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessZeroRemoteBypass was witnessed in 6 trace(s) out of 100 explored (6.00%)\nwitnessPoisonPreservedFailure was witnessed in 5 trace(s) out of 100 explored (5.00%)\nwitnessRejectedProvenance was witnessed in 50 trace(s) out of 100 explored (50.00%)\nUse --seed=0x1b14a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.769
+        }
+      ]
+    },
+    {
+      "model": "models/benchmarks.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/benchmarks.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6585
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/benchmarks.ryu",
+            "--main",
+            "benchmarks",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-y3mi238q/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.8672,
+          "artifact_sha256": "44c24b685ad8507a7d0dbca62b7e12954e45e67e9856d3ff9757ea781f5c73a9",
+          "artifact_bytes": 2805293,
+          "stdout_omitted_bytes": 131072,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/benchmarks.ryu",
+            "--main",
+            "benchmarks",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  benchmarks\n    ok matrixSuccessNeedsNoReportTest passed 1 test(s)\n    ok matrixMetricErrorIsNonfatalTest passed 1 test(s)\n    ok failedCellRetriesTest passed 1 test(s)\n    ok fragmentedWrapperIdentityRejectedTest passed 1 test(s)\n    ok matchingResumeTest passed 1 test(s)\n    ok coldWarningsDoNotRejectTest passed 1 test(s)\n    ok coldWarmMismatchedResumeTest passed 1 test(s)\n    ok allOutCpuEvidenceTest passed 1 test(s)\n    ok offloadReducerDoesNotGateIdentityTest passed 1 test(s)\n    ok pipelineByteIdentityTest passed 1 test(s)\n    ok pipelineEnvelopeIsNotImplementedTest passed 1 test(s)\n\n  11 passing (200ms)\n",
+          "stderr": "",
+          "seconds": 0.8869,
+          "passing_scenarios": 11
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/benchmarks.ryu",
+            "--main",
+            "benchmarks",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "completedWithoutReportWitness",
+            "immutableIdentityRejectionWitness",
+            "recordedColdContaminationWitness",
+            "unmatchedComparisonWitness",
+            "cpuComparisonEvidenceWitness",
+            "pairwiseIdentityFailureWitness"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (110ms at 909 traces/second).\nWitnesses:\ncompletedWithoutReportWitness was witnessed in 14 trace(s) out of 100 explored (14.00%)\nimmutableIdentityRejectionWitness was witnessed in 5 trace(s) out of 100 explored (5.00%)\nrecordedColdContaminationWitness was witnessed in 7 trace(s) out of 100 explored (7.00%)\nunmatchedComparisonWitness was witnessed in 28 trace(s) out of 100 explored (28.00%)\ncpuComparisonEvidenceWitness was witnessed in 5 trace(s) out of 100 explored (5.00%)\npairwiseIdentityFailureWitness was witnessed in 7 trace(s) out of 100 explored (7.00%)\nUse --seed=0x478da --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.788
+        }
+      ]
+    },
+    {
+      "model": "models/clients.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/clients.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.796
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/clients.ryu",
+            "--main",
+            "clients",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-hd1izhkk/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.968,
+          "artifact_sha256": "180101cfd7739348ec3d6f0a8a4bbdd0ef7d8baab0f27add97a2c149a75f75e2",
+          "artifact_bytes": 2796110,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/clients.ryu",
+            "--main",
+            "clients",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  clients\n    ok validSloRequestTest passed 1 test(s)\n    ok bundledDeliveryInvalidatesItlTest passed 1 test(s)\n    ok missingDoneRejectsMeasurementTest passed 1 test(s)\n    ok partialCellStillHasMeasurementsTest passed 1 test(s)\n    ok chatAcceptsEofTest passed 1 test(s)\n    ok chatFailureRollsBackPendingUserTest passed 1 test(s)\n    ok agentToolErrorIsNormalResultTest passed 1 test(s)\n    ok agentContextTrimRetryTest passed 1 test(s)\n    ok agentTwentyRoundCapTest passed 1 test(s)\n    ok serverReadinessTimeoutTest passed 1 test(s)\n\n  10 passing (225ms)\n",
+          "stderr": "",
+          "seconds": 0.9404,
+          "passing_scenarios": 10
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/clients.ryu",
+            "--main",
+            "clients",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "bundledDeliveryWitness",
+            "missingDoneFailureWitness",
+            "partialMeasurementWitness",
+            "eofAcceptedChatWitness",
+            "reasoningExcludedWitness",
+            "toolErrorAsResultWitness",
+            "contextRetryWitness",
+            "toolCapWitness"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (128ms at 781 traces/second).\nWitnesses:\nbundledDeliveryWitness was witnessed in 12 trace(s) out of 100 explored (12.00%)\nmissingDoneFailureWitness was witnessed in 27 trace(s) out of 100 explored (27.00%)\npartialMeasurementWitness was witnessed in 4 trace(s) out of 100 explored (4.00%)\neofAcceptedChatWitness was witnessed in 8 trace(s) out of 100 explored (8.00%)\nreasoningExcludedWitness was witnessed in 5 trace(s) out of 100 explored (5.00%)\ntoolErrorAsResultWitness was witnessed in 2 trace(s) out of 100 explored (2.00%)\ncontextRetryWitness was witnessed in 4 trace(s) out of 100 explored (4.00%)\ntoolCapWitness was witnessed in 0 trace(s) out of 100 explored (0.00%)\nUse --seed=0x3bf3a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.838
+        }
+      ]
+    },
+    {
+      "model": "models/campaign.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/campaign.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7771
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/campaign.ryu",
+            "--main",
+            "campaign",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-0h7z1lq6/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.8888,
+          "artifact_sha256": "ed232b4989dad16b2a3f5de20f571dc7a1e5ec968ae8cbe66bf4d97b66651fda",
+          "artifact_bytes": 2317194,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/campaign.ryu",
+            "--main",
+            "campaign",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  campaign\n    ok coldProfileSuccessTest passed 1 test(s)\n    ok mixedBundledDeliveryTest passed 1 test(s)\n    ok unprofiledControlWindowTest passed 1 test(s)\n    ok unprofiledZeroActivityTest passed 1 test(s)\n    ok failedHttpIsMissingTest passed 1 test(s)\n    ok shortOutputCannotAcceptTest passed 1 test(s)\n    ok shortOutputRejectedTest passed 1 test(s)\n    ok incompleteTraceCannotAcceptTest passed 1 test(s)\n    ok incompleteTraceRejectedTest passed 1 test(s)\n    ok mixedCannotInjectEarlyTest passed 1 test(s)\n    ok mixedInjectionOrderTest passed 1 test(s)\n    ok invalidConfigurationTest passed 1 test(s)\n    ok intervalAccountingTest passed 1 test(s)\n\n  13 passing (286ms)\n",
+          "stderr": "",
+          "seconds": 0.9344,
+          "passing_scenarios": 13
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/campaign.ryu",
+            "--main",
+            "campaign",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "acceptedCampaign",
+            "missingLatencyWitness",
+            "zeroNativeServiceWitness",
+            "profilerSeparatedWitness",
+            "bundledDeliveryWitness"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (106ms at 943 traces/second).\nWitnesses:\nacceptedCampaign was witnessed in 5 trace(s) out of 100 explored (5.00%)\nmissingLatencyWitness was witnessed in 65 trace(s) out of 100 explored (65.00%)\nzeroNativeServiceWitness was witnessed in 3 trace(s) out of 100 explored (3.00%)\nprofilerSeparatedWitness was witnessed in 34 trace(s) out of 100 explored (34.00%)\nbundledDeliveryWitness was witnessed in 0 trace(s) out of 100 explored (0.00%)\nUse --seed=0x3626a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.8353
+        }
+      ]
+    },
+    {
+      "model": "models/scheduler.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/scheduler.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6026
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/scheduler.ryu",
+            "--main",
+            "scheduler",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-gmcnul62/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6877,
+          "artifact_sha256": "87a7107fef399efe623daa2b28ca9ba662c397a5617209b6af436788369925a6",
+          "artifact_bytes": 1257984,
+          "stdout_omitted_bytes": 131072,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/scheduler.ryu",
+            "--main",
+            "scheduler",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  scheduler\n    ok exactCounterPolicyTest passed 1 test(s)\n    ok emptyQueueKeepsBudgetTest passed 1 test(s)\n    ok emptyQueueRestoresBudgetTest passed 1 test(s)\n    ok coldPrefillKeepsBudgetTest passed 1 test(s)\n    ok promptCompleteWithoutOutputKeepsBudgetTest passed 1 test(s)\n    ok mixedDecodeCapsBudgetTest passed 1 test(s)\n    ok mixedDecodeRestoresBudgetTest passed 1 test(s)\n    ok smallerBaselineNeverRaisedTest passed 1 test(s)\n    ok recomputationIsNotThrottledTest passed 1 test(s)\n    ok exceptionRestoresBudgetTest passed 1 test(s)\n    ok speculativeModeRejectedTest passed 1 test(s)\n    ok smallCapRejectedTest passed 1 test(s)\n    ok qualificationPassTest passed 1 test(s)\n    ok qualificationFailureTest passed 1 test(s)\n\n  14 passing (280ms)\n",
+          "stderr": "",
+          "seconds": 0.7891,
+          "passing_scenarios": 14
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/scheduler.ryu",
+            "--main",
+            "scheduler",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "cappedDecodeWitness",
+            "coldPrefillWitness",
+            "smallerBaselineWitness",
+            "restoredAfterFailureWitness",
+            "qualificationSuccessWitness"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (68ms at 1471 traces/second).\nWitnesses:\ncappedDecodeWitness was witnessed in 20 trace(s) out of 100 explored (20.00%)\ncoldPrefillWitness was witnessed in 42 trace(s) out of 100 explored (42.00%)\nsmallerBaselineWitness was witnessed in 14 trace(s) out of 100 explored (14.00%)\nrestoredAfterFailureWitness was witnessed in 53 trace(s) out of 100 explored (53.00%)\nqualificationSuccessWitness was witnessed in 56 trace(s) out of 100 explored (56.00%)\nUse --seed=0x24bfa --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.6007
+        }
+      ]
+    },
+    {
+      "model": "models/compute.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/compute.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6605
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/compute.ryu",
+            "--main",
+            "compute",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-bu12v2bd/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.8573,
+          "artifact_sha256": "d4fe95b7e514df3dd005e8396c34337d466dac7d4e596e1630114fa04d92f998",
+          "artifact_bytes": 2330035,
+          "stdout_omitted_bytes": 131072,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/compute.ryu",
+            "--main",
+            "compute",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  compute\n    ok nativeAtomicTest passed 1 test(s)\n    ok deterministicReduceTest passed 1 test(s)\n    ok overflowScalingTest passed 1 test(s)\n    ok oneDnnSuccessTest passed 1 test(s)\n    ok oneDnnPermanentDisarmTest passed 1 test(s)\n    ok mxFp4ApproximateTest passed 1 test(s)\n    ok mxFp4AllocationFallbackTest passed 1 test(s)\n    ok unsupportedGroupTest passed 1 test(s)\n    ok cannotGatherBeforeScatterTest passed 1 test(s)\n\n  9 passing (209ms)\n",
+          "stderr": "",
+          "seconds": 0.8468,
+          "passing_scenarios": 9
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/compute.ryu",
+            "--main",
+            "compute",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessNativeAtomic",
+            "witnessDeterministic",
+            "witnessOverflowSafe",
+            "witnessOneDnnDisarmedFallback",
+            "witnessApproximateMxFp4",
+            "witnessUnsupportedShape"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (85ms at 1176 traces/second).\nWitnesses:\nwitnessNativeAtomic was witnessed in 29 trace(s) out of 100 explored (29.00%)\nwitnessDeterministic was witnessed in 31 trace(s) out of 100 explored (31.00%)\nwitnessOverflowSafe was witnessed in 12 trace(s) out of 100 explored (12.00%)\nwitnessOneDnnDisarmedFallback was witnessed in 14 trace(s) out of 100 explored (14.00%)\nwitnessApproximateMxFp4 was witnessed in 11 trace(s) out of 100 explored (11.00%)\nwitnessUnsupportedShape was witnessed in 21 trace(s) out of 100 explored (21.00%)\nUse --seed=0x1d242 --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.6909
+        }
+      ]
+    },
+    {
+      "model": "models/cpu_tier.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/cpu_tier.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7127
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/cpu_tier.ryu",
+            "--main",
+            "cpu_tier",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-9_pwez1e/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.9033,
+          "artifact_sha256": "ddaf00203276b25c62626a6df1688ee5c0b980db0d00ec4fb812b2332038c70d",
+          "artifact_bytes": 2768572,
+          "stdout_omitted_bytes": 131072,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/cpu_tier.ryu",
+            "--main",
+            "cpu_tier",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  cpu_tier\n    ok packedArenaReloadTest passed 1 test(s)\n    ok routedGatherComputeScatterTest passed 1 test(s)\n    ok emptyRoutesReturnZeroTest passed 1 test(s)\n    ok nonresidentRouteIsCountedTest passed 1 test(s)\n    ok cudaStreamingRingLifetimeTest passed 1 test(s)\n    ok pollerCompletionSuccessTest passed 1 test(s)\n    ok pollerFailureStillReleasesTest passed 1 test(s)\n    ok safeShutdownOwnershipTest passed 1 test(s)\n    ok unsafeBorrowShutdownWitnessTest passed 1 test(s)\n    ok obsoleteCudaHelperInactiveTest passed 1 test(s)\n\n  10 passing (163ms)\n",
+          "stderr": "",
+          "seconds": 0.802,
+          "passing_scenarios": 10
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/cpu_tier.ryu",
+            "--main",
+            "cpu_tier",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessPackedResident",
+            "witnessEmptyRouteZero",
+            "witnessSkippedNonresident",
+            "witnessStreamedResult",
+            "witnessPollerSuccess",
+            "witnessReleasedFailure",
+            "witnessLifetimeViolation",
+            "witnessObsoleteHelperInactive"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (116ms at 862 traces/second).\nWitnesses:\nwitnessPackedResident was witnessed in 31 trace(s) out of 100 explored (31.00%)\nwitnessEmptyRouteZero was witnessed in 37 trace(s) out of 100 explored (37.00%)\nwitnessSkippedNonresident was witnessed in 14 trace(s) out of 100 explored (14.00%)\nwitnessStreamedResult was witnessed in 10 trace(s) out of 100 explored (10.00%)\nwitnessPollerSuccess was witnessed in 2 trace(s) out of 100 explored (2.00%)\nwitnessReleasedFailure was witnessed in 0 trace(s) out of 100 explored (0.00%)\nwitnessLifetimeViolation was witnessed in 79 trace(s) out of 100 explored (79.00%)\nwitnessObsoleteHelperInactive was witnessed in 100 trace(s) out of 100 explored (100.00%)\nUse --seed=0x478da --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.7371
+        }
+      ]
+    },
+    {
+      "model": "models/doorbell.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/doorbell.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6638
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/doorbell.ryu",
+            "--main",
+            "doorbell",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-ms35k957/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7321,
+          "artifact_sha256": "3ad2888000612019d657b9aaeea9a511d992ce9bb30edb40430ae006a1f90adc",
+          "artifact_bytes": 1355504,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/doorbell.ryu",
+            "--main",
+            "doorbell",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  doorbell\n    ok twoLaneInFlightWitnessTest passed 1 test(s)\n    ok twoLaneInterleavingTest passed 1 test(s)\n    ok issueFailureReleaseWitnessTest passed 1 test(s)\n    ok issueFailureStaleCopyTest passed 1 test(s)\n    ok issueFailureReleasesTest passed 1 test(s)\n    ok takeFailureReleasesTest passed 1 test(s)\n    ok noPrematureReuseTest passed 1 test(s)\n    ok noPrematureResetTest passed 1 test(s)\n    ok exactCompletionValueTest passed 1 test(s)\n\n  9 passing (174ms)\n",
+          "stderr": "",
+          "seconds": 0.7625,
+          "passing_scenarios": 9
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/doorbell.ryu",
+            "--main",
+            "doorbell",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessBothLanesInFlight",
+            "witnessReleasedFailure",
+            "witnessErrorNotYetObserved",
+            "witnessReusable"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (97ms at 1031 traces/second).\nWitnesses:\nwitnessBothLanesInFlight was witnessed in 53 trace(s) out of 100 explored (53.00%)\nwitnessReleasedFailure was witnessed in 98 trace(s) out of 100 explored (98.00%)\nwitnessErrorNotYetObserved was witnessed in 100 trace(s) out of 100 explored (100.00%)\nwitnessReusable was witnessed in 100 trace(s) out of 100 explored (100.00%)\nUse --seed=0x2e6aa --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.6774
+        }
+      ]
+    },
+    {
+      "model": "models/command_streamer.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/command_streamer.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.76
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/command_streamer.ryu",
+            "--main",
+            "command_streamer",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-7_bqgnvs/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.8453,
+          "artifact_sha256": "5ca80dea868c5e8d1f1190741b7a6206da6abd2b047728217ae182f165be4b6c",
+          "artifact_bytes": 2629612,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/command_streamer.ryu",
+            "--main",
+            "command_streamer",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  command_streamer\n    ok productionClassicGraphWitnessTest passed 1 test(s)\n    ok productionClassicGraphTest passed 1 test(s)\n    ok chainFenceWitnessTest passed 1 test(s)\n    ok chainCannotRescanBeforeFenceTest passed 1 test(s)\n    ok chainFenceTest passed 1 test(s)\n    ok rideFailureFallbackTest passed 1 test(s)\n    ok bakedHealthyStepTest passed 1 test(s)\n    ok bakedPoisonFallbackTest passed 1 test(s)\n    ok bakedRacePreservationTest passed 1 test(s)\n    ok unarmedFastPathRejectedTest passed 1 test(s)\n    ok unarmedModeStaysClassicTest passed 1 test(s)\n    ok largeBatchBypassesFastPathTest passed 1 test(s)\n    ok bakedWireRecordRejectedTest passed 1 test(s)\n    ok bakedWireMismatchUsesClassicTest passed 1 test(s)\n\n  14 passing (301ms)\n",
+          "stderr": "",
+          "seconds": 0.9818,
+          "passing_scenarios": 14
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/command_streamer.ryu",
+            "--main",
+            "command_streamer",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessGraphWithClassic",
+            "witnessFenceBlocksRescan",
+            "witnessBakedHealthy",
+            "witnessLatchedFallback",
+            "witnessRacingSignalPreserved"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (105ms at 952 traces/second).\nWitnesses:\nwitnessGraphWithClassic was witnessed in 23 trace(s) out of 100 explored (23.00%)\nwitnessFenceBlocksRescan was witnessed in 21 trace(s) out of 100 explored (21.00%)\nwitnessBakedHealthy was witnessed in 0 trace(s) out of 100 explored (0.00%)\nwitnessLatchedFallback was witnessed in 74 trace(s) out of 100 explored (74.00%)\nwitnessRacingSignalPreserved was witnessed in 74 trace(s) out of 100 explored (74.00%)\nUse --seed=0x4b6ba --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.834
+        }
+      ]
+    },
+    {
+      "model": "models/drafter.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/drafter.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.609
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/drafter.ryu",
+            "--main",
+            "drafter",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-rf39esdb/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.8478,
+          "artifact_sha256": "0369b6c87d87a0e6bcb979955974e563dc96c1d40fd44bc68df7ab01495dc447",
+          "artifact_bytes": 3110693,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/drafter.ryu",
+            "--main",
+            "drafter",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  drafter\n    ok acceptedBoundaryTest passed 1 test(s)\n    ok resumeTrainingTest passed 1 test(s)\n    ok malformedCaptureRejectedTest passed 1 test(s)\n    ok missingCaptureRejectedTest passed 1 test(s)\n    ok invalidWarmstartRejectedTest passed 1 test(s)\n    ok allTruncatedRejectedAtTrainingTest passed 1 test(s)\n    ok qualityBelowBoundaryRejectedTest passed 1 test(s)\n    ok trainingRequiresExclusivityTest passed 1 test(s)\n    ok acceptanceRequiresAllGatesTest passed 1 test(s)\n    ok healthyCandidateSuppressesRestoreTest passed 1 test(s)\n    ok restoreFailureVisibleTest passed 1 test(s)\n\n  11 passing (208ms)\n",
+          "stderr": "",
+          "seconds": 0.9147,
+          "passing_scenarios": 11
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/drafter.ryu",
+            "--main",
+            "drafter",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessAccepted",
+            "witnessTruncationEdge",
+            "witnessResearchOnly",
+            "witnessFailure"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (102ms at 980 traces/second).\nWitnesses:\nwitnessAccepted was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessTruncationEdge was witnessed in 10 trace(s) out of 100 explored (10.00%)\nwitnessResearchOnly was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessFailure was witnessed in 99 trace(s) out of 100 explored (99.00%)\nUse --seed=0x3059a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.7731
+        }
+      ]
+    },
+    {
+      "model": "models/hardware_probes.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/hardware_probes.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7089
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/hardware_probes.ryu",
+            "--main",
+            "hardware_probes",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-qdqw4izu/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 1.0085,
+          "artifact_sha256": "4588e33f922c458fd8e8366437f2c17ff756a8cf017bf9943d1ccbbfde31dae5",
+          "artifact_bytes": 4577163,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/hardware_probes.ryu",
+            "--main",
+            "hardware_probes",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  hardware_probes\n    ok mappedHostRoundTripTest passed 1 test(s)\n    ok pinnedScratchDiagnosticTest passed 1 test(s)\n    ok dmaBufPatternTest passed 1 test(s)\n    ok nativeQueueOverlapTest passed 1 test(s)\n    ok commandOrderingFailureTest passed 1 test(s)\n    ok providerCpuOracleTest passed 1 test(s)\n    ok allocationEarlyNullDiagnosticTest passed 1 test(s)\n    ok missingRuntimeTest passed 1 test(s)\n    ok attentionReplayFailureTest passed 1 test(s)\n    ok workerCompletionIsNotParityTest passed 1 test(s)\n\n  10 passing (228ms)\n",
+          "stderr": "",
+          "seconds": 0.9419,
+          "passing_scenarios": 10
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/hardware_probes.ryu",
+            "--main",
+            "hardware_probes",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessRegisteredHostRoundTrip",
+            "witnessPinnedWithoutValidation",
+            "witnessImportedDmaBuf",
+            "witnessConcurrentQueues",
+            "witnessCommandOrderingFailure",
+            "witnessProviderOracle",
+            "witnessFalsePassRisk",
+            "witnessUnavailableRuntime"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (161ms at 621 traces/second).\nWitnesses:\nwitnessRegisteredHostRoundTrip was witnessed in 0 trace(s) out of 100 explored (0.00%)\nwitnessPinnedWithoutValidation was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessImportedDmaBuf was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessConcurrentQueues was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessCommandOrderingFailure was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessProviderOracle was witnessed in 0 trace(s) out of 100 explored (0.00%)\nwitnessFalsePassRisk was witnessed in 0 trace(s) out of 100 explored (0.00%)\nwitnessUnavailableRuntime was witnessed in 39 trace(s) out of 100 explored (39.00%)\nUse --seed=0x79dde --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.8624
+        }
+      ]
+    },
+    {
+      "model": "models/integration.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/integration.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.5289
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/integration.ryu",
+            "--main",
+            "integration",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-5_aafxan/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.5586,
+          "artifact_sha256": "c840d8b4d336329150759cbef6c52a7a1610318a8058f3db6b2b775bfe9c0972",
+          "artifact_bytes": 892013,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/integration.ryu",
+            "--main",
+            "integration",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  integration\n    ok disabledPluginRejectsConstructionTest passed 1 test(s)\n    ok disabledPluginWitnessTest passed 1 test(s)\n    ok registrationAndDelegationTest passed 1 test(s)\n    ok registryConflictRejectsConstructionTest passed 1 test(s)\n    ok registryConflictWitnessTest passed 1 test(s)\n    ok fusedSharedSuccessTest passed 1 test(s)\n    ok fusedSharedFallbackTest passed 1 test(s)\n    ok fusedSharedCannotRearmTest passed 1 test(s)\n    ok incompleteCaptureCannotPersistTest passed 1 test(s)\n    ok hiddenCaptureTest passed 1 test(s)\n\n  10 passing (75ms)\n",
+          "stderr": "",
+          "seconds": 0.5358,
+          "passing_scenarios": 10
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/integration.ryu",
+            "--main",
+            "integration",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessRegistered",
+            "witnessDelegated",
+            "witnessFused",
+            "witnessCaptureWritten",
+            "witnessDisabled"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (118ms at 847 traces/second).\nWitnesses:\nwitnessRegistered was witnessed in 66 trace(s) out of 100 explored (66.00%)\nwitnessDelegated was witnessed in 34 trace(s) out of 100 explored (34.00%)\nwitnessFused was witnessed in 2 trace(s) out of 100 explored (2.00%)\nwitnessCaptureWritten was witnessed in 14 trace(s) out of 100 explored (14.00%)\nwitnessDisabled was witnessed in 19 trace(s) out of 100 explored (19.00%)\nUse --seed=0x1d03a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.5963
+        }
+      ]
+    },
+    {
+      "model": "models/hybrid.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/hybrid.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.618
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/hybrid.ryu",
+            "--main",
+            "hybrid",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-qv2kx8v_/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6749,
+          "artifact_sha256": "533e50706c860b0279eb2644686e303a933df6e69ca2be1d4e419bc0f140599d",
+          "artifact_bytes": 1776413,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/hybrid.ryu",
+            "--main",
+            "hybrid",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  hybrid\n    ok allCudaPassthroughTest passed 1 test(s)\n    ok eagerReferenceMaskJoinTest passed 1 test(s)\n    ok synchronousEagerTest passed 1 test(s)\n    ok asynchronousCannotTakeBeforeLocalTest passed 1 test(s)\n    ok asynchronousOverlapTest passed 1 test(s)\n    ok graphCannotJoinEarlyTest passed 1 test(s)\n    ok graphHybridJoinTest passed 1 test(s)\n    ok graphFailureReleaseTest passed 1 test(s)\n    ok prefillPartialJoinTest passed 1 test(s)\n    ok unsafePrefillRejectedTest passed 1 test(s)\n\n  10 passing (125ms)\n",
+          "stderr": "",
+          "seconds": 0.6806,
+          "passing_scenarios": 10
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/hybrid.ryu",
+            "--main",
+            "hybrid",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessAllCuda",
+            "witnessMaskedSplit",
+            "witnessAsyncJoin",
+            "witnessGraphJoin",
+            "witnessPrefillJoin",
+            "witnessReleasedInvalid"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (88ms at 1136 traces/second).\nWitnesses:\nwitnessAllCuda was witnessed in 10 trace(s) out of 100 explored (10.00%)\nwitnessMaskedSplit was witnessed in 66 trace(s) out of 100 explored (66.00%)\nwitnessAsyncJoin was witnessed in 11 trace(s) out of 100 explored (11.00%)\nwitnessGraphJoin was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessPrefillJoin was witnessed in 15 trace(s) out of 100 explored (15.00%)\nwitnessReleasedInvalid was witnessed in 16 trace(s) out of 100 explored (16.00%)\nUse --seed=0x3437a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.7026
+        }
+      ]
+    },
+    {
+      "model": "models/observability.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/observability.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.8653
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/observability.ryu",
+            "--main",
+            "observability",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-1scc70cr/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 1.2373,
+          "artifact_sha256": "3b2e05bff4176c20f4f403e11a44476a095c3b919b2da305ea92db44901d4b94",
+          "artifact_bytes": 4498773,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/observability.ryu",
+            "--main",
+            "observability",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  observability\n    ok disabledObservabilityTest passed 1 test(s)\n    ok disabledRejectsRecordTest passed 1 test(s)\n    ok malformedTraceRejectedTest passed 1 test(s)\n    ok rejectedTraceCannotCloseTest passed 1 test(s)\n    ok exactRouteSequenceTest passed 1 test(s)\n    ok flushThenResumeTest passed 1 test(s)\n    ok replicatedTopologyTest passed 1 test(s)\n    ok boundarySweepTest passed 1 test(s)\n    ok emptyTraceStateTest passed 1 test(s)\n    ok emptyTraceCannotAnalyzeTest passed 1 test(s)\n    ok seamSamplingAndSkipTest passed 1 test(s)\n    ok calibrationExcludesWarmupTest passed 1 test(s)\n    ok providerGenerationChangeTest passed 1 test(s)\n\n  13 passing (470ms)\n",
+          "stderr": "",
+          "seconds": 1.3291,
+          "passing_scenarios": 13
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/observability.ryu",
+            "--main",
+            "observability",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessDisabled",
+            "witnessExactLocality",
+            "witnessContiguous",
+            "witnessReplicated",
+            "witnessBoundaryThree",
+            "witnessWarmupExcluded",
+            "witnessProviderGenerationRejected",
+            "witnessSeamLifecycle"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (139ms at 719 traces/second).\nWitnesses:\nwitnessDisabled was witnessed in 13 trace(s) out of 100 explored (13.00%)\nwitnessExactLocality was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessContiguous was witnessed in 0 trace(s) out of 100 explored (0.00%)\nwitnessReplicated was witnessed in 0 trace(s) out of 100 explored (0.00%)\nwitnessBoundaryThree was witnessed in 5 trace(s) out of 100 explored (5.00%)\nwitnessWarmupExcluded was witnessed in 14 trace(s) out of 100 explored (14.00%)\nwitnessProviderGenerationRejected was witnessed in 28 trace(s) out of 100 explored (28.00%)\nwitnessSeamLifecycle was witnessed in 5 trace(s) out of 100 explored (5.00%)\nUse --seed=0x3815a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 1.0166
+        }
+      ]
+    },
+    {
+      "model": "models/performance_probes.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/performance_probes.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6641
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/performance_probes.ryu",
+            "--main",
+            "performance_probes",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-1vstu2dd/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.8375,
+          "artifact_sha256": "4c1974300e966fb1a1aed5526f3119412c51fd50c0ccc7db09a96aba77040e0f",
+          "artifact_bytes": 2677477,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/performance_probes.ryu",
+            "--main",
+            "performance_probes",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  performance_probes\n    ok b12xBankSuccessTest passed 1 test(s)\n    ok marlinQualityFailureTest passed 1 test(s)\n    ok advisoryFp8ScreenTest passed 1 test(s)\n    ok exactSseCountFailureTest passed 1 test(s)\n    ok chainAuditSuccessTest passed 1 test(s)\n    ok preemptiveRunnerMissingNullTest passed 1 test(s)\n    ok prefillHarnessMasksChildFailureTest passed 1 test(s)\n    ok strictHarnessPropagatesFailureTest passed 1 test(s)\n    ok dummyCompletionIsNotCorrectnessTest passed 1 test(s)\n    ok shapeAdmissionFailureTest passed 1 test(s)\n\n  10 passing (181ms)\n",
+          "stderr": "",
+          "seconds": 0.7898,
+          "passing_scenarios": 10
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/performance_probes.ryu",
+            "--main",
+            "performance_probes",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "acceptedNumerical",
+            "recordedWithoutAcceptance",
+            "releasedInvalidDummy",
+            "maskedChildFailure",
+            "rejected"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (90ms at 1111 traces/second).\nWitnesses:\nacceptedNumerical was witnessed in 2 trace(s) out of 100 explored (2.00%)\nrecordedWithoutAcceptance was witnessed in 18 trace(s) out of 100 explored (18.00%)\nreleasedInvalidDummy was witnessed in 1 trace(s) out of 100 explored (1.00%)\nmaskedChildFailure was witnessed in 0 trace(s) out of 100 explored (0.00%)\nrejected was witnessed in 78 trace(s) out of 100 explored (78.00%)\nUse --seed=0x3437a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.7118
+        }
+      ]
+    },
+    {
+      "model": "models/placement.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/placement.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7101
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/placement.ryu",
+            "--main",
+            "placement",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-x3r6nsm_/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.79,
+          "artifact_sha256": "0db67288b901260407012d6275f2baed9e1c187bfb2a95618740883728f27c23",
+          "artifact_bytes": 1839559,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/placement.ryu",
+            "--main",
+            "placement",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  placement\n    ok weightedApportionmentFunctionTest passed 1 test(s)\n    ok unweightedOddApportionmentFunctionTest passed 1 test(s)\n    ok allCudaTest passed 1 test(s)\n    ok explicitGroupTest passed 1 test(s)\n    ok weightedLargestRemainderTest passed 1 test(s)\n    ok splitTest passed 1 test(s)\n    ok splitClampTest passed 1 test(s)\n    ok interleavedTest passed 1 test(s)\n    ok interleavedPeriodErrorTest passed 1 test(s)\n    ok subsetActiveTest passed 1 test(s)\n    ok subsetInactiveTest passed 1 test(s)\n    ok allOutDisabledTest passed 1 test(s)\n    ok allOutRequiresArmTest passed 1 test(s)\n    ok allOutSuccessTest passed 1 test(s)\n    ok sparseCapableLayerTest passed 1 test(s)\n    ok sparseExplicitGroupsForcedCudaTest passed 1 test(s)\n    ok sparseFractionalForcedCudaTest passed 1 test(s)\n    ok sparseSplitForcedCudaTest passed 1 test(s)\n    ok sparseInterleavedForcedCudaTest passed 1 test(s)\n    ok allRemoteAcceptedHereTest passed 1 test(s)\n    ok capacityFailureTest passed 1 test(s)\n    ok groupGapFailureTest passed 1 test(s)\n    ok invalidWeightFailureTest passed 1 test(s)\n    ok sparseBankFailureTest passed 1 test(s)\n    ok generationBoundaryTest passed 1 test(s)\n\n  25 passing (381ms)\n",
+          "stderr": "",
+          "seconds": 1.041,
+          "passing_scenarios": 25
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/placement.ryu",
+            "--main",
+            "placement",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessWeightedLargestRemainder",
+            "witnessSparseLayerForcedCuda",
+            "witnessThreeTier",
+            "witnessAllRemotePlacement",
+            "witnessCapacityRejection"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (102ms at 980 traces/second).\nWitnesses:\nwitnessWeightedLargestRemainder was witnessed in 5 trace(s) out of 100 explored (5.00%)\nwitnessSparseLayerForcedCuda was witnessed in 3 trace(s) out of 100 explored (3.00%)\nwitnessThreeTier was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessAllRemotePlacement was witnessed in 7 trace(s) out of 100 explored (7.00%)\nwitnessCapacityRejection was witnessed in 10 trace(s) out of 100 explored (10.00%)\nUse --seed=0x22d0a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.8036
+        }
+      ]
+    },
+    {
+      "model": "models/partition.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/partition.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6169
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/partition.ryu",
+            "--main",
+            "partition",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-5to4qeqi/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6387,
+          "artifact_sha256": "32db53e6ccae1875716e7fa7b60af095c9c68876b5a58b6f71b104ceaa7fd71a",
+          "artifact_bytes": 1117398,
+          "stdout_omitted_bytes": 131072,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/partition.ryu",
+            "--main",
+            "partition",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  partition\n    ok threeWayPartitionTest passed 1 test(s)\n    ok allCudaPassThroughTest passed 1 test(s)\n    ok sparseLayerForcedCudaTest passed 1 test(s)\n    ok sparseLayerOffloadErrorTest passed 1 test(s)\n    ok zeroCudaDummySlotErrorTest passed 1 test(s)\n    ok cannotCompactWithoutCudaTest passed 1 test(s)\n    ok shapeMismatchTest passed 1 test(s)\n    ok mapRankMismatchTest passed 1 test(s)\n    ok uncoveredRouteTest passed 1 test(s)\n    ok doubleOwnedRouteTest passed 1 test(s)\n    ok nonFiniteWeightTest passed 1 test(s)\n\n  11 passing (163ms)\n",
+          "stderr": "",
+          "seconds": 0.7198,
+          "passing_scenarios": 11
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/partition.ryu",
+            "--main",
+            "partition",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessThreeWayPartition",
+            "witnessDummyZeroWeight",
+            "witnessPaddingExcluded",
+            "witnessAllCuda",
+            "witnessNoCudaRejected"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (64ms at 1563 traces/second).\nWitnesses:\nwitnessThreeWayPartition was witnessed in 14 trace(s) out of 100 explored (14.00%)\nwitnessDummyZeroWeight was witnessed in 14 trace(s) out of 100 explored (14.00%)\nwitnessPaddingExcluded was witnessed in 100 trace(s) out of 100 explored (100.00%)\nwitnessAllCuda was witnessed in 15 trace(s) out of 100 explored (15.00%)\nwitnessNoCudaRejected was witnessed in 9 trace(s) out of 100 explored (9.00%)\nUse --seed=0x1736a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.5558
+        }
+      ]
+    },
+    {
+      "model": "models/prefill.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/prefill.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.5117
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/prefill.ryu",
+            "--main",
+            "prefill",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-80f6g0dd/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7216,
+          "artifact_sha256": "1a5e104920427590e357a08bfbdc003f241d45c3a3ad0b663c99be3f995ebf27",
+          "artifact_bytes": 1914258,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/prefill.ryu",
+            "--main",
+            "prefill",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  prefill\n    ok multiCardChunkJoinTest passed 1 test(s)\n    ok cannotReuseBeforeCopyTest passed 1 test(s)\n    ok cannotTakeBeforeAllCardsIssuedTest passed 1 test(s)\n    ok captureFallsBackToDispatchTest passed 1 test(s)\n    ok dramStreamingSuccessTest passed 1 test(s)\n    ok marlinSuccessTest passed 1 test(s)\n    ok b12xAlternativeTest passed 1 test(s)\n    ok cpuNativeChunkFallbackTest passed 1 test(s)\n    ok missingGraphRejectedTest passed 1 test(s)\n\n  9 passing (142ms)\n",
+          "stderr": "",
+          "seconds": 0.7041,
+          "passing_scenarios": 9
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/prefill.ryu",
+            "--main",
+            "prefill",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "chunkCopiedBeforeReuse",
+            "streamedPrefill",
+            "missingGraphWitness",
+            "b12xWitness"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (93ms at 1075 traces/second).\nWitnesses:\nchunkCopiedBeforeReuse was witnessed in 13 trace(s) out of 100 explored (13.00%)\nstreamedPrefill was witnessed in 29 trace(s) out of 100 explored (29.00%)\nmissingGraphWitness was witnessed in 13 trace(s) out of 100 explored (13.00%)\nb12xWitness was witnessed in 12 trace(s) out of 100 explored (12.00%)\nUse --seed=0x2c7ba --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.7306
+        }
+      ]
+    },
+    {
+      "model": "models/residency.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/residency.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.5305
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/residency.ryu",
+            "--main",
+            "residency",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-q7pgj867/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.597,
+          "artifact_sha256": "e4c2989eee304dbb9960e607a10dcb1552e3eeb204f651b3746f10a59a95f615",
+          "artifact_bytes": 1383622,
+          "stdout_omitted_bytes": 131072,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/residency.ryu",
+            "--main",
+            "residency",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  residency\n    ok postLoadSurgeryTest passed 1 test(s)\n    ok cannotSliceBeforeHostCopyTest passed 1 test(s)\n    ok postLoadMissingHybridRejectedTest passed 1 test(s)\n    ok preemptiveBankLoadTest passed 1 test(s)\n    ok preemptiveMissingBankRejectedTest passed 1 test(s)\n    ok cannotServeWithLoaderMapTest passed 1 test(s)\n    ok disconnectedMirrorHelperTest passed 1 test(s)\n    ok mirrorBudgetRefusalTest passed 1 test(s)\n\n  8 passing (96ms)\n",
+          "stderr": "",
+          "seconds": 0.6517,
+          "passing_scenarios": 8
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/residency.ryu",
+            "--main",
+            "residency",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "postLoadWitness",
+            "preemptiveWitness",
+            "mirrorHelperWitness",
+            "prerequisiteErrorWitness"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (74ms at 1351 traces/second).\nWitnesses:\npostLoadWitness was witnessed in 11 trace(s) out of 100 explored (11.00%)\npreemptiveWitness was witnessed in 16 trace(s) out of 100 explored (16.00%)\nmirrorHelperWitness was witnessed in 4 trace(s) out of 100 explored (4.00%)\nprerequisiteErrorWitness was witnessed in 63 trace(s) out of 100 explored (63.00%)\nUse --seed=0x26aea --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.6692
+        }
+      ]
+    },
+    {
+      "model": "models/provider.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/provider.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7348
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/provider.ryu",
+            "--main",
+            "provider",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-fymnaz46/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.9269,
+          "artifact_sha256": "9c49abaf4f3718b29de97e2d87b4f01f3f21d110fa3ea1124388825531be7045",
+          "artifact_bytes": 3884821,
+          "stdout_omitted_bytes": 131072,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/provider.ryu",
+            "--main",
+            "provider",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  provider\n    ok splitSuccessTest passed 1 test(s)\n    ok busyAndStaleIdentityTest passed 1 test(s)\n    ok badOutputBufferKeepsFlightTest passed 1 test(s)\n    ok failurePoisonTest passed 1 test(s)\n    ok groupedAndFusedModesTest passed 1 test(s)\n    ok int4SplitTest passed 1 test(s)\n    ok shapeErrorDoesNotClaimBuffersTest passed 1 test(s)\n    ok nativeQueueTest passed 1 test(s)\n    ok bakedRecoverableBusyTest passed 1 test(s)\n    ok bakedTerminalDisableTest passed 1 test(s)\n    ok bakedQueueFailureTest passed 1 test(s)\n    ok shutdownReleasesRegistrationTest passed 1 test(s)\n    ok rejectedLoadTest passed 1 test(s)\n\n  13 passing (275ms)\n",
+          "stderr": "",
+          "seconds": 0.9794,
+          "passing_scenarios": 13
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/provider.ryu",
+            "--main",
+            "provider",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessSplitPublished",
+            "witnessPoisonPreservesCaller",
+            "witnessBusyStillPending",
+            "witnessGroupedSelected",
+            "witnessInt4Selected",
+            "witnessBakedRecovered",
+            "witnessShutdownReleased"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (109ms at 917 traces/second).\nWitnesses:\nwitnessSplitPublished was witnessed in 27 trace(s) out of 100 explored (27.00%)\nwitnessPoisonPreservesCaller was witnessed in 4 trace(s) out of 100 explored (4.00%)\nwitnessBusyStillPending was witnessed in 29 trace(s) out of 100 explored (29.00%)\nwitnessGroupedSelected was witnessed in 10 trace(s) out of 100 explored (10.00%)\nwitnessInt4Selected was witnessed in 19 trace(s) out of 100 explored (19.00%)\nwitnessBakedRecovered was witnessed in 2 trace(s) out of 100 explored (2.00%)\nwitnessShutdownReleased was witnessed in 100 trace(s) out of 100 explored (100.00%)\nUse --seed=0x43e40 --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.8359
+        }
+      ]
+    },
+    {
+      "model": "models/qualification.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/qualification.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.6579
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/qualification.ryu",
+            "--main",
+            "qualification",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-xxc30qou/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7803,
+          "artifact_sha256": "3219e8b71bf0c452bda39717de6586ecb3a668f633befa911fb06cc87bd31523",
+          "artifact_bytes": 1869588,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/qualification.ryu",
+            "--main",
+            "qualification",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  qualification\n    ok buildCompositionTest passed 1 test(s)\n    ok hybridExactParityTest passed 1 test(s)\n    ok hybridSemanticParityTest passed 1 test(s)\n    ok hybridMarkerRequiredTest passed 1 test(s)\n    ok allOutCpuHealthFailureTest passed 1 test(s)\n    ok preemptiveSuccessTest passed 1 test(s)\n    ok missingBankRefusalTest passed 1 test(s)\n    ok prefillOracleTest passed 1 test(s)\n    ok chunkFreshProcessEdgeTest passed 1 test(s)\n    ok unavailableCrossoverTest passed 1 test(s)\n    ok wireFp16Test passed 1 test(s)\n    ok wireNonOneMeansFp32Test passed 1 test(s)\n    ok groupedScratchReuseFailureTest passed 1 test(s)\n\n  13 passing (229ms)\n",
+          "stderr": "",
+          "seconds": 0.8816,
+          "passing_scenarios": 13
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/qualification.ryu",
+            "--main",
+            "qualification",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessHybridExact",
+            "witnessSemanticFallback",
+            "witnessMissingBankRefused",
+            "witnessGroupedScratchFailure",
+            "witnessUnavailableCrossover"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (112ms at 893 traces/second).\nWitnesses:\nwitnessHybridExact was witnessed in 10 trace(s) out of 100 explored (10.00%)\nwitnessSemanticFallback was witnessed in 10 trace(s) out of 100 explored (10.00%)\nwitnessMissingBankRefused was witnessed in 3 trace(s) out of 100 explored (3.00%)\nwitnessGroupedScratchFailure was witnessed in 3 trace(s) out of 100 explored (3.00%)\nwitnessUnavailableCrossover was witnessed in 4 trace(s) out of 100 explored (4.00%)\nUse --seed=0x3de2a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.7683
+        }
+      ]
+    },
+    {
+      "model": "models/quixi_ops.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/quixi_ops.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7156
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/quixi_ops.ryu",
+            "--main",
+            "quixi_ops",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-k4e_cnrd/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.9364,
+          "artifact_sha256": "4f8797609bc5f1ad203fcd16de20ec0b815d2aff93571adc822a0d7c63e51859",
+          "artifact_bytes": 4551117,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/quixi_ops.ryu",
+            "--main",
+            "quixi_ops",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  quixi_ops\n    ok regluSuccessTest passed 1 test(s)\n    ok denseBestVendorTest passed 1 test(s)\n    ok int4ClampTest passed 1 test(s)\n    ok int4GemvTest passed 1 test(s)\n    ok routeTieUsesLowerExpertTest passed 1 test(s)\n    ok negativeScatterSkipsTest passed 1 test(s)\n    ok boundedNegativeScatterTest passed 1 test(s)\n    ok selectiveScanCellTest passed 1 test(s)\n    ok invalidGdnSlotPreservesStateTest passed 1 test(s)\n    ok fp8BatchNeedsVendorTest passed 1 test(s)\n    ok fp8DecodeNativeTest passed 1 test(s)\n    ok w4a16F32NoWorkTest passed 1 test(s)\n    ok groupedNotAutoSelectedTest passed 1 test(s)\n    ok generatedTurboQuantIsNotImplementedTest passed 1 test(s)\n\n  14 passing (312ms)\n",
+          "stderr": "",
+          "seconds": 0.9992,
+          "passing_scenarios": 14
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/quixi_ops.ryu",
+            "--main",
+            "quixi_ops",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "successWitness",
+            "tieBreakWitness",
+            "skippedIndexWitness",
+            "unsupportedDtypeWitness",
+            "missingVendorWitness",
+            "invalidStateWitness",
+            "unavailableExportWitness"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (107ms at 935 traces/second).\nWitnesses:\nsuccessWitness was witnessed in 100 trace(s) out of 100 explored (100.00%)\ntieBreakWitness was witnessed in 73 trace(s) out of 100 explored (73.00%)\nskippedIndexWitness was witnessed in 68 trace(s) out of 100 explored (68.00%)\nunsupportedDtypeWitness was witnessed in 80 trace(s) out of 100 explored (80.00%)\nmissingVendorWitness was witnessed in 76 trace(s) out of 100 explored (76.00%)\ninvalidStateWitness was witnessed in 82 trace(s) out of 100 explored (82.00%)\nunavailableExportWitness was witnessed in 78 trace(s) out of 100 explored (78.00%)\nUse --seed=0x3248a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.8266
+        }
+      ]
+    },
+    {
+      "model": "models/quixi_runtime.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/quixi_runtime.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.8337
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/quixi_runtime.ryu",
+            "--main",
+            "quixi_runtime",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-fj1_m0gc/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 1.2159,
+          "artifact_sha256": "a571cbd64e48e248657cad5918e50cc387b65e29e0f72aadef7508323fdfda4f",
+          "artifact_bytes": 6412282,
+          "stdout_omitted_bytes": 131072,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/quixi_runtime.ryu",
+            "--main",
+            "quixi_runtime",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  quixi_runtime\n    ok deviceTieAndClampTest passed 1 test(s)\n    ok largerPlatformBeatsLevelZeroTest passed 1 test(s)\n    ok noDeviceQueueErrorTest passed 1 test(s)\n    ok nativeGraphReplayTest passed 1 test(s)\n    ok nativeGraphResetTest passed 1 test(s)\n    ok unsupportedGraphTest passed 1 test(s)\n    ok replayBeforeFinalizeDisabledTest passed 1 test(s)\n    ok replayBeforeFinalizeErrorTest passed 1 test(s)\n    ok resetDuringCaptureDisabledTest passed 1 test(s)\n    ok resetDuringCaptureErrorTest passed 1 test(s)\n    ok recaptureBeforeResetDisabledTest passed 1 test(s)\n    ok recaptureBeforeResetErrorTest passed 1 test(s)\n    ok graphRaiiDestroyHasNoImplicitWaitTest passed 1 test(s)\n    ok torchNegativePoolTest passed 1 test(s)\n    ok torchGraphResetTest passed 1 test(s)\n    ok capturedSplitRequiresPersistentScratchTest passed 1 test(s)\n    ok capturedSplitWithScratchTest passed 1 test(s)\n    ok generatedCanonicalStubTest passed 1 test(s)\n    ok generatedCanonicalDefaultTest passed 1 test(s)\n    ok bindingRejectsNoncontiguousTest passed 1 test(s)\n    ok portableBuildIsNotHardwareEvidenceTest passed 1 test(s)\n    ok missingSyclCompilerRejectedTest passed 1 test(s)\n    ok sharedExtensionAndTorchParityTest passed 1 test(s)\n    ok devKernelPhaseIsEmptySuccessTest passed 1 test(s)\n    ok syclBenchmarkEvidenceTest passed 1 test(s)\n    ok missingBenchmarkFailsTest passed 1 test(s)\n\n  26 passing (833ms)\n",
+          "stderr": "",
+          "seconds": 1.7194,
+          "passing_scenarios": 26
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/quixi_runtime.ryu",
+            "--main",
+            "quixi_runtime",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessLevelZeroTieBreak",
+            "witnessClampedProfileQueue",
+            "witnessGraphReplayComplete",
+            "witnessUnsupportedGraph",
+            "witnessCapturedScratchRejected",
+            "witnessNativeBypassesStubs",
+            "witnessCanonicalStub",
+            "witnessPortableSkip",
+            "witnessDeviceBenchmark"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (120ms at 833 traces/second).\nWitnesses:\nwitnessLevelZeroTieBreak was witnessed in 39 trace(s) out of 100 explored (39.00%)\nwitnessClampedProfileQueue was witnessed in 20 trace(s) out of 100 explored (20.00%)\nwitnessGraphReplayComplete was witnessed in 0 trace(s) out of 100 explored (0.00%)\nwitnessUnsupportedGraph was witnessed in 7 trace(s) out of 100 explored (7.00%)\nwitnessCapturedScratchRejected was witnessed in 10 trace(s) out of 100 explored (10.00%)\nwitnessNativeBypassesStubs was witnessed in 48 trace(s) out of 100 explored (48.00%)\nwitnessCanonicalStub was witnessed in 100 trace(s) out of 100 explored (100.00%)\nwitnessPortableSkip was witnessed in 16 trace(s) out of 100 explored (16.00%)\nwitnessDeviceBenchmark was witnessed in 19 trace(s) out of 100 explored (19.00%)\nUse --seed=0x65f68 --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.9368
+        }
+      ]
+    },
+    {
+      "model": "models/ring.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/ring.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7247
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/ring.ryu",
+            "--main",
+            "ring",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-mrl9jxig/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.9924,
+          "artifact_sha256": "5d2439ae93ff59c28ff1f5c237c4e77768953d4f378bc8976717d35586d8472c",
+          "artifact_bytes": 4403620,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/ring.ryu",
+            "--main",
+            "ring",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  ring\n    ok publishedRequestWitnessTest passed 1 test(s)\n    ok committedOutputWitnessTest passed 1 test(s)\n    ok successAndSafeReuseTest passed 1 test(s)\n    ok malformedPayloadStaysPrivateTest passed 1 test(s)\n    ok preclaimCancellationTombstoneTest passed 1 test(s)\n    ok postclaimDeadlineQuarantineTest passed 1 test(s)\n    ok staleCompletionNeverExposesOutputTest passed 1 test(s)\n    ok malformedDescriptorClosesInOrderTest passed 1 test(s)\n    ok authenticationFailureBlocksTrafficTest passed 1 test(s)\n    ok retirementRequiresFreshGenerationTest passed 1 test(s)\n    ok retiredGenerationWitnessTest passed 1 test(s)\n    ok independentProbeRoundTripTest passed 1 test(s)\n    ok probeCompletedWitnessTest passed 1 test(s)\n    ok probeRejectsBadExtentTest passed 1 test(s)\n\n  14 passing (358ms)\n",
+          "stderr": "",
+          "seconds": 1.0272,
+          "passing_scenarios": 14
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/ring.ryu",
+            "--main",
+            "ring",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessPublished",
+            "witnessCommitted",
+            "witnessQuarantined",
+            "witnessRetired",
+            "witnessProbeComplete"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (82ms at 1220 traces/second).\nWitnesses:\nwitnessPublished was witnessed in 43 trace(s) out of 100 explored (43.00%)\nwitnessCommitted was witnessed in 1 trace(s) out of 100 explored (1.00%)\nwitnessQuarantined was witnessed in 100 trace(s) out of 100 explored (100.00%)\nwitnessRetired was witnessed in 100 trace(s) out of 100 explored (100.00%)\nwitnessProbeComplete was witnessed in 30 trace(s) out of 100 explored (30.00%)\nUse --seed=0x4d5aa --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.7167
+        }
+      ]
+    },
+    {
+      "model": "models/sparse_memory.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/sparse_memory.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.5664
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/sparse_memory.ryu",
+            "--main",
+            "sparse_memory",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-wfmorqot/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.7645,
+          "artifact_sha256": "6436fb00ff9a755c727980219a795cadb671223ea19b4af728e666d9b09e68b4",
+          "artifact_bytes": 2130264,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/sparse_memory.ryu",
+            "--main",
+            "sparse_memory",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  sparse_memory\n    ok peerInt4RetrievalTest passed 1 test(s)\n    ok hostReduceBeforeTransferTest passed 1 test(s)\n    ok invalidShapeStopsSelectionTest passed 1 test(s)\n    ok hostCannotUseDeviceGatherTest passed 1 test(s)\n    ok kernelMismatchIsRejectedTest passed 1 test(s)\n    ok storageRetentionRemainSeparateTest passed 1 test(s)\n    ok distillationProgressionTest passed 1 test(s)\n    ok noDistillationImprovementTest passed 1 test(s)\n    ok inverseDistanceAblationTest passed 1 test(s)\n\n  9 passing (127ms)\n",
+          "stderr": "",
+          "seconds": 0.6907,
+          "passing_scenarios": 9
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/sparse_memory.ryu",
+            "--main",
+            "sparse_memory",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "witnessDeviceRetrieval",
+            "witnessHostReduction",
+            "witnessStorageWithoutRetention",
+            "witnessDistillationSuccess",
+            "witnessInvalidConfiguration"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (82ms at 1220 traces/second).\nWitnesses:\nwitnessDeviceRetrieval was witnessed in 8 trace(s) out of 100 explored (8.00%)\nwitnessHostReduction was witnessed in 13 trace(s) out of 100 explored (13.00%)\nwitnessStorageWithoutRetention was witnessed in 0 trace(s) out of 100 explored (0.00%)\nwitnessDistillationSuccess was witnessed in 0 trace(s) out of 100 explored (0.00%)\nwitnessInvalidConfiguration was witnessed in 69 trace(s) out of 100 explored (69.00%)\nUse --seed=0x3059a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.6736
+        }
+      ]
+    },
+    {
+      "model": "models/system.ryu",
+      "ok": true,
+      "checks": [
+        {
+          "stage": "typecheck",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "typecheck",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/system.ryu"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.4367
+        },
+        {
+          "stage": "compile-json",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "compile",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/system.ryu",
+            "--main",
+            "system",
+            "--target",
+            "json",
+            "--out",
+            "/tmp/shooting-brake-reyu-m2kjuit4/compiled.json"
+          ],
+          "returncode": 0,
+          "stdout": "",
+          "stderr": "",
+          "seconds": 0.4912,
+          "artifact_sha256": "324910a0d4d6f6f46a19d2931743e89ebc7d6b50f48622f1860d9ed0deacf81c",
+          "artifact_bytes": 457612,
+          "stdout_omitted_bytes": 65536,
+          "artifact_retained": false
+        },
+        {
+          "stage": "scenarios",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "test",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/system.ryu",
+            "--main",
+            "system",
+            "--seed",
+            "42",
+            "--max-samples",
+            "1"
+          ],
+          "returncode": 0,
+          "stdout": "\n  system\n    ok concurrentJoinTest passed 1 test(s)\n    ok failedCompletionIsNotSuccessTest passed 1 test(s)\n    ok cannotJoinEarlyTest passed 1 test(s)\n    ok nextInvocationClearsObservationsTest passed 1 test(s)\n    ok rejectedAdmissionTest passed 1 test(s)\n\n  5 passing (34ms)\n",
+          "stderr": "",
+          "seconds": 0.4681,
+          "passing_scenarios": 5
+        },
+        {
+          "stage": "sampled-invariants",
+          "command": [
+            "/home/shooting-brake007/reyu/bin/reyu",
+            "run",
+            "/home/shooting-brake007/srswti/shooting-brake/specs/reyu/models/system.ryu",
+            "--main",
+            "system",
+            "--invariant",
+            "inv",
+            "--max-samples",
+            "100",
+            "--max-steps",
+            "80",
+            "--seed",
+            "42",
+            "--verbosity",
+            "1",
+            "--witnesses",
+            "successfulJoin",
+            "releasedFailure"
+          ],
+          "returncode": 0,
+          "stdout": "[ok] No violation found (38ms at 2632 traces/second).\nWitnesses:\nsuccessfulJoin was witnessed in 12 trace(s) out of 100 explored (12.00%)\nreleasedFailure was witnessed in 45 trace(s) out of 100 explored (45.00%)\nUse --seed=0x1925a --backend=rust to reproduce.\n",
+          "stderr": "",
+          "seconds": 0.4044
+        }
+      ]
+    }
+  ],
+  "ok": true
+}

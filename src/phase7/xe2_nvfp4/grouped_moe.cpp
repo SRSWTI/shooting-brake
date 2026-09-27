@@ -390,23 +390,51 @@ bool grouped_moe_nvfp4(sycl::queue& q, const sycl::half* act_src,
     }
   }
 
-  // 6. SwiGLU. alpha13 lands here rather than in the kernel: it is constant per
-  //    expert, so it factors out of the dot product entirely.
+  // 6. SwiGLU. Keep the gated values in the first half of g_mid until
+  //    their per-route range is known. Real Jota inputs can exceed 65504
+  //    here even when the weighted final result fits the FP16 result wire.
+  //    Normalize overflowing rows by a power of two and fold the inverse
+  //    transformation into slot_w for the linear down projection/scatter.
+  //    This reuses existing scratch and preserves in-range FP16 rounding.
   q.submit([&](sycl::handler& h) {
-    h.parallel_for(sycl::range<2>(routes, I), [=](sycl::id<2> ij) {
-      const int s = static_cast<int>(ij[0]);
-      const int c = static_cast<int>(ij[1]);
-      if (s >= offs[E]) {
-        return;
-      }
-      const float sc = alpha13[slot_exp[s]];
-      const float a = g_mid[static_cast<std::size_t>(s) * 2 * I + c] * sc;
-      const float b =
-          g_mid[static_cast<std::size_t>(s) * 2 * I + I + c] * sc;
-      const float silu = a / (1.0f + sycl::exp(-a));
-      g_gated[static_cast<std::size_t>(s) * I + c] =
-          static_cast<sycl::half>(silu * b);
-    });
+    constexpr int kThreads = 256;
+    h.parallel_for(
+        sycl::nd_range<1>(
+            sycl::range<1>(static_cast<std::size_t>(routes) * kThreads),
+            sycl::range<1>(kThreads)),
+        [=](sycl::nd_item<1> item) {
+          const int s = static_cast<int>(item.get_group_linear_id());
+          if (s >= offs[E]) {
+            return;
+          }
+          const int lane = static_cast<int>(item.get_local_linear_id());
+          const std::size_t base = static_cast<std::size_t>(s) * 2 * I;
+          const float sc = alpha13[slot_exp[s]];
+          float largest = 0.0f;
+          for (int c = lane; c < I; c += kThreads) {
+            const float a = g_mid[base + c] * sc;
+            const float b = g_mid[base + I + c] * sc;
+            const float gated = (a / (1.0f + sycl::exp(-a))) * b;
+            g_mid[base + c] = gated;
+            largest = sycl::fmax(largest, sycl::fabs(gated));
+          }
+          largest = sycl::reduce_over_group(
+              item.get_group(), largest, sycl::maximum<float>{});
+          int shift = 0;
+          if (sycl::isfinite(largest) && largest > 65504.0f) {
+            shift = sycl::max(0, sycl::ilogb(largest) - 15);
+            if (sycl::ldexp(largest, -shift) > 65504.0f) {
+              ++shift;
+            }
+          }
+          if (lane == 0) {
+            slot_w[s] = sycl::ldexp(slot_w[s], shift);
+          }
+          for (int c = lane; c < I; c += kThreads) {
+            g_gated[static_cast<std::size_t>(s) * I + c] =
+                static_cast<sycl::half>(sycl::ldexp(g_mid[base + c], -shift));
+          }
+        });
   });
 
   // 7. w2: [routes, I] x [E, H, I] -> [routes, H]

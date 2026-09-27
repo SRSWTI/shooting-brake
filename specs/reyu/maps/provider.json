@@ -1,0 +1,199 @@
+{
+  "id": "provider",
+  "title": "Native B70 single-flight provider lifecycle",
+  "models": [
+    {
+      "path": "models/provider.ryu",
+      "main": "provider",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessSplitPublished",
+        "witnessPoisonPreservesCaller",
+        "witnessBusyStillPending",
+        "witnessGroupedSelected",
+        "witnessInt4Selected",
+        "witnessBakedRecovered",
+        "witnessShutdownReleased"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/phase1/Makefile",
+      "role": "build",
+      "models": ["models/provider.ryu"],
+      "symbols": [],
+      "notes": "Build graph for the low-level NVFP4 harness, public provider API harness and stdin control executable; links embedded QuixiCore-XPU. It has no language symbol and does not build b70_provider_int4_chain_test.cpp."
+    },
+    {
+      "path": "src/phase1/b70_provider.hpp",
+      "role": "behavior",
+      "models": ["models/provider.ryu"],
+      "symbols": [
+        "ProviderStatus",
+        "ProviderConfig",
+        "Capability",
+        "Health",
+        "DispatchResult",
+        "B70Provider"
+      ],
+      "notes": "Public lifecycle/status/capability ABI, single-flight issue/take contract, output-wire publication requirement, host-range ownership, memory query, command-streamer alternatives and shutdown."
+    },
+    {
+      "path": "src/phase1/b70_provider.cpp",
+      "role": "behavior",
+      "models": ["models/provider.ryu"],
+      "symbols": [
+        "adopt_nvfp4_bank_geometry",
+        "adopt_int4_bank_geometry",
+        "persistent_device_bytes",
+        "select_b70",
+        "B70Provider::Impl",
+        "B70Provider::load",
+        "B70Provider::capability",
+        "B70Provider::health",
+        "B70Provider::issue",
+        "B70Provider::take",
+        "B70Provider::device_memory",
+        "B70Provider::register_host_range",
+        "B70Provider::cs_step_fence",
+        "B70Provider::issue_cs_chain",
+        "B70Provider::issue_cs_ride",
+        "B70Provider::baked_record_layer",
+        "B70Provider::baked_execute_step",
+        "B70Provider::baked_wait",
+        "B70Provider::baked_disable",
+        "B70Provider::baked_progress_count",
+        "B70Provider::shutdown"
+      ],
+      "notes": "Primary modeled implementation. Exact bank parsing, device selection, persistent ownership, classic single flight, kernel-branch selection, copyout publication, async poison, fail-open telemetry, native queue latches and ordered teardown are modeled; device arithmetic and raw command encoding are explicit external abstractions."
+    },
+    {
+      "path": "src/phase1/b70_provider_main.cpp",
+      "role": "functional",
+      "models": ["models/provider.ryu"],
+      "symbols": [
+        "Options",
+        "write_capability",
+        "write_health",
+        "parse_options",
+        "process_command",
+        "run_control_loop",
+        "main"
+      ],
+      "notes": "Standalone capability/health/shutdown control surface. It does not expose issue/take and its capability JSON omits device_index, device_pci_bdf, output_fp16 and source_expert_ids present in the current C++ Capability ABI."
+    },
+    {
+      "path": "src/phase1/b70_provider_tests.cpp",
+      "role": "harness",
+      "models": ["models/provider.ryu"],
+      "symbols": [
+        "load_golden_reference",
+        "compare_to_golden",
+        "test_loaded_capability_and_health",
+        "test_validation_and_single_flight",
+        "run_repeated_row_cases",
+        "run_duplicate_top8_case",
+        "test_invalid_resident_lists",
+        "test_compact_resident_gather",
+        "test_sequence_bound_copyout_fault",
+        "main"
+      ],
+      "notes": "Public NVFP4 API contract harness for capability, rejection ordering effects, single flight, split/fused boundary, compact residency, allocation stability, caller-sentinel preservation under optional injected poison and idempotent shutdown."
+    },
+    {
+      "path": "src/phase1/b70_provider_int4_chain_test.cpp",
+      "role": "harness",
+      "models": ["models/provider.ryu"],
+      "symbols": [
+        "reject_bad_map",
+        "dequant",
+        "cpu_reference",
+        "compare",
+        "verify_route_partitions",
+        "measure_dispatch",
+        "measure_route_sweep",
+        "validate_capability",
+        "main"
+      ],
+      "notes": "Opt-in int4 qualification and bounded-memory CPU differential oracle. Covers exact embedded source-ID map, compact-route rejection, split result, skipped-route zero, partition additivity, timing and RSS. Present source but absent from the Phase-1 Makefile targets."
+    },
+    {
+      "path": "src/phase1/b70_provider_test.cpp",
+      "role": "harness",
+      "models": ["models/provider.ryu"],
+      "symbols": [
+        "ExpertBankHeader",
+        "find_b70",
+        "main"
+      ],
+      "notes": "Low-level legacy NVFP4/QuixiCore numerical and timing harness that bypasses B70Provider. It models no provider lifecycle; its direct device finder accepts B70 or Arc names, unlike select_b70's Intel+B70 rule."
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/grouped_moe.hpp",
+      "role": "dependency",
+      "models": ["models/provider.ryu"],
+      "symbols": ["grouped_moe_nvfp4"],
+      "notes": "Referenced grouped-prefill operation. The provider model retains acceptance/fallback and output ownership but delegates permutation and compute semantics to the compute branch."
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/ops.hpp",
+      "role": "dependency",
+      "models": ["models/provider.ryu"],
+      "symbols": [
+        "nvfp4_moe_split",
+        "nvfp4_moe_fused",
+        "int4_moe_split",
+        "nvfp4_moe_baked_handles"
+      ],
+      "notes": "Embedded native operation declarations called by the provider. Numerical/kernel internals are delegated to the compute and Quixi runtime models; this model retains family selection and completion effects."
+    }
+  ],
+  "assumptions": [
+    "The finite model uses generation 7, batches up to 128, two abstract baked progress units and cumulative allocation counts; these bounds expose lifecycle behavior and are not production geometry claims.",
+    "A successful load action summarizes all source validation, device selection, persistent allocation and synchronous/asynchronous upload checks; rejectLoad summarizes fail-closed cleanup.",
+    "Tensor values and device commands are abstract, but compact-ID/finite-route validation, M thresholds, exact pending identity, output publication and caller-buffer preservation remain observable.",
+    "The model records Grouped and Int4Split as distinct selected kernels even though DispatchResult::kernel currently reports only split versus fused; this makes an implementation branch explicit without claiming the wire distinguishes it.",
+    "Native CS completion is atomic in the provider model; detailed Level Zero wait/write, marker and replay ordering belongs to command_streamer.ryu.",
+    "A classic dispatch error poisons only that pending result and does not permanently disable the provider. cs_failed and baked_disable are sticky for native modes, while classic issue/take remains an available fallback.",
+    "Registered host memory remains caller-owned and alive until provider use ends; the provider owns only the context registration and releases it on shutdown.",
+    "No result from a hardware-backed harness is asserted by this map; required banks, reference files, SYCL runtime and B70 hardware are external prerequisites."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/phase1/b70_provider_int4_chain_test.cpp",
+      "symbol": "cpu_reference",
+      "description": "Run the existing int4 chain harness on qualified hardware to compare the provider's M=1 top-8 output with the one-record-at-a-time CPU dequant/SwiGLU/down-projection oracle; inspect the 5e-5 peak-relative bound, 5e-6 partition bound and exact all-skipped zero result."
+    },
+    {
+      "source": "src/phase1/b70_provider_tests.cpp",
+      "symbol": "test_validation_and_single_flight",
+      "description": "Inspect or execute the existing API harness to confirm rejected generation/layer/compact IDs do not claim pending state, a second issue is busy, stale takes preserve pending identity, and the exact take retires it."
+    },
+    {
+      "source": "src/phase1/b70_provider_tests.cpp",
+      "symbol": "test_sequence_bound_copyout_fault",
+      "description": "With SHOOTING_BRAKE_ENABLE_TEST_FAULTS, execute the sequence-bound post-kernel fault case and compare caller output plus DispatchResult sentinels before/after wrong-identity and exact poisoned takes."
+    },
+    {
+      "source": "src/phase1/b70_provider_tests.cpp",
+      "symbol": "run_repeated_row_cases",
+      "description": "Compare provider outputs with the frozen CPU-generated golden at M 1,2,4,8,16,32,128 to cover the split/fused boundary using tolerance 1e-6 + 1e-2*abs(expected)."
+    },
+    {
+      "source": "src/phase1/b70_provider_main.cpp",
+      "symbol": "write_capability",
+      "description": "Source-inspect serialized fields against Capability in b70_provider.hpp; verify that output_fp16 and the newer device/source-map fields are not present in this executable's JSON and therefore cannot be used as its wire-width query."
+    },
+    {
+      "source": "src/phase1/b70_provider.cpp",
+      "symbol": "B70Provider::take",
+      "description": "Source-inspect all returns before the final memcpy: wrong identity and short buffer preserve pending state, pending/async device error retires state, and no failing path writes caller output."
+    },
+    {
+      "source": "src/phase1/b70_provider.cpp",
+      "symbol": "B70Provider::shutdown",
+      "description": "Source-inspect release_resources_locked ordering: native/copy queues drain before buffer frees, imported ranges release while context exists, mappings/fds close, pending identity clears, and cumulative allocation telemetry is not decremented."
+    }
+  ]
+}

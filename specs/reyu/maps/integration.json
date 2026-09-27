@@ -1,0 +1,196 @@
+{
+  "id": "integration",
+  "title": "vLLM integration and hybrid routed-expert execution",
+  "models": [
+    {
+      "path": "models/integration.ryu",
+      "main": "integration",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessRegistered",
+        "witnessDelegated",
+        "witnessFused",
+        "witnessCaptureWritten",
+        "witnessDisabled"
+      ]
+    },
+    {
+      "path": "models/hybrid.ryu",
+      "main": "hybrid",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessAllCuda",
+        "witnessMaskedSplit",
+        "witnessAsyncJoin",
+        "witnessGraphJoin",
+        "witnessPrefillJoin",
+        "witnessReleasedInvalid"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/phase4/adapter_parity.py",
+      "role": "harness",
+      "models": ["models/integration.ryu", "models/hybrid.ryu"],
+      "symbols": ["run_case", "main"],
+      "notes": "Live stock versus enabled all-CUDA adapter contract: exact greedy token/text parity; router set drift is diagnostic rather than a gate."
+    },
+    {
+      "path": "src/phase4/adapter_smoke.py",
+      "role": "harness",
+      "models": ["models/integration.ryu", "models/hybrid.ryu"],
+      "symbols": ["main"],
+      "notes": "Live eager harness requiring both OOT replacements and at least one generated output token."
+    },
+    {
+      "path": "src/phase4/graph_aggregation_oracle.py",
+      "role": "harness",
+      "models": ["models/hybrid.ryu"],
+      "symbols": ["fixture", "peak_relative", "main"],
+      "notes": "A-B-A graph freshness, completion/reset ordering, CPU int4 comparison, and exact CUDA-plus-B70 addition intent. Current get_b70_poller/register_layer calls have source-visible API drift and require update before this harness is runnable."
+    },
+    {
+      "path": "src/phase4/int4_aggregation_oracle.py",
+      "role": "functional",
+      "models": ["models/hybrid.ryu"],
+      "symbols": ["_dequant", "_expert_forward", "_cpu_b70_partial", "_error", "main"],
+      "notes": "CPU GPTQ int4/group128 differential, inactive-tier zero checks, and exact saved CUDA+B70 partial joining."
+    },
+    {
+      "path": "src/phase4/int4_aggregation_oracle_test.py",
+      "role": "harness",
+      "models": ["models/hybrid.ryu"],
+      "symbols": ["Int4AggregationOracleTest", "test_k_major_nibbles_zero_point_and_negative_scales", "test_error_reports_exact_sum"],
+      "notes": "CPU checks for nibble order, zero point, signed scales, and identity error metrics."
+    },
+    {
+      "path": "src/phase4/int4_hybrid_enablement_test.py",
+      "role": "harness",
+      "models": ["models/hybrid.ryu"],
+      "symbols": ["Int4HybridPlacementTest", "Int4HybridRejectionTest", "test_cuda_compaction_round_trips_and_remote_ids_become_zero_weight_dummy", "test_dispatch_buffers_use_3072_hidden_geometry"],
+      "notes": "CPU admission, ownership, compaction, dummy-slot masking, buffer geometry, and malformed-bank rejection contract; its fake_vllm_config explicitly does not prove live vLLM APIs."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/expert_bank.py",
+      "role": "functional",
+      "models": ["models/hybrid.ryu"],
+      "symbols": ["ExpertPlanes", "ExpertBank", "Int4ExpertPlanes", "Int4ExpertBank", "open_expert_bank", "global_scale_divisor"],
+      "notes": "Read-only legacy NVFP4 and SBINT401 CPU bank access used by host paths and independent numerical oracles; byte-plane parsing is documented but abstracted by the state model."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/fused_shared.py",
+      "role": "functional",
+      "models": ["models/integration.ryu"],
+      "symbols": ["_MergedNVFP4", "_merge_weight_and_block_scale", "_make_output_rescale", "_build_merged_nvfp4", "install"],
+      "notes": "Opt-in Laguna inference patch that merges compatible NVFP4 gate/up projections, compensates alpha differences, and permanently falls back per module after unsafe layout/runtime failure."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/hidden_capture.py",
+      "role": "functional",
+      "models": ["models/integration.ryu"],
+      "symbols": ["make_capture_request_id", "parse_capture_request_id", "capture_filename", "CaptureAccumulator", "_capture_runner_state", "install"],
+      "notes": "Opt-in Laguna auxiliary-boundary capture, CPU chunk accumulation/truncation, non-finite zeroing, shared flattened view, and atomic SpecForge record publication."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/provider.py",
+      "role": "behavior",
+      "models": ["models/integration.ryu"],
+      "symbols": ["ShootingBrakeExpertProviderClient", "begin_all_cuda", "issue", "take"],
+      "notes": "Historical local-only seam. It counts runner calls, while issue/take deliberately raise; live hybrid dispatch does not pass through this class."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "role": "behavior",
+      "models": ["models/integration.ryu", "models/hybrid.ryu"],
+      "symbols": ["_B70Lane", "HybridRoutedExperts", "forward_modular", "_hybrid_forward_modular", "_b70_partial", "_b70_issue", "_b70_take", "_b70_issue_graph", "_b70_take_graph", "_prefill_forward_offloaded", "_b70_prefill_partial", "_b70_prefill_partial_dispatch", "_cpu_prefill_partial"],
+      "notes": "Primary integration behavior: construction/setup, all-CUDA versus decode/prefill choice, compact remote masking, eager reference/sync/async and graph paths, multi-lane summation, CPU partial addition, stable eager output, and fail-closed unsafe prefill/error observation. Numerical kernels and detailed doorbell/residency mechanisms are abstracted."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/runner.py",
+      "role": "behavior",
+      "models": ["models/integration.ryu"],
+      "symbols": ["HybridMoERunner", "_forward_impl", "_check_nan", "_check_nan_result", "_stabilize_output", "_copy_to_static"],
+      "notes": "Requalification and required-container seam around stock vLLM composition; calls legacy begin_all_cuda and carries optional diagnostics/static-output helpers."
+    },
+    {
+      "path": "src/phase4/tests/test_fused_shared.py",
+      "role": "harness",
+      "models": ["models/integration.ryu"],
+      "symbols": ["test_merged_weight_and_per_half_global_scale_match_two_matmuls"],
+      "notes": "CPU algebra comparison for merged gate/up packed values, block scales, and unequal-alpha correction; does not exercise CUDA custom ops."
+    },
+    {
+      "path": "src/phase4/tests/test_hidden_capture.py",
+      "role": "harness",
+      "models": ["models/integration.ryu"],
+      "symbols": ["test_chunk_accumulation_and_atomic_specforge_serialization", "test_non_capture_request_is_ignored"],
+      "notes": "CPU/filesystem contract for request parsing, truncation, record layout, shared storage, idempotence, atomic part cleanup, and ordinary-request ignore."
+    },
+    {
+      "path": "src/phase6/hybrid_execution_test.py",
+      "role": "harness",
+      "models": ["models/hybrid.ryu"],
+      "symbols": ["run_case", "main"],
+      "notes": "Live eager all-CUDA versus split hybrid CUDA-reference comparison; hybrid marker plus exact greedy tokens are required."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/__init__.py",
+      "role": "dependency",
+      "models": ["models/integration.ryu"],
+      "symbols": ["_patch_force_piecewise", "_patch_nested_causallm_naming", "_patch_nested_quant_ignore", "_patch_cs_doorbell_arming", "_apply_file_env_overrides", "_patch_fused_shared", "_patch_hidden_capture", "register"],
+      "notes": "Referenced registration dependency outside the assigned ownership inventory: owns gate ordering, process-global patches, preemptive hook timing, paired OOT registration, and conflict rejection."
+    }
+  ],
+  "assumptions": [
+    "vLLM calls the registered HybridMoERunner and modular HybridRoutedExperts entrypoints; source notes that a total forward_monolithic bypass cannot be caught inside forward_modular.",
+    "Placement supplies exclusive CUDA, per-B70, and optional CPU ownership; its policy construction is specified by the placement branch.",
+    "Doorbell/poller modules eventually release each issued lane on success or native failure; release is modeled separately from result validity.",
+    "Tensor payloads are abstract contribution identities. Floating-point equivalence is delegated to CPU numerical comparisons and live harnesses, not inferred from the Reyu state machine.",
+    "Prefill/residency modules preserve the same global-expert identity while selecting dispatch, DRAM streaming, Marlin, or B12x; their engine internals are owned by the prefill branch.",
+    "Filesystem os.replace provides the external atomic-publication behavior used by hidden capture.",
+    "No assigned harness, test, build, formatter, linter, GPU workload, or server workload was executed during authoring."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/phase4/int4_aggregation_oracle_test.py",
+      "symbol": "Int4AggregationOracleTest",
+      "description": "CPU-executable check of GPTQ K-major nibble order, zero point 8, negative scales, and exact identity metrics."
+    },
+    {
+      "source": "src/phase4/tests/test_fused_shared.py",
+      "symbol": "test_merged_weight_and_per_half_global_scale_match_two_matmuls",
+      "description": "CPU-executable algebraic differential: merged gate/up weights and alpha rescaling must match two separate matmuls."
+    },
+    {
+      "source": "src/phase4/tests/test_hidden_capture.py",
+      "symbol": "test_chunk_accumulation_and_atomic_specforge_serialization",
+      "description": "CPU/filesystem executable contract for accumulation, truncation, dtypes/shapes, loss mask, shared storage, duplicate idempotence, and atomic publication."
+    },
+    {
+      "source": "src/phase4/int4_hybrid_enablement_test.py",
+      "symbol": "test_cuda_compaction_round_trips_and_remote_ids_become_zero_weight_dummy",
+      "description": "CPU-executable ownership/remap check that remote IDs become valid dummy slot zero only with exactly zero CUDA weight."
+    },
+    {
+      "source": "src/phase4/int4_aggregation_oracle.py",
+      "symbol": "main",
+      "description": "Offline CPU-versus-captured-provider differential for all-B70 and straddled routes plus exact stored partial-sum and inactive-tier-zero checks."
+    },
+    {
+      "source": "src/phase4/graph_aggregation_oracle.py",
+      "symbol": "main",
+      "description": "After reconciling its drifted poller API, compare alternating captured graph outputs with independent CPU int4 references and reject stale-buffer selection."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/provider.py",
+      "symbol": "issue",
+      "description": "Source inspection check: verify the legacy provider seam still raises and is not mistaken for the live hybrid transport."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "symbol": "_hybrid_forward_modular",
+      "description": "Source inspection check: every offloaded mask is excluded from CUDA weights before corresponding B70/CPU partial addition, and every graph issue precedes local CUDA while takes follow it."
+    }
+  ]
+}

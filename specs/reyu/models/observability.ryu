@@ -1,0 +1,504 @@
+/// Route accounting, temporal locality, topology simulation, telemetry, seam
+/// tracing, and all-CUDA route-frequency calibration.
+/// Sources: route_stats.py::RouteCounter, RouteTrace; route_locality.py::analyze_trace;
+/// route_topology.py::simulate_topologies, sweep_boundaries;
+/// telemetry.py::reset_worker_stats, collect_worker_stats;
+/// seam_trace.py::SeamTracer; calibrate_routes.py::run.
+/// Abstraction: tensor copies, file blocks, NumPy reductions, and CUDA events are
+/// atomic at their source-visible commit points. Records are a bounded, validated,
+/// sorted top-2 trace over four experts; the run scenarios provide concrete inputs.
+module observability {
+  type Phase = Dormant | Disabled | Recording | Closed | Analyzed | Rejected
+  type Calibration = CalibrationOff | Warmup | Reset | Measuring | Dumped
+  type Topology = TopologyUnset | Contiguous | Replicated | SingleCard | SweptBoundary
+  type LruState = { recent: int, older: int, hits: int }
+  type State = {
+    phase: Phase,
+    traceEnabled: bool,
+    histogramEnabled: bool,
+    seamEnabled: bool,
+    recordCount: int,
+    pendingRecords: int,
+    durableRecords: int,
+    hasPrevious: bool,
+    lastStep: int,
+    lastRow: int,
+    previousExperts: Set[int],
+    jaccardSixthsSum: int,
+    consecutiveComparisons: int,
+    windowDistinctSum: int,
+    completeWindows: int,
+    lruRecent: int,
+    lruOlder: int,
+    lruRequests: int,
+    lruHits: int,
+    cardARoutes: int,
+    cardBRoutes: int,
+    contiguousCriticalRoutes: int,
+    contiguousCostTenths: int,
+    replicatedCriticalRoutes: int,
+    replicatedCostTenths: int,
+    singleCriticalRoutes: int,
+    singleCostTenths: int,
+    boundaryThreeCriticalRoutes: int,
+    boundaryThreeCostTenths: int,
+    topology: Topology,
+    topologyCriticalRoutes: int,
+    topologyCostTenths: int,
+    selectedBoundary: int,
+    calibration: Calibration,
+    histogramRoutes: int,
+    providerBaselineSet: bool,
+    providerBaselineGeneration: int,
+    providerBaselineDispatches: int,
+    providerGeneration: int,
+    providerDispatchesDelta: int,
+    providerHealthAvailable: bool,
+    seamRecords: int,
+    seamCaptureSkips: int,
+    seamShapeSkips: int,
+    seamDumped: bool,
+    error: bool,
+  }
+  var s: State
+
+  /// KERNEL_US knots 0:8.1, 1:30.8, 2:32.2 represented in tenths of us.
+  pure def kernelCostTenths(routes: int): int =
+    if (routes == 0) 81 else if (routes == 1) 308 else 322
+
+  /// Exact Jaccard for top-2 sets, scaled by six: 2/2 -> 6, 1/3 -> 2, 0/4 -> 0.
+  pure def topTwoJaccardSixths(overlap: int): int =
+    if (overlap == 2) 6 else if (overlap == 1) 2 else 0
+
+  /// route_locality._consecutive_runs continues only for the same row at step + 1.
+  pure def continuesRun(previousStep: int, currentStep: int, sameRow: bool): bool =
+    sameRow and currentStep == previousStep + 1
+
+  /// Exact capacity-two OrderedDict observation/update used by _lru_counts.
+  /// -1 denotes an unoccupied cache position in the finite example.
+  pure def lruCapacityTwoHit(recent: int, older: int, expert: int): bool =
+    expert == recent or expert == older
+  pure def lruCapacityTwoNextRecent(recent: int, older: int, expert: int): int =
+    expert
+  pure def lruCapacityTwoNextOlder(recent: int, older: int, expert: int): int =
+    if (expert == recent) older else recent
+  pure def lruCapacityTwoAccess(cache: LruState, expert: int): LruState = {
+    recent: expert,
+    older: lruCapacityTwoNextOlder(cache.recent, cache.older, expert),
+    hits: cache.hits +
+      (if (lruCapacityTwoHit(cache.recent, cache.older, expert)) 1 else 0),
+  }
+  pure def lruCapacityTwoFold(experts: List[int]): LruState =
+    experts.foldl(
+      { recent: -1, older: -1, hits: 0 },
+      (cache, expert) => lruCapacityTwoAccess(cache, expert))
+  pure def lruCapacityTwoHits(experts: List[int]): int =
+    lruCapacityTwoFold(experts).hits
+
+  /// Counts the two stored IDs in [low, high), preserving topology identity.
+  pure def routeCountInRange(e0: int, e1: int, low: int, high: int): int =
+    (if (e0 >= low and e0 < high) 1 else 0) +
+    (if (e1 >= low and e1 < high) 1 else 0)
+  pure def maxCount(a: int, b: int): int = if (a >= b) a else b
+  pure def twoCardCostTenths(a: int, b: int): int =
+    if (kernelCostTenths(a) >= kernelCostTenths(b)) kernelCostTenths(a)
+    else kernelCostTenths(b)
+  /// For two remote occurrences, ceil(remote/2) is 0 for none and 1 otherwise.
+  pure def replicatedCritical(remote: int): int = if (remote == 0) 0 else 1
+
+  action init = s' = {
+    phase: Dormant,
+    traceEnabled: false,
+    histogramEnabled: false,
+    seamEnabled: false,
+    recordCount: 0,
+    pendingRecords: 0,
+    durableRecords: 0,
+    hasPrevious: false,
+    lastStep: -1,
+    lastRow: -1,
+    previousExperts: Set(),
+    jaccardSixthsSum: 0,
+    consecutiveComparisons: 0,
+    windowDistinctSum: 0,
+    completeWindows: 0,
+    lruRecent: -1,
+    lruOlder: -1,
+    lruRequests: 0,
+    lruHits: 0,
+    cardARoutes: 0,
+    cardBRoutes: 0,
+    contiguousCriticalRoutes: 0,
+    contiguousCostTenths: 0,
+    replicatedCriticalRoutes: 0,
+    replicatedCostTenths: 0,
+    singleCriticalRoutes: 0,
+    singleCostTenths: 0,
+    boundaryThreeCriticalRoutes: 0,
+    boundaryThreeCostTenths: 0,
+    topology: TopologyUnset,
+    topologyCriticalRoutes: 0,
+    topologyCostTenths: 0,
+    selectedBoundary: -1,
+    calibration: CalibrationOff,
+    histogramRoutes: 0,
+    providerBaselineSet: false,
+    providerBaselineGeneration: 0,
+    providerBaselineDispatches: 0,
+    providerGeneration: 0,
+    providerDispatchesDelta: 0,
+    providerHealthAvailable: false,
+    seamRecords: 0,
+    seamCaptureSkips: 0,
+    seamShapeSkips: 0,
+    seamDumped: false,
+    error: false,
+  }
+
+  /// Disabled route statistics and trace paths allocate no counter or writer.
+  action remainDisabled = all {
+    s.phase == Dormant,
+    s' = { ...s, phase: Disabled },
+  }
+
+  /// The three opt-ins are independent in source; calibration needs the histogram.
+  action arm(trace: bool, histogram: bool, seam: bool): bool = all {
+    s.phase == Dormant,
+    trace or histogram or seam,
+    s' = { ...s,
+      phase: Recording,
+      traceEnabled: trace,
+      histogramEnabled: histogram,
+      seamEnabled: seam,
+      calibration: if (histogram) Warmup else CalibrationOff,
+    },
+  }
+
+  /// read_trace rejects malformed dimensions, IDs, duplicate IDs and duplicate keys.
+  action rejectMalformedTrace = all {
+    s.phase == Dormant,
+    s' = { ...s, phase: Rejected, error: true },
+  }
+
+  /// Calibration deliberately counts a warmup and then clears it.
+  action observeWarmup = all {
+    s.phase == Recording,
+    s.histogramEnabled,
+    s.calibration == Warmup,
+    s' = { ...s, histogramRoutes: s.histogramRoutes + 2 },
+  }
+  action resetMeasurement = all {
+    s.phase == Recording,
+    s.histogramEnabled,
+    s.calibration == Warmup,
+    s' = { ...s,
+      calibration: Reset,
+      histogramRoutes: 0,
+      providerBaselineSet: true,
+      providerBaselineGeneration: 1,
+      providerBaselineDispatches: 10,
+      providerGeneration: 1,
+      providerDispatchesDelta: 0,
+      providerHealthAvailable: true,
+    },
+  }
+
+  /// Histogram-only observation models the all-CUDA calibration path.
+  action observeHistogramRoute(e0: int, e1: int): bool = all {
+    s.phase == Recording,
+    s.histogramEnabled,
+    not(s.traceEnabled),
+    e0 >= 0, e0 < 4, e1 >= 0, e1 < 4, e0 != e1,
+    s' = { ...s,
+      calibration: if (s.calibration == Reset) Measuring else s.calibration,
+      histogramRoutes: s.histogramRoutes + 2,
+    },
+  }
+
+  /// Bounded functional record accounting. Input is already in reader-sorted
+  /// (step,row) order; monotonic coordinates make duplicate keys unreachable.
+  /// Topology geometry is CUDA=[0,1), configured A=[1,2), configured B=[2,4).
+  /// The boundary sweep additionally maintains candidate A=[1,3), B=[3,4).
+  action recordRoute(stepNumber: int, row: int, e0: int, e1: int): bool = all {
+    s.phase == Recording,
+    s.traceEnabled,
+    s.recordCount < 4,
+    stepNumber >= 0,
+    row >= 0,
+    e0 >= 0, e0 < 4, e1 >= 0, e1 < 4, e0 != e1,
+    not(s.hasPrevious) or stepNumber > s.lastStep or
+      (stepNumber == s.lastStep and row > s.lastRow),
+    s' = { ...s,
+      recordCount: s.recordCount + 1,
+      pendingRecords: s.pendingRecords + 1,
+      hasPrevious: true,
+      lastStep: stepNumber,
+      lastRow: row,
+      previousExperts: Set(e0, e1),
+      jaccardSixthsSum:
+        if (s.hasPrevious and continuesRun(s.lastStep, stepNumber, row == s.lastRow))
+          s.jaccardSixthsSum +
+            topTwoJaccardSixths(s.previousExperts.intersect(Set(e0, e1)).size())
+        else s.jaccardSixthsSum,
+      consecutiveComparisons:
+        if (s.hasPrevious and continuesRun(s.lastStep, stepNumber, row == s.lastRow))
+          s.consecutiveComparisons + 1
+        else s.consecutiveComparisons,
+      windowDistinctSum:
+        if (s.hasPrevious and continuesRun(s.lastStep, stepNumber, row == s.lastRow))
+          s.windowDistinctSum + s.previousExperts.union(Set(e0, e1)).size()
+        else s.windowDistinctSum,
+      completeWindows:
+        if (s.hasPrevious and continuesRun(s.lastStep, stepNumber, row == s.lastRow))
+          s.completeWindows + 1
+        else s.completeWindows,
+      lruRecent:
+        lruCapacityTwoNextRecent(
+          lruCapacityTwoNextRecent(s.lruRecent, s.lruOlder, e0),
+          lruCapacityTwoNextOlder(s.lruRecent, s.lruOlder, e0), e1),
+      lruOlder:
+        lruCapacityTwoNextOlder(
+          lruCapacityTwoNextRecent(s.lruRecent, s.lruOlder, e0),
+          lruCapacityTwoNextOlder(s.lruRecent, s.lruOlder, e0), e1),
+      lruRequests: s.lruRequests + 2,
+      lruHits: s.lruHits +
+        (if (lruCapacityTwoHit(s.lruRecent, s.lruOlder, e0)) 1 else 0) +
+        (if (lruCapacityTwoHit(
+          lruCapacityTwoNextRecent(s.lruRecent, s.lruOlder, e0),
+          lruCapacityTwoNextOlder(s.lruRecent, s.lruOlder, e0), e1)) 1 else 0),
+      cardARoutes: s.cardARoutes + routeCountInRange(e0, e1, 1, 2),
+      cardBRoutes: s.cardBRoutes + routeCountInRange(e0, e1, 2, 4),
+      contiguousCriticalRoutes: s.contiguousCriticalRoutes + maxCount(
+        routeCountInRange(e0, e1, 1, 2), routeCountInRange(e0, e1, 2, 4)),
+      contiguousCostTenths: s.contiguousCostTenths + twoCardCostTenths(
+        routeCountInRange(e0, e1, 1, 2), routeCountInRange(e0, e1, 2, 4)),
+      replicatedCriticalRoutes: s.replicatedCriticalRoutes +
+        replicatedCritical(routeCountInRange(e0, e1, 1, 4)),
+      replicatedCostTenths: s.replicatedCostTenths + kernelCostTenths(
+        replicatedCritical(routeCountInRange(e0, e1, 1, 4))),
+      singleCriticalRoutes: s.singleCriticalRoutes + routeCountInRange(e0, e1, 1, 4),
+      singleCostTenths: s.singleCostTenths +
+        kernelCostTenths(routeCountInRange(e0, e1, 1, 4)),
+      boundaryThreeCriticalRoutes: s.boundaryThreeCriticalRoutes + maxCount(
+        routeCountInRange(e0, e1, 1, 3), routeCountInRange(e0, e1, 3, 4)),
+      boundaryThreeCostTenths: s.boundaryThreeCostTenths + twoCardCostTenths(
+        routeCountInRange(e0, e1, 1, 3), routeCountInRange(e0, e1, 3, 4)),
+      calibration: if (s.histogramEnabled and s.calibration == Reset) Measuring else s.calibration,
+      histogramRoutes: if (s.histogramEnabled) s.histogramRoutes + 2 else s.histogramRoutes,
+    },
+  }
+
+  /// flush waits pending copies and writes blocks, but does not close the writer.
+  action flushTrace = all {
+    s.phase == Recording,
+    s.traceEnabled,
+    s' = { ...s, pendingRecords: 0, durableRecords: s.recordCount },
+  }
+  /// close is idempotent in Python; this transition models its first finalization.
+  action closeTrace = all {
+    s.phase == Recording,
+    s.traceEnabled,
+    s' = { ...s,
+      phase: Closed,
+      pendingRecords: 0,
+      durableRecords: s.recordCount,
+    },
+  }
+
+  /// Analysis publishes values accumulated from the actual bounded records.
+  action analyzeContiguous = all {
+    s.phase == Closed,
+    s.recordCount > 0,
+    s' = { ...s,
+      phase: Analyzed,
+      topology: Contiguous,
+      topologyCriticalRoutes: s.contiguousCriticalRoutes,
+      topologyCostTenths: s.contiguousCostTenths,
+      selectedBoundary: 2,
+    },
+  }
+  action analyzeReplicated = all {
+    s.phase == Closed,
+    s.recordCount > 0,
+    s' = { ...s,
+      phase: Analyzed,
+      topology: Replicated,
+      topologyCriticalRoutes: s.replicatedCriticalRoutes,
+      topologyCostTenths: s.replicatedCostTenths,
+      selectedBoundary: -1,
+    },
+  }
+  action analyzeSingleCard = all {
+    s.phase == Closed,
+    s.recordCount > 0,
+    s' = { ...s,
+      phase: Analyzed,
+      topology: SingleCard,
+      topologyCriticalRoutes: s.singleCriticalRoutes,
+      topologyCostTenths: s.singleCostTenths,
+      selectedBoundary: -1,
+    },
+  }
+  /// Python min keeps the first boundary on a tie, hence <= chooses boundary 2.
+  action analyzeBoundarySweep = all {
+    s.phase == Closed,
+    s.recordCount > 0,
+    s' = { ...s,
+      phase: Analyzed,
+      topology: SweptBoundary,
+      topologyCriticalRoutes:
+        if (s.contiguousCriticalRoutes <= s.boundaryThreeCriticalRoutes)
+          s.contiguousCriticalRoutes else s.boundaryThreeCriticalRoutes,
+      topologyCostTenths:
+        if (s.contiguousCriticalRoutes <= s.boundaryThreeCriticalRoutes)
+          s.contiguousCostTenths else s.boundaryThreeCostTenths,
+      selectedBoundary:
+        if (s.contiguousCriticalRoutes <= s.boundaryThreeCriticalRoutes) 2 else 3,
+    },
+  }
+
+  /// A selected decode-shaped step records four host points and four CUDA events.
+  action sampleDecodeSeam = all {
+    s.phase == Recording,
+    s.seamEnabled,
+    not(s.seamDumped),
+    s' = { ...s, seamRecords: s.seamRecords + 1 },
+  }
+  /// Capturing streams and M > 32 are distinct source-visible skip reasons.
+  action skipCapturedSeam = all {
+    s.phase == Recording,
+    s.seamEnabled,
+    s' = { ...s, seamCaptureSkips: s.seamCaptureSkips + 1 },
+  }
+  action skipLargeSeam = all {
+    s.phase == Recording,
+    s.seamEnabled,
+    s' = { ...s, seamShapeSkips: s.seamShapeSkips + 1 },
+  }
+  action dumpSeam = all {
+    s.seamEnabled,
+    not(s.seamDumped),
+    s.seamRecords > 0,
+    s' = { ...s, seamDumped: true },
+  }
+
+  /// Native provider health is monotonic only within one generation.
+  action collectProviderHealth(generation: int, dispatches: int): bool = all {
+    s.providerBaselineSet,
+    s' = { ...s,
+      providerGeneration: generation,
+      providerHealthAvailable:
+        generation == s.providerBaselineGeneration and dispatches >= s.providerBaselineDispatches,
+      providerDispatchesDelta:
+        if (generation == s.providerBaselineGeneration and dispatches >= s.providerBaselineDispatches)
+          dispatches - s.providerBaselineDispatches
+        else 0,
+    },
+  }
+
+  action dumpCalibration = all {
+    s.histogramEnabled,
+    s.calibration == Measuring,
+    s' = { ...s, calibration: Dumped },
+  }
+
+  action stay = s' = s
+  action step = any {
+    remainDisabled,
+    arm(true, false, false), arm(false, true, false), arm(false, false, true),
+    arm(true, true, false), arm(true, true, true), rejectMalformedTrace,
+    observeWarmup, resetMeasurement,
+    observeHistogramRoute(0, 1), observeHistogramRoute(0, 2),
+    recordRoute(0, 0, 0, 1), recordRoute(1, 0, 0, 2),
+    recordRoute(3, 0, 2, 3), recordRoute(4, 0, 2, 3),
+    flushTrace, closeTrace,
+    analyzeContiguous, analyzeReplicated, analyzeSingleCard, analyzeBoundarySweep,
+    sampleDecodeSeam, skipCapturedSeam, skipLargeSeam, dumpSeam,
+    collectProviderHealth(1, 14), collectProviderHealth(2, 1),
+    dumpCalibration, stay,
+  }
+
+  val inv = and {
+    s.recordCount >= 0,
+    s.recordCount <= 4,
+    s.pendingRecords >= 0,
+    s.pendingRecords <= s.recordCount,
+    s.durableRecords >= 0,
+    s.durableRecords <= s.recordCount,
+    s.lruRequests == 2 * s.recordCount,
+    s.lruHits >= 0,
+    s.lruHits <= s.lruRequests,
+    s.consecutiveComparisons >= 0,
+    s.consecutiveComparisons <= s.recordCount,
+    s.completeWindows == s.consecutiveComparisons,
+    s.phase == Closed implies (s.pendingRecords == 0 and s.durableRecords == s.recordCount),
+    s.phase == Analyzed implies (s.durableRecords == s.recordCount and s.recordCount > 0),
+    s.topology != TopologyUnset implies s.phase == Analyzed,
+    s.seamDumped implies (s.seamEnabled and s.seamRecords > 0),
+    s.providerHealthAvailable implies s.providerBaselineSet,
+    s.calibration == Dumped implies s.histogramEnabled,
+    s.error implies s.phase == Rejected,
+  }
+
+  val fixtureLruHits = lruCapacityTwoHits([0, 1, 0, 2, 2, 3, 2, 3])
+  val witnessDisabled = s.phase == Disabled and not(s.traceEnabled) and not(s.histogramEnabled)
+  val witnessExactLocality = and {
+    s.recordCount == 4,
+    s.jaccardSixthsSum == 8,
+    s.consecutiveComparisons == 2,
+    s.windowDistinctSum == 5,
+    s.completeWindows == 2,
+    s.lruRequests == 8,
+    s.lruHits == 4,
+    fixtureLruHits == 4,
+  }
+  val witnessContiguous = s.topology == Contiguous and s.topologyCriticalRoutes == 6
+  val witnessReplicated = s.topology == Replicated and s.topologyCriticalRoutes == 4
+  val witnessBoundaryThree = s.topology == SweptBoundary and s.selectedBoundary == 3
+  val witnessWarmupExcluded = s.calibration == Dumped and s.histogramRoutes == 8
+  val witnessProviderGenerationRejected =
+    s.providerGeneration == 2 and not(s.providerHealthAvailable)
+  val witnessSeamLifecycle =
+    s.seamRecords == 1 and s.seamCaptureSkips == 1 and s.seamShapeSkips == 1 and s.seamDumped
+
+  run disabledObservabilityTest = init.then(remainDisabled)
+    .expect(witnessDisabled and inv)
+  run disabledRejectsRecordTest = init.then(remainDisabled)
+    .then(recordRoute(0, 0, 0, 1).fail())
+  run malformedTraceRejectedTest = init.then(rejectMalformedTrace)
+    .expect(s.error and inv)
+  run rejectedTraceCannotCloseTest = init.then(rejectMalformedTrace)
+    .then(closeTrace.fail())
+  run exactRouteSequenceTest = init.then(arm(true, false, false))
+    .then(recordRoute(0, 0, 0, 1)).then(recordRoute(1, 0, 0, 2))
+    .then(recordRoute(3, 0, 2, 3)).then(recordRoute(4, 0, 2, 3))
+    .then(closeTrace).then(analyzeContiguous)
+    .expect(witnessExactLocality and witnessContiguous and inv)
+  run flushThenResumeTest = init.then(arm(true, false, false))
+    .then(recordRoute(0, 0, 0, 1)).then(flushTrace)
+    .then(recordRoute(1, 0, 0, 2))
+    .expect(s.recordCount == 2 and s.durableRecords == 1 and inv)
+  run replicatedTopologyTest = init.then(arm(true, false, false))
+    .then(recordRoute(0, 0, 0, 1)).then(recordRoute(1, 0, 0, 2))
+    .then(recordRoute(3, 0, 2, 3)).then(recordRoute(4, 0, 2, 3))
+    .then(closeTrace).then(analyzeReplicated).expect(witnessReplicated and inv)
+  run boundarySweepTest = init.then(arm(true, false, false))
+    .then(recordRoute(0, 0, 0, 1)).then(recordRoute(1, 0, 0, 2))
+    .then(recordRoute(3, 0, 2, 3)).then(recordRoute(4, 0, 2, 3))
+    .then(closeTrace).then(analyzeBoundarySweep).expect(witnessBoundaryThree and inv)
+  run emptyTraceStateTest = init.then(arm(true, false, false))
+    .then(closeTrace).expect(s.recordCount == 0 and inv)
+  run emptyTraceCannotAnalyzeTest = init.then(arm(true, false, false))
+    .then(closeTrace).then(analyzeContiguous.fail())
+  run seamSamplingAndSkipTest = init.then(arm(true, false, true))
+    .then(sampleDecodeSeam).then(skipCapturedSeam).then(skipLargeSeam).then(dumpSeam)
+    .expect(witnessSeamLifecycle and inv)
+  run calibrationExcludesWarmupTest = init.then(arm(false, true, false))
+    .then(observeWarmup).then(resetMeasurement)
+    .then(observeHistogramRoute(0, 1)).then(observeHistogramRoute(0, 2))
+    .then(observeHistogramRoute(2, 3)).then(observeHistogramRoute(2, 3))
+    .then(dumpCalibration).expect(witnessWarmupExcluded and inv)
+  run providerGenerationChangeTest = init.then(arm(false, true, false))
+    .then(observeWarmup).then(resetMeasurement).then(collectProviderHealth(2, 1))
+    .expect(witnessProviderGenerationRejected and inv)
+}

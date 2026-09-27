@@ -1,0 +1,256 @@
+{
+  "id": "doorbell",
+  "title": "Graph-compatible B70 doorbells and command-streamer alternatives",
+  "models": [
+    {
+      "path": "models/doorbell.ryu",
+      "main": "doorbell",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessBothLanesInFlight",
+        "witnessReleasedFailure",
+        "witnessErrorNotYetObserved",
+        "witnessReusable"
+      ]
+    },
+    {
+      "path": "models/command_streamer.ryu",
+      "main": "command_streamer",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessGraphWithClassic",
+        "witnessFenceBlocksRescan",
+        "witnessBakedHealthy",
+        "witnessLatchedFallback",
+        "witnessRacingSignalPreserved"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/b70_binding.py",
+      "role": "functional",
+      "models": ["models/doorbell.ryu"],
+      "symbols": [
+        "B70ProviderClient",
+        "B70ProviderClient._setup_signatures",
+        "B70ProviderClient.load",
+        "B70ProviderClient.issue",
+        "B70ProviderClient.take",
+        "B70ProviderClient.dispatch",
+        "B70ProviderClient.out_dtype",
+        "B70ProviderClient.health",
+        "B70ProviderClient.shutdown"
+      ],
+      "notes": "ctypes ABI, loaded-provider ownership, genuine provider sequence identity, result-wire query, health, poller entry points and teardown; provider numerical work is outside this model"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/b70_poller.py",
+      "role": "behavior",
+      "models": ["models/doorbell.ryu", "models/command_streamer.ryu"],
+      "symbols": [
+        "B70Poller",
+        "B70Poller.register_layer",
+        "B70Poller.start",
+        "B70Poller.reset",
+        "B70Poller.arm_cs",
+        "B70Poller.error_count",
+        "B70Poller.stop",
+        "get_b70_poller",
+        "arm_all_cs"
+      ],
+      "notes": "Python lifetime owner for one native poller per physical card, raw staging-buffer registration, delayed error exposure, counter access and explicit post-capture CS arming"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/stream_signal.py",
+      "role": "behavior",
+      "models": ["models/doorbell.ryu"],
+      "symbols": [
+        "alloc_host_mapped_flag",
+        "read_flag",
+        "write_flag_host",
+        "write_flag",
+        "wait_flag"
+      ],
+      "notes": "current-stream capture-compatible Driver API write and exact-equality wait over separately allocated host-mapped words; successful API calls are abstracted"
+    },
+    {
+      "path": "src/phase7/b70_capi.cpp",
+      "role": "behavior",
+      "models": ["models/doorbell.ryu", "models/command_streamer.ryu"],
+      "symbols": [
+        "PollLayer",
+        "B70Poller",
+        "B70Poller::add",
+        "B70Poller::start",
+        "B70Poller::stop",
+        "B70Poller::reset",
+        "B70Poller::loop",
+        "B70Poller::arm_cs",
+        "sb_b70_poll_create",
+        "sb_b70_poll_register",
+        "sb_b70_poll_start",
+        "sb_b70_poll_stop",
+        "sb_b70_poll_arm_cs",
+        "sb_b70_poll_reset",
+        "sb_b70_poll_error_count",
+        "sb_b70_poll_destroy"
+      ],
+      "notes": "authoritative classic poll sweep, completion-on-failure release, counters, layer snapshots, CS selection/arm/fence/fallback, baked poison-drain and C ABI implementation"
+    },
+    {
+      "path": "src/phase7/b70_capi.h",
+      "role": "functional",
+      "models": ["models/doorbell.ryu", "models/command_streamer.ryu"],
+      "symbols": [
+        "sb_b70_provider_t",
+        "sb_b70_poller_t",
+        "sb_b70_issue",
+        "sb_b70_take",
+        "sb_b70_out_fp16",
+        "sb_b70_poll_create",
+        "sb_b70_poll_register",
+        "sb_b70_poll_start",
+        "sb_b70_poll_stop",
+        "sb_b70_poll_reset",
+        "sb_b70_poll_error_count",
+        "sb_b70_poll_destroy"
+      ],
+      "notes": "published pointer lifetime, return convention and signal/completion failure contract; it does not declare the implementation-exported sb_b70_poll_arm_cs and its poll output FP32 prose is weaker than the queried runtime wire width"
+    },
+    {
+      "path": "src/phase7/b70_stream_test.py",
+      "role": "harness",
+      "models": ["models/doorbell.ryu"],
+      "symbols": [
+        "test_id_sets_partition",
+        "test_counts_agree",
+        "test_b70_ids_match_capable_layers",
+        "test_flag_and_threshold",
+        "test_slot_ids_are_not_global_ids",
+        "test_crossover_model_is_consistent",
+        "main"
+      ],
+      "notes": "assigned CPU-only prefill weight-streaming/placement harness; inventories ownership and ID-space preconditions but does not execute stream_signal, B70Poller or command-streamer behavior"
+    },
+    {
+      "path": "src/phase9/sb_stream.cu",
+      "role": "functional",
+      "models": ["models/doorbell.ryu"],
+      "symbols": [
+        "sb_write_flag_kernel",
+        "sb_wait_flag_kernel",
+        "sb_write_flag",
+        "sb_wait_flag"
+      ],
+      "notes": "experimental one-thread system-fenced CUDA flag helper using implicit current/default launch context; production uses stream_signal.py Driver API operations and this helper only prints launch errors"
+    },
+    {
+      "path": "tests/test_stream_signal.py",
+      "role": "harness",
+      "models": ["models/doorbell.ryu"],
+      "symbols": [
+        "_wait_for_event",
+        "cuda_signals",
+        "test_wait_requires_equality_on_current_stream"
+      ],
+      "notes": "real-CUDA eager and captured graph-replay fixture for exact equality, stream blocking and fresh signal consumption; not CPU-executable"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "role": "dependency",
+      "models": ["models/doorbell.ryu"],
+      "symbols": [
+        "HybridRoutedExperts._register_b70_poller",
+        "HybridRoutedExperts.forward_modular",
+        "HybridRoutedExperts._b70_issue_graph",
+        "HybridRoutedExperts._b70_take_graph"
+      ],
+      "notes": "reference dependency ordering per-lane staging, signal M, wait, result copy, completion reset and next-eager-boundary error observation"
+    },
+    {
+      "path": "src/phase1/b70_provider.hpp",
+      "role": "dependency",
+      "models": ["models/doorbell.ryu", "models/command_streamer.ryu"],
+      "symbols": [
+        "B70Provider::issue",
+        "B70Provider::take",
+        "B70Provider::issue_cs_chain",
+        "B70Provider::issue_cs_ride",
+        "B70Provider::cs_step_fence",
+        "B70Provider::baked_record_layer",
+        "B70Provider::baked_execute_step",
+        "B70Provider::baked_wait",
+        "B70Provider::baked_disable",
+        "B70Provider::baked_progress_count"
+      ],
+      "notes": "reference declaration and ownership contract for classic provider calls and all native CS modes"
+    },
+    {
+      "path": "src/phase1/b70_provider.cpp",
+      "role": "dependency",
+      "models": ["models/doorbell.ryu", "models/command_streamer.ryu"],
+      "symbols": [
+        "B70Provider::issue",
+        "B70Provider::take",
+        "B70Provider::issue_cs_chain",
+        "B70Provider::issue_cs_ride",
+        "B70Provider::cs_step_fence",
+        "B70Provider::baked_record_layer",
+        "B70Provider::baked_execute_step",
+        "B70Provider::baked_wait",
+        "B70Provider::baked_disable",
+        "B70Provider::baked_progress_count"
+      ],
+      "notes": "reference implementation for raw/SYCL ordering seams, mode eligibility, permanent failure latches, bounded wait, progress discrimination and poison-drain support"
+    }
+  ],
+  "assumptions": [
+    "The two-lane doorbell domain stands for independently owned physical-card lanes; production cardinality and layer count are not inferred from the finite model.",
+    "A staged tensor payload is abstracted to an ordering state. Numerical MoE correctness, buffer extents and dtype conversion are specified by provider/compute branches.",
+    "The model treats CUDA Driver and Runtime operations as successfully enqueued. stream_signal.py does not check their return codes, so API refusal remains an external implementation failure.",
+    "Classic providerSequence is poller-owned call identity only. The signal value is exactly zero or M and completion is exactly zero or one; neither flag carries a sequence.",
+    "Completion releases an untimed CUDA waiter but does not imply valid output. Validity and cumulative error observation are independent state.",
+    "Captured replay has no Python error check; the first later eager forward can observe errors after stale data was copied.",
+    "One native poller/provider/queue owns one physical B70, and caller-owned flags and staging buffers remain alive until poller destruction.",
+    "Command-streamer selection is independent of CUDA graph enablement; the current r15 recipe selects graph-compatible signaling with classic native polling because CS_DOORBELL is unset.",
+    "The command-streamer model's two layers represent the implementation guard known == total_layers and all-step ordering, not a claim that a bank has two layers.",
+    "Chain and ride are eligible only after arming, complete registration, NVFP4-compatible provider state and M at most 32; larger work remains classic.",
+    "Baked mode additionally requires M equal to one and FP16 output, and a busy bounded wait is recoverable while monotone per-list progress continues.",
+    "After baked recovery only signals whose completions prove consumption may be scrubbed; an unconsumed racing signal must survive for classic fallback.",
+    "Host registration and CPU affinity failures are performance degradations according to source, not modeled correctness failures.",
+    "No fairness, latency, driver cache-coherence, queue-clock comparability or hardware progress property is claimed."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/phase7/b70_capi.cpp",
+      "symbol": "B70Poller::loop",
+      "description": "CPU source-order inspection: verify issue status gates take, error accounting precedes the unconditional sequentially-consistent fence and completion[0]=1 store, and signal is cleared before classic issue. This compares ordering only, not hardware visibility."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "symbol": "HybridRoutedExperts._b70_take_graph",
+      "description": "CPU AST/source inspection: verify wait_flag(completion,1) precedes result H2D/cast and write_flag(completion,0) follows both; compare forward_modular's error_count read to document the later eager observation boundary."
+    },
+    {
+      "source": "src/phase7/b70_capi.h",
+      "symbol": "sb_b70_poll_create",
+      "description": "CPU ABI correspondence scan: compare header declarations, b70_capi.cpp extern-C definitions and b70_binding.py ctypes lookups; report the implementation/binding symbol sb_b70_poll_arm_cs as absent from the public header rather than silently accepting drift."
+    },
+    {
+      "source": "src/phase7/b70_stream_test.py",
+      "symbol": "main",
+      "description": "Potential CPU execution checks only placement partition, count, capability, threshold and global-ID/compact-slot prerequisites. Record it explicitly as non-doorbell evidence."
+    },
+    {
+      "source": "tests/test_stream_signal.py",
+      "symbol": "test_wait_requires_equality_on_current_stream",
+      "description": "Hardware-only differential: on available CUDA, compare eager and graph-replay exact-equality blocking, release on host value 1, and consumption of a fresh signal on the second replay. This is not a CPU implementation comparison."
+    },
+    {
+      "source": "src/phase1/b70_provider.cpp",
+      "symbol": "B70Provider::baked_progress_count",
+      "description": "CPU source inspection: verify progress is monotone per layer within a submitted step, reset before submission, written after completion in each baked list, and used instead of sampled completion counts during bounded recovery."
+    }
+  ]
+}

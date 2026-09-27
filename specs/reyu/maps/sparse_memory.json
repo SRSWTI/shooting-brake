@@ -1,0 +1,208 @@
+{
+  "id": "sparse_memory",
+  "title": "Learned sparse-memory retrieval, placement, training and evaluation research",
+  "models": [
+    {
+      "path": "models/sparse_memory.ryu",
+      "main": "sparse_memory",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessDeviceRetrieval",
+        "witnessHostReduction",
+        "witnessStorageWithoutRetention",
+        "witnessDistillationSuccess",
+        "witnessInvalidConfiguration"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "experiments/sparse-memory/capability_eval.py",
+      "role": "functional",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["MCItem", "load_tier1", "score_mc", "score_gsm8k", "paired_retention"],
+      "notes": "Paired memory-off/on capability evaluation is documented; external datasets and tier-3 agentic benchmarks remain dependencies and are not modeled as executed."
+    },
+    {
+      "path": "experiments/sparse-memory/e0_query_staleness.py",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["fit_kmeans_subkeys", "collect_hidden", "run", "main"],
+      "notes": "Models the E0 stage and its temporal/depth overlap proxy distinction; hidden-state collection, k-means arithmetic and numerical observations are abstract."
+    },
+    {
+      "path": "experiments/sparse-memory/e1_xpu_gather.py",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["sync", "free_bytes", "gather_reduce", "bench", "run", "main"],
+      "notes": "Models device-owned gather/reduction ordering and transfer asymmetry; allocation, synchronization and timings are measurement boundaries."
+    },
+    {
+      "path": "experiments/sparse-memory/e1b_fused_gather.py",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["impl_index_select", "impl_embedding_bag", "impl_chunked", "bench", "run", "main"],
+      "notes": "Documents materializing, fused floating-point and chunked fallback branches plus the reference-agreement gate."
+    },
+    {
+      "path": "experiments/sparse-memory/e1c_triton_gather.py",
+      "role": "functional",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["_fused_gather_reduce", "fused_gather_reduce", "ref_gather_reduce", "bench", "run", "main"],
+      "notes": "Int8 per-row-scaled Triton gather/reduce is represented as an atomic quantized device gather that must match its reference; kernel scheduling and floating-point values are abstract."
+    },
+    {
+      "path": "experiments/sparse-memory/e1d_triton_tune.py",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["_gather_reduce", "make_launcher", "bench", "run", "main"],
+      "notes": "Inventory covers the block-width/output-dtype/warp sweep, unsupported configuration skip, numerical rejection and rows-per-second selection."
+    },
+    {
+      "path": "experiments/sparse-memory/e1e_triton_int4.py",
+      "role": "functional",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["_gather_reduce_int4", "pack_int4", "ref_int4", "bench", "run", "main"],
+      "notes": "Models reachable int4 table mode and successful reduction qualitatively; nibble layout, scale application, reference tolerance and roofline reporting are source-linked in the chapter."
+    },
+    {
+      "path": "experiments/sparse-memory/e2_host_tier.py",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["bench_cpu", "bench_cuda", "run", "main"],
+      "notes": "Models host ownership with reduction before reduced-vector transfer; CPU and CUDA timing arithmetic is not assigned fabricated performance."
+    },
+    {
+      "path": "experiments/sparse-memory/e4_baseline_slo.py",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["build_prompt", "one_stream", "cell", "main_async", "project", "main"],
+      "notes": "Represents E4 as a baseline observation stage. The hard-coded memory-cost projection is documented and is not modeled as a memory-enabled server run."
+    },
+    {
+      "path": "experiments/sparse-memory/e5_retrofit_ladder.py",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["load_corpus", "chunked_ce", "eval_ce", "run_rung", "main"],
+      "notes": "Models the frozen-backbone retrofit gate and healthy/unhealthy utilization outcomes; corpus fingerprinting, baseline isolation, optimizer branches, census hygiene, OOM recording and fixed-width defaults are documented."
+    },
+    {
+      "path": "experiments/sparse-memory/e6_knowledge_injection.py",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["make_facts", "statements", "score_probes", "held_out_ce", "run", "main"],
+      "notes": "Models independent knowledge-storage and retention outcomes. Invented facts, injected/control split, held-out template, branch-off ceiling, acquisition/control/storage formulas and optional gate are documented without asserting new results."
+    },
+    {
+      "path": "experiments/sparse-memory/e7_teacher_distill.py",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["load_texts", "batches", "chunked_kl", "evaluate", "run", "main"],
+      "notes": "Models the terminal teacher-gap-reduction outcome. Same-family teacher/student loading, forward KL, alpha-paired evaluation, checkpoint output and failure preconditions are documented; no target-scale claim is made."
+    },
+    {
+      "path": "experiments/sparse-memory/memory_layer.py",
+      "role": "behavior",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["MemoryConfig", "ProductKeyMemory", "Attachment", "block_end_layers", "attach_memory"],
+      "notes": "Core attachment, retrieval, optional gate/balancing/addressing branches, local weighted reduction, census, checkpoint-recompute handling and hook lifecycle are behaviorally abstracted."
+    },
+    {
+      "path": "experiments/sparse-memory/pkm.py",
+      "role": "behavior",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": ["PKMConfig", "make_subkeys", "select", "gather", "topk_overlap"],
+      "notes": "Core device-agnostic product-key shape validation, sublinear Cartesian selection, softmax weights, weighted gather and overlap metric are behaviorally modeled."
+    },
+    {
+      "path": "experiments/sparse-memory/run_e6_gate.sh",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": [],
+      "notes": "Shell recipe has no language symbols; it enables scaled widths and the per-token gate for 9B, 4B and 0.8B runs and filters console output. Comments are historical motivation, not modeled results."
+    },
+    {
+      "path": "experiments/sparse-memory/run_e6_ladder.sh",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": [],
+      "notes": "Shell recipe has no language symbols; it waits for a tagged process and runs four model rungs sequentially to avoid concurrent allocator pressure."
+    },
+    {
+      "path": "experiments/sparse-memory/run_e6_scaled.sh",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": [],
+      "notes": "Shell recipe has no language symbols; it fixes c=256 while selecting d_value=d_model and d_query=d_model/2 through -1 sentinel arguments."
+    },
+    {
+      "path": "experiments/sparse-memory/run_e6_seeds.sh",
+      "role": "harness",
+      "models": ["models/sparse_memory.ryu"],
+      "symbols": [],
+      "notes": "Shell recipe has no language symbols; it fixes data seed and varies training seed for three 9B trials. It does not itself establish stability."
+    }
+  ],
+  "assumptions": [
+    "This is a standalone research branch and is not assumed reachable from the current production serving plugin.",
+    "The formal model treats tensor kernels, optimizer steps, model forwards, measurements and checkpoint writes as atomic but retains operation order, placement, modes, gate outcomes and failures.",
+    "A successful gatherReferenceMatched state means a source driver's numerical acceptance condition passed; it does not assert bitwise identity or a particular latency.",
+    "Random and k-means E0 codebooks are staleness proxies rather than evidence from a trained deployed memory.",
+    "E4 projections use source constants and are not treated as an observed memory-enabled SLO.",
+    "Knowledge storage, capability retention and teacher-gap reduction are separate observations; none implies another.",
+    "Comments describing earlier measured values or hypotheses are research provenance, not newly verified claims.",
+    "Hugging Face models and datasets, PyTorch, Triton and external benchmark checkouts are dependency boundaries, not first-party sparse-memory implementations."
+  ],
+  "implementation_checks": [
+    {
+      "source": "experiments/sparse-memory/pkm.py",
+      "symbol": "select",
+      "description": "CPU inspection/differential: use a small square table and even query width, enumerate all Cartesian pair scores, and compare selected row IDs and softmax weights with select; separately confirm non-square rows and odd query width raise ValueError."
+    },
+    {
+      "source": "experiments/sparse-memory/pkm.py",
+      "symbol": "gather",
+      "description": "CPU differential: compare gather against an explicit weighted sum for multiple tokens, heads and repeated row indices, including normalized and non-normalized weights."
+    },
+    {
+      "source": "experiments/sparse-memory/memory_layer.py",
+      "symbol": "ProductKeyMemory._topk_rows",
+      "description": "CPU source/differential check: with nonzero sel_bias, verify biased scores choose rows while returned softmax weights are computed from original scores at those chosen pairs."
+    },
+    {
+      "source": "experiments/sparse-memory/memory_layer.py",
+      "symbol": "ProductKeyMemory.forward",
+      "description": "CPU differential: compare embedding_bag plus head summation with an explicit per-token/per-head weighted row sum; check gate-disabled and deterministic gate-enabled residual deltas separately."
+    },
+    {
+      "source": "experiments/sparse-memory/memory_layer.py",
+      "symbol": "ProductKeyMemory.addr_loss",
+      "description": "CPU autograd inspection: confirm the auxiliary addressing loss gives subkey gradients but no query-projection gradient because query activations are detached for the recomputed scores."
+    },
+    {
+      "source": "experiments/sparse-memory/e1b_fused_gather.py",
+      "symbol": "impl_embedding_bag",
+      "description": "CPU differential: compare floating-point embedding_bag and impl_index_select outputs for repeated/random indices; this is a correctness comparison only, not an XPU performance substitute."
+    },
+    {
+      "source": "experiments/sparse-memory/e1e_triton_int4.py",
+      "symbol": "pack_int4",
+      "description": "CPU differential: exhaust signed values -8 through 7, unpack the low/high nibble planes using the kernel's offset convention, and compare exactly with the original tensor."
+    },
+    {
+      "source": "experiments/sparse-memory/e2_host_tier.py",
+      "symbol": "run",
+      "description": "CPU-oriented comparison: validate host F.embedding_bag against an explicit bf16 weighted sum, then measure pinned/pageable reduced-vector copy separately from raw-row copy; do not attribute CUDA transfer results to CPU gather speed."
+    },
+    {
+      "source": "experiments/sparse-memory/e6_knowledge_injection.py",
+      "symbol": "run",
+      "description": "Source inspection check: verify storage_effect equals injected acquisition minus matched control drift, the ceiling is measured with alpha zero, and retention remains a separate held-out CE delta."
+    },
+    {
+      "source": "experiments/sparse-memory/e7_teacher_distill.py",
+      "symbol": "evaluate",
+      "description": "CPU source/differential check on tiny logits: compare chunked_kl with direct forward KL, and verify gap_closed is omitted when the student-teacher CE denominator is effectively zero."
+    }
+  ]
+}

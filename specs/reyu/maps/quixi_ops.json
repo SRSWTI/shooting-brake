@@ -1,0 +1,1319 @@
+{
+  "id": "quixi_ops",
+  "title": "Embedded QuixiCore-XPU operation families and dispatch semantics",
+  "models": [
+    {
+      "path": "models/quixi_ops.ryu",
+      "main": "quixi_ops",
+      "invariant": "inv",
+      "witnesses": [
+        "successWitness",
+        "tieBreakWitness",
+        "skippedIndexWitness",
+        "unsupportedDtypeWitness",
+        "missingVendorWitness",
+        "invalidStateWitness",
+        "unavailableExportWitness"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/QuixiCore-XPU/.quixicore/kernels.yaml",
+      "role": "artifact",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [],
+      "notes": "Declarative XPU family/operation/dtype/maturity/variant inventory; not dispatch proof."
+    },
+    {
+      "path": "src/QuixiCore-XPU/.quixicore/quant-formats.yaml",
+      "role": "artifact",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [],
+      "notes": "Declarative encoding maturity; separate from callable-operation maturity."
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/contract/operations.hpp",
+      "role": "artifact",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "OperationId",
+        "OperationDescriptor",
+        "kOperations",
+        "operation_name"
+      ],
+      "notes": "Generated canonical 303-name taxonomy; observed/planned is not XPU wiring."
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/ops.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "gelu",
+        "softmax",
+        "silu",
+        "gelu_backward",
+        "glu",
+        "glu_gelu_f16",
+        "rope",
+        "attention",
+        "attention_f16ctx",
+        "attn_swa",
+        "qk_norm_rope",
+        "adamw",
+        "argmax",
+        "sample_categorical",
+        "top_k_sample",
+        "embedding_lookup",
+        "kv_cache_scatter",
+        "kv_cache_gather",
+        "pool_mean_rms_l2",
+        "dropout",
+        "cross_entropy",
+        "hadamard",
+        "moe_route_topk",
+        "nvfp4_moe_fused",
+        "nvfp4_moe_split",
+        "nvfp4_moe_baked_handles",
+        "int4_moe_split",
+        "nvfp4_moe_grouped",
+        "nvfp4_moe_grouped_workspace_bytes",
+        "nvfp4_moe_grouped_profitable",
+        "linear_attn",
+        "qwen_gdn_decode",
+        "selective_scan",
+        "all_reduce_sum",
+        "dense_gemm",
+        "quantize_int4_group",
+        "qgemv_int4",
+        "w4a16_gemm",
+        "fp8_gemm",
+        "fp8_gemm_w8a16",
+        "fp8_encode",
+        "fp8_decode",
+        "mxfp4_gemv",
+        "nvfp4_gemv",
+        "nvfp4_gemm",
+        "gguf_gemv",
+        "act_quant_int8",
+        "qgemm_int8",
+        "rms_norm",
+        "fused_add_rms_norm",
+        "rms_residual_next",
+        "layernorm"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/variants.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "Variant",
+        "variant_name",
+        "variant_available",
+        "resolve_variant"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/gelu/gelu_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "gelu_sycl",
+        "gelu_onednn"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/gelu/variants/xpu_onednn/gelu.onednn.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "gelu_onednn"
+      ],
+      "notes": "Optional vendor implementation and actual exception/fallback behavior."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/gelu/variants/xpu_sycl/gelu.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "gelu_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/gelu_backward/gelu_backward_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "gelu_backward_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/gelu_backward/variants/xpu_sycl/gelu_backward.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "gelu_backward_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/glu/glu_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "glu_sycl",
+        "glu_gelu_f16_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/glu/variants/xpu_sycl/glu.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "glu_sycl",
+        "glu_gelu_f16_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/silu/silu_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "silu_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/silu/variants/xpu_sycl/silu.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "silu_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/softmax/softmax_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "softmax_sycl",
+        "softmax_onednn"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/softmax/variants/xpu_onednn/softmax.onednn.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "softmax_onednn"
+      ],
+      "notes": "Optional vendor implementation and actual exception/fallback behavior."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/softmax/variants/xpu_sycl/softmax.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "softmax_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/attention/attention_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "attention_sycl",
+        "attention_f16ctx_sycl",
+        "attn_swa_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/attention/variants/xpu_sycl/attention.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "attention_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/attention/variants/xpu_sycl/attention_f16ctx.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "attention_f16ctx_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/attention/variants/xpu_sycl/attn_swa.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "attn_swa_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/qk_norm_rope/qk_norm_rope_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "qk_norm_rope_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/qk_norm_rope/variants/xpu_sycl/qk_norm_rope.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "qk_norm_rope_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/rope/rope_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "rope_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/rope/variants/xpu_sycl/rope.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "rope_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/common/rng.hpp",
+      "role": "dependency",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "pcg_hash",
+        "uniform01"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/common/vec_map.hpp",
+      "role": "dependency",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "vec_width",
+        "vec_unary",
+        "vec_binary",
+        "sigmoidf",
+        "siluf",
+        "geluf",
+        "reluf"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/linear_attention/linear_attn/linear_attn_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "linear_attn_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/linear_attention/linear_attn/variants/xpu_sycl/linear_attn.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "linear_attn_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/linear_attention/qwen_gdn_decode/qwen_gdn_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "qwen_gdn_decode_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/linear_attention/qwen_gdn_decode/variants/xpu_sycl/qwen_gdn.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "qwen_gdn_decode_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/matmul/dense_gemm/dense_gemm_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "dense_gemm_sycl",
+        "dense_gemm_onednn"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/matmul/dense_gemm/variants/xpu_onednn/dense_gemm.onednn.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "dense_gemm_onednn"
+      ],
+      "notes": "Optional vendor implementation and actual exception/fallback behavior."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/matmul/dense_gemm/variants/xpu_sycl/dense_gemm.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "dense_gemm_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/int4_moe/int4_moe_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "int4_moe_split_sycl",
+        "int4_moe_split_profiled_sycl",
+        "int4_moe_split_down_wide_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/int4_moe/variants/xpu_sycl/int4_moe.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "int4_moe_split_sycl",
+        "int4_moe_split_profiled_sycl",
+        "int4_moe_split_down_wide_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/moe_route/moe_route_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "moe_route_topk_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/moe_route/variants/xpu_sycl/moe_route.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "moe_route_topk_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/nvfp4_moe/nvfp4_moe_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "nvfp4_moe_fused_sycl",
+        "nvfp4_moe_split_sycl",
+        "nvfp4_baked_handles",
+        "nvfp4_moe_grouped_sycl",
+        "nvfp4_moe_grouped_profiled_sycl",
+        "nvfp4_moe_grouped_workspace_bytes",
+        "nvfp4_moe_grouped_supported"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/nvfp4_moe/variants/xpu_sycl/nvfp4_dequant.hpp",
+      "role": "dependency",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "decode_e2m1",
+        "decode_e4m3"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/nvfp4_moe/variants/xpu_sycl/nvfp4_moe.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "nvfp4_moe_fused_sycl",
+        "nvfp4_moe_split_sycl",
+        "nvfp4_baked_instantiate",
+        "nvfp4_baked_handles"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/nvfp4_moe/variants/xpu_sycl/nvfp4_moe_grouped.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "nvfp4_moe_grouped_workspace_bytes",
+        "nvfp4_moe_grouped_sycl",
+        "nvfp4_moe_grouped_profiled_sycl",
+        "nvfp4_moe_grouped_supported"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/norms/layernorm/variants/xpu_onednn/layernorm.onednn.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "layernorm_onednn"
+      ],
+      "notes": "Optional vendor implementation and actual exception/fallback behavior."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/norms/layernorm/variants/xpu_sycl/layernorm.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "layernorm_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/norms/norms_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "rms_norm_sycl",
+        "fused_add_rms_norm_sycl",
+        "rms_residual_next_sycl",
+        "layernorm_sycl",
+        "layernorm_onednn"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/norms/rms_norm/variants/xpu_sycl/rms_norm.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "rms_norm_sycl",
+        "fused_add_rms_norm_sycl",
+        "rms_residual_next_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/optimizers/adamw/adamw_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "adamw_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/optimizers/adamw/variants/xpu_sycl/adamw.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "adamw_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/act_quant/act_quant_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "act_quant_int8_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/act_quant/variants/xpu_sycl/act_quant.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "act_quant_int8_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/fp8_gemm/fp8_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "fp8_gemv_sycl",
+        "fp8_gemm_w8a16_sycl",
+        "fp8_gemm_onednn",
+        "fp8_gemm_w8a16_onednn",
+        "fp8_from_f32",
+        "fp8_to_f32",
+        "fp8_supported"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/fp8_gemm/variants/xpu_onednn/fp8_gemm.onednn.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "fp8_gemm_onednn",
+        "fp8_gemm_w8a16_onednn",
+        "fp8_from_f32",
+        "fp8_to_f32",
+        "fp8_supported"
+      ],
+      "notes": "Optional vendor implementation and actual exception/fallback behavior."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/fp8_gemm/variants/xpu_sycl/fp8_gemv.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "fp8_gemv_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/fp8_gemm/variants/xpu_sycl/fp8_w8a16.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "fp8_gemm_w8a16_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/gguf_gemv/gguf_iq_tables.hpp",
+      "role": "dependency",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "iq2xxs_grid",
+        "iq2xs_grid",
+        "iq2s_grid",
+        "iq3xxs_grid",
+        "iq3s_grid",
+        "ksigns_iq2xs",
+        "kmask_iq2xs",
+        "iq1s_grid_gpu",
+        "iq1s_grid"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/gguf_gemv/gguf_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "gguf_gemv_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/gguf_gemv/variants/xpu_sycl/gguf_gemv.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "gguf_gemv_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/mxfp4_gemv/mxfp4_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "mxfp4_gemv_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/mxfp4_gemv/variants/xpu_sycl/mxfp4_gemv.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "mxfp4_gemv_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/nvfp4_gemv/nvfp4_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "nvfp4_gemv_sycl",
+        "nvfp4_gemm_sycl",
+        "nvfp4_gemm_mtiled_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/nvfp4_gemv/variants/xpu_sycl/nvfp4_gemv.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "nvfp4_gemv_sycl",
+        "nvfp4_gemm_sycl",
+        "nvfp4_gemm_mtiled_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/qgemm/qgemm_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "qgemm_int8_sycl",
+        "qgemm_int8_onednn"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/qgemm/variants/xpu_onednn/qgemm.onednn.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "qgemm_int8_onednn"
+      ],
+      "notes": "Optional vendor implementation and actual exception/fallback behavior."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/qgemm/variants/xpu_sycl/qgemm.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "qgemm_int8_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/qgemv/qgemv_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "qgemv_int4_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/qgemv/variants/xpu_sycl/qgemv.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "qgemv_int4_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/quantize/quantize_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "quantize_int4_group_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/quantize/variants/xpu_sycl/quantize.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "quantize_int4_group_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/turboquant/turboquant_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "turboquant_encode_sycl",
+        "turboquant_decode_sycl"
+      ],
+      "notes": "Declarations and format comments only; no definition, public ABI entry, or manifest operation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/w4a16_gemm/variants/xpu_sycl/w4a16_gemm.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "w4a16_gemm_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/w4a16_gemm/w4a16_gemm_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "w4a16_gemm_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/sampling/argmax/argmax_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "argmax_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/sampling/argmax/variants/xpu_sycl/argmax.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "argmax_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/sampling/sample/sample_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "sample_categorical_sycl",
+        "top_k_sample_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/sampling/sample/variants/xpu_sycl/sample.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "sample_categorical_sycl",
+        "top_k_sample_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/serving/serving_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "embedding_lookup_sycl",
+        "kv_cache_scatter_sycl",
+        "kv_cache_gather_sycl",
+        "pool_mean_rms_l2_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/serving/variants/xpu_sycl/serving.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "embedding_lookup_sycl",
+        "kv_cache_scatter_sycl",
+        "kv_cache_gather_sycl",
+        "pool_mean_rms_l2_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/ssm/selective_scan/selective_scan_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "selective_scan_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/ssm/selective_scan/variants/xpu_sycl/selective_scan.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "selective_scan_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/utils/cross_entropy/variants/xpu_sycl/cross_entropy.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "cross_entropy_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/utils/dropout/variants/xpu_sycl/dropout.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "dropout_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/utils/hadamard/variants/xpu_sycl/hadamard.sycl.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "hadamard_sycl"
+      ],
+      "notes": "Native algorithm, layouts, dtype switch, bounds assumptions, and edge behavior documented and abstracted."
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/utils/utils_kernel.hpp",
+      "role": "functional",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "dropout_sycl",
+        "cross_entropy_sycl",
+        "hadamard_sycl"
+      ],
+      "notes": "Public/internal functional contract or shared decode/helper dependency paired with source implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/activations.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "gelu",
+        "softmax",
+        "silu",
+        "gelu_backward",
+        "glu",
+        "glu_gelu_f16"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/attention.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "attention",
+        "attention_f16ctx",
+        "attn_swa",
+        "rope",
+        "qk_norm_rope"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/collectives.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "all_reduce_sum"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/linear_attention.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "linear_attn",
+        "qwen_gdn_decode"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/matmul.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "dense_gemm"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/moe.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "moe_route_topk",
+        "nvfp4_moe_fused",
+        "nvfp4_moe_split",
+        "nvfp4_moe_baked_handles",
+        "int4_moe_split",
+        "nvfp4_moe_grouped",
+        "nvfp4_moe_grouped_workspace_bytes",
+        "nvfp4_moe_grouped_profitable"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/norms.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "rms_norm",
+        "fused_add_rms_norm",
+        "rms_residual_next",
+        "layernorm"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/optimizers.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "adamw"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/quantization.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "gguf_gemv",
+        "mxfp4_gemv",
+        "nvfp4_gemv",
+        "nvfp4_gemm",
+        "quantize_int4_group",
+        "act_quant_int8",
+        "fp8_gemm",
+        "fp8_gemm_w8a16",
+        "fp8_encode",
+        "fp8_decode",
+        "qgemv_int4",
+        "w4a16_gemm",
+        "qgemm_int8"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/sampling.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "argmax",
+        "sample_categorical",
+        "top_k_sample"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/serving.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "embedding_lookup",
+        "kv_cache_scatter",
+        "kv_cache_gather",
+        "pool_mean_rms_l2"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/ssm.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "selective_scan"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/utils.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "dropout",
+        "cross_entropy",
+        "hadamard"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/variants.cpp",
+      "role": "behavior",
+      "models": [
+        "models/quixi_ops.ryu"
+      ],
+      "symbols": [
+        "variant_name",
+        "variant_available",
+        "resolve_variant"
+      ],
+      "notes": "Public routing, variant, wait, fallback, output-clear, or error behavior modeled at family level."
+    }
+  ],
+  "assumptions": [
+    "Each model submission represents one bounded tensor-row or scalar fixture; raw pointer storage, work-group interleavings and queue/device lifetime are abstracted.",
+    "Integer model arithmetic preserves exact indexing, dot-product, clamp and recurrence structure but does not represent fp16/bf16 rounding, transcendental approximation, overflow, NaNs or floating tolerances.",
+    "Implementation-required shape, divisibility, pointer, alignment and index domains hold unless a named scenario explicitly models a negative index, invalid GDN slot, unavailable vendor route or unsupported W4A16 dtype.",
+    "Native nonblocking calls rely on caller-owned in-order queue and buffer lifetime; runtime/device/graph lifecycle belongs to the separate quixi_runtime model.",
+    "Generated OperationId maturity and manifest maturity are inventory metadata, not evidence of ABI wiring or numerical qualification.",
+    "No GPU numerical test, build, benchmark, lint or formatter was run while authoring this branch."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/QuixiCore-XPU/kernels/activations/gelu/variants/xpu_sycl/gelu.sycl.cpp",
+      "symbol": "gelu_sycl",
+      "description": "CPU-evaluate exact and tanh GELU over finite edges and cast at the source storage boundary."
+    },
+    {
+      "source": "src/QuixiCore-XPU/kernels/attention/attention/variants/xpu_sycl/attn_swa.sycl.cpp",
+      "symbol": "attn_swa_sycl",
+      "description": "Materialize CPU GQA and compare the symmetric end-aligned band, including even window width."
+    },
+    {
+      "source": "src/QuixiCore-XPU/kernels/norms/rms_norm/variants/xpu_sycl/rms_norm.sycl.cpp",
+      "symbol": "rms_residual_next_sycl",
+      "description": "CPU-reproduce fp32 reductions and distinct unrounded-scale versus rounded-residual points."
+    },
+    {
+      "source": "src/QuixiCore-XPU/kernels/quantization/quantize/variants/xpu_sycl/quantize.sycl.cpp",
+      "symbol": "quantize_int4_group_sycl",
+      "description": "CPU-quantize aligned groups with fp16 scales and low-even/high-odd nibbles, then compare qgemv/W4A16 dots."
+    },
+    {
+      "source": "src/QuixiCore-XPU/kernels/quantization/gguf_gemv/variants/xpu_sycl/gguf_gemv.sycl.cpp",
+      "symbol": "gguf_gemv_sycl",
+      "description": "Compare type codes 0..15 against independent ggml host decoders; inspect unknown-code q4_0 fallback separately."
+    },
+    {
+      "source": "src/QuixiCore-XPU/kernels/moe/moe_route/variants/xpu_sycl/moe_route.sycl.cpp",
+      "symbol": "moe_route_topk_sycl",
+      "description": "CPU-select descending experts with ascending-ID ties and selected-only softmax over legal k."
+    },
+    {
+      "source": "src/QuixiCore-XPU/kernels/moe/nvfp4_moe/variants/xpu_sycl/nvfp4_moe_grouped.sycl.cpp",
+      "symbol": "nvfp4_moe_grouped_sycl",
+      "description": "Compare explicit grouped output with the independently duplicated per-route decoder; do not infer profitability."
+    },
+    {
+      "source": "src/QuixiCore-XPU/kernels/linear_attention/qwen_gdn_decode/variants/xpu_sycl/qwen_gdn.sycl.cpp",
+      "symbol": "qwen_gdn_decode_sycl",
+      "description": "CPU-step valid unique and invalid slots, checking state mutation, zero core/mixed output and z pass-through."
+    },
+    {
+      "source": "src/QuixiCore-XPU/kernels/common/rng.hpp",
+      "symbol": "uniform01",
+      "description": "Reproduce wrapping PCG and upper-24-bit conversion for dropout masks and row sampling draws."
+    },
+    {
+      "source": "src/QuixiCore-XPU/src/dispatch/quantization.cpp",
+      "symbol": "fp8_gemm",
+      "description": "Inspect native M=1 versus vendor-required M>1 routing and absence/unsupported vendor errors."
+    },
+    {
+      "source": "src/QuixiCore-XPU/include/quixicore/contract/operations.hpp",
+      "symbol": "kOperations",
+      "description": "Compare canonical names with ops.hpp and kernels.yaml; leave unmatched observed IDs and TurboQuant unwired."
+    }
+  ]
+}

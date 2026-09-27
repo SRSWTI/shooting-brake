@@ -1,0 +1,286 @@
+{
+  "id": "ring",
+  "title": "SBRING02 shared ring, cancellation, retirement, and memfd transport probe",
+  "models": [
+    {
+      "path": "models/ring.ryu",
+      "main": "ring",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessPublished",
+        "witnessCommitted",
+        "witnessQuarantined",
+        "witnessRetired",
+        "witnessProbeComplete"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/phase2/Makefile",
+      "role": "build",
+      "models": ["models/ring.ryu"],
+      "symbols": [],
+      "notes": "Make target graph, not a C++ symbol surface: separates transport-probe, host-only shared-ring-tests, and real b70-ring-integration binaries; modeled only as subsystem/dependency boundaries."
+    },
+    {
+      "path": "src/phase2/b70_ring_control.hpp",
+      "role": "functional",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "shooting_brake::phase2::b70_control::Bootstrap",
+        "shooting_brake::phase2::b70_control::StartupReply",
+        "shooting_brake::phase2::b70_control::Control",
+        "shooting_brake::phase2::b70_control::FaultAck",
+        "shooting_brake::phase2::b70_control::ShutdownReply"
+      ],
+      "notes": "Exact fixed control-plane packets are abstracted by authentication acceptance/rejection and lifecycle actions; packet sizes, magic, reserved bytes, fault acknowledgements, and allocation counters are documented rather than byte-modeled."
+    },
+    {
+      "path": "src/phase2/b70_ring_integration_test.cpp",
+      "role": "harness",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "run_integration",
+        "check_startup_identity_rejection",
+        "publish_request",
+        "consume_request",
+        "check_stale_sequence",
+        "benchmark_ring"
+      ],
+      "notes": "Real B70 process/ring harness for authenticated startup negatives, zero-remote bypass, numerical cases, eight-slot backpressure and wrap reuse, timing, and clean shutdown accounting; no harness result is claimed here."
+    },
+    {
+      "path": "src/phase2/b70_ring_provider.cpp",
+      "role": "behavior",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "parse_options",
+        "placement_fingerprint",
+        "bank_fingerprint",
+        "matches_trusted_identity",
+        "receive_bootstrap",
+        "validate_claim",
+        "complete_failure",
+        "serve",
+        "run"
+      ],
+      "notes": "Models trusted bootstrap gating, canonical request validation, single-flight issue/take outcome, explicit closure of valid error claims, terminal publication, and control shutdown. SHA-256 bytes, device math, polling duration, and detailed exit codes are abstract."
+    },
+    {
+      "path": "src/phase2/memfd_transport_host.cu",
+      "role": "behavior",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "TransportProbe::start",
+        "TransportProbe::run_iteration",
+        "TransportProbe::shutdown",
+        "TransportProbe::create_shared_region",
+        "TransportProbe::send_bootstrap",
+        "TransportProbe::initialize_cuda",
+        "collect_samples",
+        "print_stats"
+      ],
+      "notes": "Independent SBP2MEMF host lifecycle is modeled as one-lane publish/copy/reset/shutdown, explicitly not as SBRING02. CUDA byte generation/copies, timing statistics, process cleanup, and device identity checks are documented/abstract."
+    },
+    {
+      "path": "src/phase2/memfd_transport_protocol.hpp",
+      "role": "functional",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "shooting_brake::phase2::RequestState",
+        "shooting_brake::phase2::CompletionState",
+        "shooting_brake::phase2::CompletionStatus",
+        "shooting_brake::phase2::ProbeHeader",
+        "shooting_brake::phase2::BootstrapMessage",
+        "shooting_brake::phase2::BootstrapAck",
+        "shooting_brake::phase2::valid_layout"
+      ],
+      "notes": "Models probe sequence, phase, extent validity, completion and shutdown. Exact cache-line layout, one-MiB disjoint arenas and transfer-size constants are documented but not represented as byte arrays."
+    },
+    {
+      "path": "src/phase2/memfd_transport_provider.cpp",
+      "role": "behavior",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "connect_seqpacket",
+        "receive_bootstrap",
+        "validate_memfd",
+        "select_b70",
+        "publish_completion",
+        "run_provider",
+        "parse_options"
+      ],
+      "notes": "Models exact-sequence claim, invalid extent failure, successful dependent round trip, and clean shutdown. SCM_RIGHTS parsing, SYCL allocation/profiling, device selection, copy exceptions, and multi-session loop remain implementation-level behavior described in the chapter."
+    },
+    {
+      "path": "src/phase2/ring_protocol.hpp",
+      "role": "functional",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "shooting_brake::phase2::SlotState",
+        "shooting_brake::phase2::CompletionCode",
+        "shooting_brake::phase2::ErrorCode",
+        "shooting_brake::phase2::SlotPublication",
+        "shooting_brake::phase2::RequestDescriptor",
+        "shooting_brake::phase2::CompletionDescriptor",
+        "shooting_brake::phase2::RingHeader"
+      ],
+      "notes": "Authoritative SBRING02 ABI. Model preserves lane states, closure, terminal identity, generations, output visibility and retirement; fixed offsets, extents, dtypes, nonce/fingerprint bytes and platform static assertions are chapter-level functional constraints."
+    },
+    {
+      "path": "src/phase2/shared_ring.cpp",
+      "role": "behavior",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "validate_header",
+        "route_hash",
+        "validate_request_descriptor",
+        "validate_request_payload",
+        "validate_completion_descriptor",
+        "validate_terminal",
+        "shooting_brake::phase2::SharedRing::create",
+        "shooting_brake::phase2::SharedRing::attach",
+        "shooting_brake::phase2::SharedRing::host_begin",
+        "shooting_brake::phase2::SharedRing::host_publish",
+        "shooting_brake::phase2::SharedRing::host_cancel",
+        "shooting_brake::phase2::SharedRing::host_timeout",
+        "shooting_brake::phase2::SharedRing::provider_claim",
+        "shooting_brake::phase2::SharedRing::provider_complete",
+        "shooting_brake::phase2::SharedRing::host_consume",
+        "shooting_brake::phase2::SharedRing::host_reclaim",
+        "shooting_brake::phase2::SharedRing::teardown_generation"
+      ],
+      "notes": "Primary behavioral correspondence. Each atomic publication/CAS boundary is one model action; exact SHA-256 computation and byte-level descriptor validation are collapsed into explicit validity booleans while output exposure and error branches remain distinct."
+    },
+    {
+      "path": "src/phase2/shared_ring.hpp",
+      "role": "functional",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "shooting_brake::phase2::RingStatus",
+        "shooting_brake::phase2::RingIdentity",
+        "shooting_brake::phase2::RequestSpec",
+        "shooting_brake::phase2::RingTicket",
+        "shooting_brake::phase2::ProviderClaim",
+        "shooting_brake::phase2::SharedRing"
+      ],
+      "notes": "Public SPSC API and typed payload ownership. Model represents lifecycle/status distinctions and matching ticket identity but abstracts raw pointers, spans, move-only descriptor ownership and mapping visitor."
+    },
+    {
+      "path": "src/phase2/shared_ring_tests.cpp",
+      "role": "harness",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "test_layout",
+        "test_states_visibility_and_notifications",
+        "test_invalid_payload_and_bounds",
+        "test_backpressure_and_reclamation",
+        "test_cancel_timeout_quarantine",
+        "test_ambiguous_device_failure",
+        "test_stale_completion",
+        "test_fork_delayed_writer",
+        "test_child_kill_replacement",
+        "test_cross_process_generation_retirement",
+        "test_wraparound"
+      ],
+      "notes": "CPU/fork protocol comparison surface covering the model's critical success, error, quarantine, stale, reuse and retirement branches. It is explicitly not a CUDA/B70 acceptance harness."
+    },
+    {
+      "path": "specs/reyu/ring_correspondence.cpp",
+      "role": "harness",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "success_path",
+        "cancel_before_claim",
+        "cancel_after_claim",
+        "stale_completion",
+        "retirement_and_replacement",
+        "main"
+      ],
+      "notes": "CPU-only correspondence harness over the actual SharedRing host/provider APIs and shared_ring.cpp. It asserts real publication states, RingStatus results, output exposure, quarantine, raw stale completion rejection, destructive retirement and fresh-generation admission; it does not instantiate or mock B70 compute. Exact command: g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -pthread -Isrc/phase2 specs/reyu/ring_correspondence.cpp src/phase2/shared_ring.cpp -o /tmp/ring_correspondence. Matching runs: successAndSafeReuseTest, preclaimCancellationTombstoneTest, postclaimDeadlineQuarantineTest (cancellation variant), staleCompletionNeverExposesOutputTest, retirementRequiresFreshGenerationTest."
+    },
+    {
+      "path": "src/phase0/provider_protocol.yaml",
+      "role": "dependency",
+      "models": ["models/ring.ryu"],
+      "symbols": [],
+      "notes": "Historical declarative protocol-v1 schema has no code symbols. It is included only to make the incompatibility with executable SBRING02 explicit: logical head/tail statuses, compact IDs and failed-mask recovery are not modeled as the Phase-2 wire ABI."
+    },
+    {
+      "path": "src/phase1/b70_provider.hpp",
+      "role": "dependency",
+      "models": ["models/ring.ryu"],
+      "symbols": [
+        "shooting_brake::phase1::ProviderStatus",
+        "shooting_brake::phase1::B70Provider::load",
+        "shooting_brake::phase1::B70Provider::issue",
+        "shooting_brake::phase1::B70Provider::take",
+        "shooting_brake::phase1::B70Provider::shutdown"
+      ],
+      "notes": "Downstream single-flight compute boundary invoked by the ring bridge. Status-to-wire mapping is represented; kernel/device and provider-internal mechanics belong to the provider model."
+    }
+  ],
+  "assumptions": [
+    "The model's representative lane stands for the deterministic selected slot (request_seq-1)%8; the chapter and source retain the production eight-slot capacity and full-ring behavior.",
+    "Boolean descriptorExact, payloadValid, completionIdentityExact, outputFinite and probeExtentValid summarize the exact source validators; no cryptographic collision resistance or byte-layout proof is claimed.",
+    "Each Reyu action corresponds to one source ownership/publication boundary. Linux release/acquire ordering, interprocess cache coherence and eventfd syscall behavior remain implementation assumptions.",
+    "Eventfd notifications are omitted from SBRING02 model state because SharedRing treats them as coalescible hints; slot state remains authoritative.",
+    "Replacement after retirement represents construction of a fresh SharedRing mapping with fresh identity, not resurrection of a dead mapping.",
+    "SBP2MEMF probe state is intentionally independent of SBRING02 service state; a probe success provides copy-path evidence only, not expert-service correctness.",
+    "Protocol-v1 provider_protocol.yaml is historical logical design input, not the executable serialization accepted by SharedRing.",
+    "Numerical B70 computation, bank contents, placement derivation, CUDA/SYCL device selection, timing and allocation internals are external to this model and must be checked by their implementation harnesses."
+  ],
+  "implementation_checks": [
+    {
+      "source": "specs/reyu/ring_correspondence.cpp",
+      "symbol": "main",
+      "description": "Compile with g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -pthread -Isrc/phase2 specs/reyu/ring_correspondence.cpp src/phase2/shared_ring.cpp -o /tmp/ring_correspondence, then run /tmp/ring_correspondence to compare actual SharedRing success, cancellation/quarantine, stale completion, retirement and replacement observations with the named Reyu runs."
+    },
+    {
+      "source": "src/phase2/shared_ring_tests.cpp",
+      "symbol": "test_states_visibility_and_notifications",
+      "description": "CPU-run the real memfd ring success path and compare the observed FREE→HOST_WRITING→REQUEST_READY→PROVIDER_RUNNING→RESPONSE_READY→HOST_READING→FREE sequence and payload visibility with successAndSafeReuseTest."
+    },
+    {
+      "source": "src/phase2/shared_ring_tests.cpp",
+      "symbol": "test_cancel_timeout_quarantine",
+      "description": "CPU-differentially compare pre-claim cancellation tombstones and post-claim timeout quarantine; verify ConstCompletionPayload output remains null for both closed lanes."
+    },
+    {
+      "source": "src/phase2/shared_ring_tests.cpp",
+      "symbol": "test_invalid_payload_and_bounds",
+      "description": "Exercise real mask, canonical ID, row-map, route-position and raw-offset failures and compare publication/claim state plus non-exposure with the malformed model scenarios."
+    },
+    {
+      "source": "src/phase2/shared_ring_tests.cpp",
+      "symbol": "test_child_kill_replacement",
+      "description": "CPU/fork-compare provider death behavior: the claimed old slot remains running until destructive generation retirement, old reclamation fails, and only a newly created generation serves again."
+    },
+    {
+      "source": "src/phase2/shared_ring_tests.cpp",
+      "symbol": "test_cross_process_generation_retirement",
+      "description": "Confirm an attached process acquires the shared dead flag and that later attach and host_begin reject the retired generation."
+    },
+    {
+      "source": "src/phase2/ring_protocol.hpp",
+      "symbol": "shooting_brake::phase2::RingHeader",
+      "description": "Compile a CPU-only layout inspector or inspect the existing static assertions for exact struct sizes, offsets, payload stride 1589248 and mapping size 12726272; compare with chapter inventory."
+    },
+    {
+      "source": "src/phase2/shared_ring.cpp",
+      "symbol": "shooting_brake::phase2::SharedRing::host_consume",
+      "description": "Drive real completions with matching, stale, failed and quarantined identities and compare RingStatus plus whether output_fp32 is exposed against model Observation values."
+    },
+    {
+      "source": "src/phase2/b70_ring_provider.cpp",
+      "symbol": "validate_claim",
+      "description": "Source-inspect the bridge's stricter canonical row/route and finite-weight checks against SharedRing payload validation; flag future divergence before any hardware run."
+    },
+    {
+      "source": "src/phase0/provider_protocol.yaml",
+      "symbol": "request",
+      "description": "Source-compare logical v1 request/completion fields with SBRING02 descriptors and SBP2MEMF publications so inventories never treat these three incompatible contracts as aliases."
+    }
+  ]
+}

@@ -1,0 +1,209 @@
+{
+  "id": "drafter",
+  "title": "Experimental DFlash drafter data, training, export, and acceptance lifecycle",
+  "models": [
+    {
+      "path": "models/drafter.ryu",
+      "main": "drafter",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessAccepted",
+        "witnessTruncationEdge",
+        "witnessResearchOnly",
+        "witnessFailure"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "experiments/drafter_capture.py",
+      "role": "behavior",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["_post_json", "_tokenize_record", "_load_corpus", "capture", "main"],
+      "notes": "Models corpus-id deduplication, exact prompt/completion replay identity, response_start, unique cache salt, capture-file completion, retry exhaustion, and missing-record failure; HTTP/thread timing is abstract."
+    },
+    {
+      "path": "experiments/drafter_datagen.py",
+      "role": "behavior",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["_code_snippets", "build_prompts", "generate"],
+      "notes": "Models deterministic prompt identities, append-only resume, raw reasoning-preserving completions, pausing and corpus count; prompt text and sampling numerics are abstract."
+    },
+    {
+      "path": "experiments/drafter_overnight.sh",
+      "role": "harness",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["log", "mark", "done_already", "require_lean_tmpfs", "stop_serving", "boot_serving", "restore_production"],
+      "notes": "Owns stage markers, minimum corpus gate, capture disk budget, service lifecycle, acceptance non-promotion, and health-only fallback. A healthy candidate suppresses the ordinary production boot; shell stage bodies have no callable symbols and are explained in the chapter."
+    },
+    {
+      "path": "experiments/drafter_train/acceptance.sh",
+      "role": "harness",
+      "models": ["models/drafter.ryu"],
+      "symbols": [],
+      "notes": "Top-level shell harness with no named functions: validates assets, serially boots equal-context baseline/candidate arms, collects quality/ladder evidence, and invokes summarize."
+    },
+    {
+      "path": "experiments/drafter_train/adapter.py",
+      "role": "behavior",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["capture_paths", "load_record", "validate_record", "_stage_link", "stage_capture", "main"],
+      "notes": "Models exact feature keys, dtype/shape/layer/mask/finiteness/no-copy constraints, truncation skip, one-record-at-a-time mmap lifetime, idempotent links, and atomic manifest publication."
+    },
+    {
+      "path": "experiments/drafter_train/export_laguna.py",
+      "role": "behavior",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["resolve_source", "resolve_training_state", "validate_config", "iter_native_tensors", "export", "main"],
+      "notes": "Models DFlash-state admission, exact training/native key sets, q/k/v shape validation and fusion, reference-config restoration, lineage ambiguity, and atomic native export."
+    },
+    {
+      "path": "experiments/drafter_train/gate.py",
+      "role": "functional",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["model_id", "post_json", "quality_prompts", "capture", "_probabilities", "_js_divergence", "compare", "_ladder_rows", "summarize", "main"],
+      "notes": "Models aligned 120-prompt top-5 distribution evidence, JSD threshold, exact six-rung ladder validation, acceptance counters, effective-decode threshold, and pass/fail summary."
+    },
+    {
+      "path": "experiments/drafter_train/laguna_dflash_model.py",
+      "role": "functional",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["_validate_laguna_config", "LagunaDFlashAttention", "LagunaDFlashDecoderLayer", "LagunaDFlashDraftModel"],
+      "notes": "Chapter specifies exact Laguna geometry, target-hidden width/layers, context normalization, per-head softplus gate and residual structure. Tensor/attention/cache execution remains an external PyTorch/Transformers/SpecForge numerical contract."
+    },
+    {
+      "path": "experiments/drafter_train/pilot.yaml",
+      "role": "dependency",
+      "models": ["models/drafter.ryu"],
+      "symbols": [],
+      "notes": "Declarative configuration has no symbols. It pins offline target/features, 3072 window, one-GPU DFlash training, CPU optimizer offload, objective knobs, retention, and null warmstart/resume fields."
+    },
+    {
+      "path": "experiments/drafter_train/prepare_warmstart.py",
+      "role": "behavior",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["resolve_checkpoint", "validate_source_config", "build_config", "expected_native_keys", "expected_training_keys", "checkpoint_weight_files", "checkpoint_keys", "iter_checkpoint_tensors", "iter_training_tensors", "save_sharded", "convert", "main"],
+      "notes": "Models exact native config and 69-key schema, duplicate/incomplete shard rejection, fused-QKV dimensions, 81-key training schema, bounded shards, and atomic config/index writes."
+    },
+    {
+      "path": "experiments/drafter_train/tests/test_adapter.py",
+      "role": "harness",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["make_record", "write_record", "test_stage_capture_links_files_in_specforge_offline_contract", "test_stage_capture_releases_each_mmap_record_before_loading_next", "detach_flat_hidden", "corrupt_loss_mask", "corrupt_layer_ids", "test_stage_capture_rejects_invalid_capture_contract", "test_adapter_window_matches_training_config"],
+      "notes": "Contract examples for feature linking/reading, normalized shapes and shared storage, mmap lifetime, mask/layer/no-copy rejection, and adapter/config window agreement; not modeled as runtime behavior."
+    },
+    {
+      "path": "experiments/drafter_train/tests/test_scaffold.py",
+      "role": "harness",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["poolside_config", "quality_payload", "ladder_rows", "test_poolside_config_maps_to_registered_training_contract", "test_pilot_is_a_typed_single_gpu_offline_warmstart_run", "test_train_sh_sets_exactly_one_of_warmstart_or_resume", "test_quality_gate_compares_distributions_not_generated_text", "test_acceptance_thresholds_pass_at_inclusive_boundaries", "test_shell_entrypoints_parse"],
+      "notes": "Contract examples for config/key conversion, pilot shape, exclusive resume/warmstart, distribution comparison, inclusive boundaries and shell parsing; not evidence that live training or serving passed."
+    },
+    {
+      "path": "experiments/drafter_train/train.sh",
+      "role": "harness",
+      "models": ["models/drafter.ryu"],
+      "symbols": [],
+      "notes": "Top-level shell harness with no named functions: enforces environment/GPU exclusivity, stages data, chooses exactly one warmstart/resume override, invokes external training, then export."
+    },
+    {
+      "path": "experiments/drafter_train/train_runner.py",
+      "role": "dependency",
+      "models": ["models/drafter.ryu"],
+      "symbols": [],
+      "notes": "Import-time entrypoint with no locally declared function: registers laguna_dflash_model, then delegates process behavior to external specforge.cli.main."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/hidden_capture.py",
+      "role": "dependency",
+      "models": ["models/drafter.ryu"],
+      "symbols": ["CAPTURE_ENV", "capture_filename", "make_capture_request_id"],
+      "notes": "Referenced dependency used by drafter_capture for capture environment, stable filenames and request identity; hook tensor-production internals are outside this assigned inventory."
+    },
+    {
+      "path": "benchmarks/decode_ladder_probe.py",
+      "role": "dependency",
+      "models": ["models/drafter.ryu"],
+      "symbols": [],
+      "notes": "External harness invoked by acceptance.sh to produce ladder rows. The drafter model validates its observable row contract but does not model the probe implementation."
+    }
+  ],
+  "assumptions": [
+    "The checked-in workflow is experimental. Accepted means its recorded quality, speculative-acceptance and effective-decode thresholds passed; no assigned source promotes the checkpoint into the ordinary production recipe.",
+    "The target HTTP service, hidden-capture hook, filesystem atomic rename semantics, systemd, PyTorch, Transformers, safetensors, Hugging Face snapshot resolution, SpecForge and the decode-ladder producer are external boundaries.",
+    "A final capture filename denotes the hook's completed atomic record write; the driver does not inspect tensor contents before the adapter stage.",
+    "The Reyu model collapses worker retries, locks, service boots, training, tensor conversion and file publication into stage actions while retaining observable counts, identity, schemas, masks, shapes and error branches.",
+    "Text-to-token replay may differ from originally sampled token ids at rare completion merge boundaries because datagen stores text rather than completion ids.",
+    "Adapter success can contain zero usable records when every supervised suffix falls outside max_length; external training, rather than adapter validation, must then fail or refuse useful work.",
+    "The external training state is treated as trained only after SpecForge exits successfully and produces the exact DFlash state schema required by export; optimizer and attention numerics are not inferred from configuration.",
+    "The supervisor's fallback is health-based rather than identity-based: a healthy candidate is preserved without ordinary production restoration, while a failed ordinary boot after no healthy endpoint remains an operator-required state.",
+    "A nonzero acceptance command leaves the acceptance marker absent and the candidate unshipped, but drafter_overnight.sh can still reach its explicit final exit 0; evidence/marker state, not supervisor status alone, carries the decision."
+  ],
+  "implementation_checks": [
+    {
+      "source": "experiments/drafter_train/adapter.py",
+      "symbol": "validate_record",
+      "description": "CPU: construct the small tensor record used by test_adapter, then independently corrupt dtype, [T,6,3072]/[T,18432] shape, suffix mask, layer ids, finiteness and shared storage; require valid admission and specific rejection of each corruption."
+    },
+    {
+      "source": "experiments/drafter_train/adapter.py",
+      "symbol": "stage_capture",
+      "description": "CPU/filesystem: stage usable plus prompt-truncated records, read manifest totals and SpecForge normalized shapes, confirm links share source files, and separately show that an all-truncated input is accounted as a zero-record manifest rather than rejected."
+    },
+    {
+      "source": "experiments/drafter_capture.py",
+      "symbol": "_load_corpus",
+      "description": "CPU/filesystem: provide duplicate ids and malformed/non-text JSONL; confirm first-occurrence deduplication and fail-closed structural validation without contacting a server."
+    },
+    {
+      "source": "experiments/drafter_train/prepare_warmstart.py",
+      "symbol": "build_config",
+      "description": "CPU: feed the exact Poolside config and one-field mutations; compare architecture/type/target-layer transformation and require rejection of every geometry or capture-point mismatch."
+    },
+    {
+      "source": "experiments/drafter_train/prepare_warmstart.py",
+      "symbol": "iter_training_tensors",
+      "description": "CPU: split a synthetic fused tensor of shape [11264,3072], confirm q/k/v shapes [9216,3072], [1024,3072], [1024,3072], and compare concatenation to the source; reject an incorrect fused shape."
+    },
+    {
+      "source": "experiments/drafter_train/export_laguna.py",
+      "symbol": "iter_native_tensors",
+      "description": "CPU: fuse a complete synthetic training dictionary against the native key schema, compare key consumption and QKV ordering, and require failures for missing, extra or wrong-shaped projections."
+    },
+    {
+      "source": "experiments/drafter_train/export_laguna.py",
+      "symbol": "resolve_training_state",
+      "description": "CPU/filesystem: exercise direct state, single latest lineage, multiple latest lineages, step fallback and empty-directory branches to compare exact checkpoint identity selection."
+    },
+    {
+      "source": "experiments/drafter_train/gate.py",
+      "symbol": "compare",
+      "description": "CPU: compare identical and perturbed 120-row top-logprob evidence, including unlisted tail probability, and verify prompt/schema/depth misalignment is rejected rather than paired by position silently."
+    },
+    {
+      "source": "experiments/drafter_train/gate.py",
+      "symbol": "_ladder_rows",
+      "description": "CPU: validate the six ordered contexts and mutate counters, percentages, label, timing finiteness and order one at a time; each malformed evidence case must fail closed."
+    },
+    {
+      "source": "experiments/drafter_train/gate.py",
+      "symbol": "summarize",
+      "description": "CPU: compare inclusive 108/120 quality, 60% aggregate/every-rung acceptance and 6.0 ms/token boundaries with immediately below/above cases; inspect the emitted decision JSON and return status."
+    },
+    {
+      "source": "experiments/drafter_train/laguna_dflash_model.py",
+      "symbol": "_validate_laguna_config",
+      "description": "CPU/source inspection: instantiate or validate the mapped config and mutate each geometry, layer layout and dflash_config field; this checks framework admission only, not attention numerical parity or GPU training."
+    },
+    {
+      "source": "experiments/drafter_train/train.sh",
+      "symbol": "",
+      "description": "Source inspection: confirm the resume branch contains only training.resume_from and the fresh branch only model.draft_checkpoint_path, matching pilot.yaml where both defaults are null."
+    },
+    {
+      "source": "experiments/drafter_overnight.sh",
+      "symbol": "restore_production",
+      "description": "Source inspection: trace success, stage-error, signal, acceptance-failure and fallback-failure exits; show that a healthy candidate prevents the ordinary production boot and distinguish that state from recipe promotion and supervisor exit status."
+    }
+  ]
+}

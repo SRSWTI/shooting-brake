@@ -1,0 +1,188 @@
+{
+  "id": "placement",
+  "title": "Expert ownership, compact slots, and runtime route partition",
+  "models": [
+    {
+      "path": "models/placement.ryu",
+      "main": "placement",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessWeightedLargestRemainder",
+        "witnessSparseLayerForcedCuda",
+        "witnessThreeTier",
+        "witnessAllRemotePlacement",
+        "witnessCapacityRejection"
+      ]
+    },
+    {
+      "path": "models/partition.ryu",
+      "main": "partition",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessThreeWayPartition",
+        "witnessDummyZeroWeight",
+        "witnessPaddingExcluded",
+        "witnessAllCuda",
+        "witnessNoCudaRejected"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/placement.py",
+      "role": "behavior",
+      "models": ["models/placement.ryu"],
+      "symbols": [
+        "Device",
+        "DeviceTarget",
+        "DeviceCapacity",
+        "ExpertOwner",
+        "Placement",
+        "PlacementPolicy",
+        "AllCudaPolicy",
+        "ExpertGroup",
+        "validate_expert_groups",
+        "ExpertGroupPolicy",
+        "FractionalRemotePolicy",
+        "FractionalRemotePolicy._remote_counts",
+        "FractionalRemotePolicy.groups",
+        "SplitPolicy",
+        "InterleavedPolicy",
+        "LayerSubsetPolicy",
+        "AllOutPolicy",
+        "build_placement",
+        "validate_placement",
+        "b70_bank_covers",
+        "all_out_enabled",
+        "policy_from_name",
+        "build_for_qualified"
+      ],
+      "notes": "Authoritative immutable owner table, all built-in policies, indexed targets, per-target dense slots, optional resident-byte capacity checks, sparse bank coverage, manifest schemas, environment policy parser, and CPU opt-in. The Reyu model executes policy algebra on a bounded ten-expert row; apportionTwoRemote is a rational two-card counterpart to the source's float-based largest-remainder calculation. Serialization bytes, filesystem I/O, and arbitrary card counts are abstract."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/partition.py",
+      "role": "behavior",
+      "models": ["models/partition.ryu"],
+      "symbols": [
+        "PartitionError",
+        "DispatchBufferGeometry",
+        "validate_dispatch_buffer_shapes",
+        "validate_cuda_dummy_slot_placement",
+        "build_cuda_expert_maps",
+        "compact_cuda_routes",
+        "build_device_map",
+        "RoutePartition",
+        "partition_routes",
+        "validate_partition"
+      ],
+      "notes": "Authoritative route-device gather, padding exclusion, disjoint/covering/capable/finite validation, ascending CUDA compact maps, dtype preservation, and zero-weight dummy-slot rule. Tensor payloads are represented as bounded route-position sets; shape/rank and all-remote failures remain explicit."
+    },
+    {
+      "path": "src/phase4/placement_unit_test.py",
+      "role": "harness",
+      "models": ["models/placement.ryu", "models/partition.ryu"],
+      "symbols": [
+        "Step1HybridContractTest.test_cuda_compaction_round_trips_and_masks_b70_routes",
+        "Step1HybridContractTest.test_zero_cuda_experts_rejects_dummy_slot_path",
+        "Step1HybridContractTest.test_dispatch_buffers_resolve_to_hidden_3072",
+        "Step1HybridContractTest.test_sparse_bank_coverage_uses_source_ids_not_prefix_count",
+        "MultiDevicePlacementTest.test_explicit_groups_are_complete_disjoint_and_indexed",
+        "MultiDevicePlacementTest.test_180_experts_balance_across_two_and_three_devices",
+        "MultiDevicePlacementTest.test_fractional_policy_keeps_half_on_cuda_without_divisibility_assumption",
+        "MultiDevicePlacementTest.test_device_vram_overcommit_is_rejected"
+      ],
+      "notes": "CPU-focused harness for exact int4 ownership, compaction/dummy slot, geometry, sparse source ids, indexed multi-card policies, unweighted fractional division and capacity rejection. The file also covers admission, allocation and telemetry outside this branch."
+    },
+    {
+      "path": "src/phase5/placement_test.py",
+      "role": "harness",
+      "models": ["models/placement.ryu"],
+      "symbols": ["qualified", "read_bank_header", "main"],
+      "notes": "Original qualified-35B manifest gate: legacy bank header, all-CUDA/split/interleaved/subset policies, FP8 CUDA forcing, bank coverage, generation, manifest round trip, non-dense slots and unknown policy rejection. It is inventory evidence, not modeled runtime code."
+    },
+    {
+      "path": "src/phase6/layer_topology_unit_test.py",
+      "role": "harness",
+      "models": ["models/placement.ryu"],
+      "symbols": ["qwen_like", "laguna_like", "laguna_placement", "main"],
+      "notes": "Pins Qwen prefix-bank behavior and Laguna absolute routed layers 1..47 mapping to compact bank rows 0..46. It documents the representational compromise that dense model layer 0 receives CUDA placeholder owners because Placement has no no-routed-row form."
+    },
+    {
+      "path": "src/phase6/partition_unit_test.py",
+      "role": "harness",
+      "models": ["models/partition.ryu"],
+      "symbols": ["main"],
+      "notes": "Torch-only synthetic classification harness for split/all-CUDA/interleaved placement, padding, input-weight preservation, invalid coverage/overlap, capable-layer constraints and a valid CUDA/B70/CPU three-way split."
+    },
+    {
+      "path": "src/phase6/partition_integration_test.py",
+      "role": "harness",
+      "models": ["models/partition.ryu"],
+      "symbols": ["run_case", "main"],
+      "notes": "Live all-CUDA versus split:128 token-parity and remote-marker harness. With hybrid enabled but no B70 device, masked remote work is recomputed on CUDA; it exercises partition/merge identity rather than physical B70 transport."
+    },
+    {
+      "path": "src/phase6/shadow_validation_test.py",
+      "role": "harness",
+      "models": ["models/partition.ryu"],
+      "symbols": ["main"],
+      "notes": "Live eager shadow harness requiring a remote route and checking masked CUDA plus masked remote against full routed output with max_abs < 0.1, cosine > 0.999 and no NaN. Numerical tolerance is documented but not encoded as set ownership."
+    }
+  ],
+  "assumptions": [
+    "The ten-expert placement domain and five route positions are explicit finite abstractions; production dimensions remain source/configuration inputs.",
+    "apportionTwoRemote requires remoteN >= 0 and positive integer weights and models exactly two positional B70 cards; the source validates these preconditions before calling _remote_counts.",
+    "apportionTwoRemote uses exact integer rational remainders. It corresponds to the Python source when binary-float proportional shares preserve the same fractional-remainder ordering; extreme integers near a floating tie require direct Python comparison.",
+    "The model accepts cudaN as the already-rounded result of Python round(num_experts * cuda_fraction), avoiding a false real-number model of Python ties-to-even binary floating arithmetic.",
+    "Each successful build action atomically publishes a complete immutable row, matching build_placement publication rather than exposing mutable construction internals.",
+    "denseSlots records the source validator result; the partition model separately exposes remote-to-dummy slot zero behavior but does not enumerate every target slot.",
+    "A capable layer is an absolute model layer backed by an offline bank. Capability does not imply that the selected policy makes the layer remotely active.",
+    "A Laguna dense-layer CUDA row is a manifest placeholder documented by the topology harness, not a claim that a routed expert module executes in that layer.",
+    "Partition mask identity is structural. It does not establish provider success, kernel numerical parity, transport ordering, latency, or final token parity.",
+    "Generation replacement occurs only at a caller-controlled coarse boundary; these modules do not implement an online predictive swap protocol.",
+    "Only capacities explicitly present in Placement.device_capacities constrain resident expert bytes; unrelated allocations and undiscovered hardware limits are outside validation.",
+    "No owned harness, build, test, formatter, linter, GPU workload, or server workload was executed while authoring these artifacts."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/placement.py",
+      "symbol": "FractionalRemotePolicy._remote_counts",
+      "description": "CPU differential: compare apportionTwoRemote(5,3,2) with FractionalRemotePolicy((0,1),0.0,(3,2))._remote_counts(5); both should return positional counts (3,2). Also compare the unweighted source branch at remote_n=181 with model weights (1,1), expecting (91,90). Sweep bounded positive weights and report separately any source-float versus rational ordering divergence rather than treating it as model failure."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/placement.py",
+      "symbol": "FractionalRemotePolicy.groups",
+      "description": "CPU differential: for 10 experts, cuda_fraction=0.5 and weights (3,2), inspect half-open groups and assert B70:0 owns 0..2, B70:1 owns 3..4, and CUDA owns 5..9, matching weightedLargestRemainderTest."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/placement.py",
+      "symbol": "validate_placement",
+      "description": "CPU check: construct explicit two-card groups with independently dense slot-zero origins, round-trip the v2 manifest, then lower one capacity by one byte and confirm overcommit rejection."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/placement.py",
+      "symbol": "b70_bank_covers",
+      "description": "CPU check: use remote global ids {0,4,9} and explicit bank_source_expert_ids=(0,4,9), then replace the bank set with (0,1,8); require true then false. Repeat with Laguna absolute bank_layer_ids=1..47 to distinguish it from the prefix fallback."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/partition.py",
+      "symbol": "compact_cuda_routes",
+      "description": "Torch CPU differential: use global ids [0,3,7,9,-1], a compact map where only 0 and 3 map to local 0 and 1, and finite weights; assert remote/padding ids become dummy zero, corresponding CUDA weights are zero, local entries retain weights, and the output id dtype equals input dtype."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/partition.py",
+      "symbol": "validate_cuda_dummy_slot_placement",
+      "description": "CPU check: build FractionalRemotePolicy((0,1), cuda_fraction=0.0), confirm placement validation succeeds, then confirm dummy-slot validation rejects the all-remote capable rows. This checks the intentional cross-module constraint."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/partition.py",
+      "symbol": "partition_routes",
+      "description": "Torch CPU comparison: classify a route row containing CUDA, B70, CPU and -1 padding against a synthetic device-map row, then run validate_partition and compare exact Boolean masks/counts to threeWayPartitionTest."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/partition.py",
+      "symbol": "validate_dispatch_buffer_shapes",
+      "description": "Torch CPU check: validate matching (max_batch,hidden_size) and (max_batch,top_k) tensors, then supply two mismatched buffers and require one diagnostic containing both observed and expected shapes."
+    }
+  ]
+}

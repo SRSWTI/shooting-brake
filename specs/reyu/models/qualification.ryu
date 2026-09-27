@@ -1,0 +1,289 @@
+/// Qualification is an assertion workflow over other Shooting-Brake subsystems.
+/// It is not part of the serving data path and does not implement providers,
+/// placement, grouped compute, prefill streaming, or CPU expert execution.
+/// Sources: src/phase7/{Makefile,hybrid_b70_test.py,allout_correctness_test.py,
+/// preemptive_surgery_test.py,prefill_probe.py,prefill_probe.sh,
+/// prefill_chunk_bench.py,prefill_chunk_bench.sh,stream_crossover_bench.py,
+/// nvfp4_testutil.py}; tests/test_b70_output_wire.py.
+/// Atomicity: launching a fresh process, a model generation, a provider dispatch,
+/// and numerical comparison are each collapsed to one explicit observation.
+module qualification {
+  type Check = Unselected | BuildLink | HybridParity | AllOutParity |
+    PreemptiveAllocation | PrefillOracle | ChunkSweep | StreamCrossover |
+    ResultWire | GroupedProvider
+  type Phase = Idle | Configured | BaselineReady | Assessed
+  type Outcome = Pending | Passed | Failed | Refused | Unavailable
+  type State = {
+    phase: Phase,
+    check: Check,
+    baselineCaptured: bool,
+    candidateRan: bool,
+    pathExercised: bool,
+    evidenceComplete: bool,
+    assertionOk: bool,
+    errorObserved: bool,
+    measurements: int,
+    outcome: Outcome,
+  }
+
+  var s: State
+
+  action init = s' = {
+    phase: Idle, check: Unselected, baselineCaptured: false,
+    candidateRan: false, pathExercised: false, evidenceComplete: false,
+    assertionOk: false, errorObserved: false, measurements: 0,
+    outcome: Pending,
+  }
+
+  action choose(c: Check): bool = all {
+    s.phase == Idle, c != Unselected,
+    s' = { ...s, phase: Configured, check: c },
+  }
+
+  /// hybrid_b70_test.py::run_case and allout_correctness_test.py::run_case;
+  /// prefill_probe.sh::run_case. Baselines are separate processes/configurations.
+  action captureBaseline = all {
+    s.phase == Configured,
+    or { s.check == HybridParity, s.check == AllOutParity, s.check == PrefillOracle },
+    s' = { ...s, phase: BaselineReady, baselineCaptured: true, measurements: 1 },
+  }
+
+  /// Makefile targets prove composition/link intent, not runtime correctness.
+  action inspectBuildLink(b70Composed: bool, cpuIndependent: bool): bool = all {
+    s.phase == Configured, s.check == BuildLink,
+    s' = { ...s,
+      phase: Assessed, candidateRan: true,
+      pathExercised: b70Composed and cpuIndependent,
+      evidenceComplete: true,
+      assertionOk: b70Composed and cpuIndependent,
+      errorObserved: not(b70Composed and cpuIndependent),
+      measurements: 2,
+      outcome: if (b70Composed and cpuIndependent) Passed else Failed,
+    },
+  }
+
+  /// hybrid_b70_test.py::main accepts exact tokens, or the narrower semantic
+  /// oracle that both decoded strings contain "42", only after a marker exists.
+  action assessHybrid(exercised: bool, exactTokens: bool, semantic42: bool): bool = all {
+    s.phase == BaselineReady, s.check == HybridParity,
+    s' = { ...s,
+      phase: Assessed, candidateRan: true, pathExercised: exercised,
+      evidenceComplete: exercised,
+      assertionOk: exercised and (exactTokens or semantic42),
+      errorObserved: not(exercised and (exactTokens or semantic42)),
+      measurements: 2,
+      outcome: if (exercised and (exactTokens or semantic42)) Passed else Failed,
+    },
+  }
+
+  /// allout_correctness_test.py::main first isolates policy plumbing with
+  /// allout:16:8:0, then requires live, healthy CPU work and coherent output.
+  action assessAllOut(zeroExact: bool, verifiedLayout: bool, cpuRoutes: bool,
+                      pollerHealthy: bool, noSkipped: bool,
+                      coherentOutput: bool): bool = all {
+    s.phase == BaselineReady, s.check == AllOutParity,
+    s' = { ...s,
+      phase: Assessed, candidateRan: true,
+      pathExercised: cpuRoutes,
+      evidenceComplete: zeroExact and verifiedLayout and cpuRoutes,
+      assertionOk: zeroExact and verifiedLayout and cpuRoutes and
+        pollerHealthy and noSkipped and coherentOutput,
+      errorObserved: not(zeroExact and verifiedLayout and cpuRoutes and
+        pollerHealthy and noSkipped and coherentOutput),
+      measurements: 3,
+      outcome: if (zeroExact and verifiedLayout and cpuRoutes and
+        pollerHealthy and noSkipped and coherentOutput) Passed else Failed,
+    },
+  }
+
+  /// preemptive_surgery_test.py asserts ownership coverage/disjointness,
+  /// compact-id ordering/masking, loader-name compatibility, and bank admission.
+  action assessPreemptive(partitionExact: bool, sortedIds: bool,
+                          offloadedMasked: bool, loaderCompatible: bool,
+                          bankPresent: bool): bool = all {
+    s.phase == Configured, s.check == PreemptiveAllocation,
+    s' = { ...s,
+      phase: Assessed, candidateRan: true, pathExercised: true,
+      evidenceComplete: true,
+      assertionOk: partitionExact and sortedIds and offloadedMasked and
+        loaderCompatible and bankPresent,
+      errorObserved: not(partitionExact and sortedIds and offloadedMasked and
+        loaderCompatible and bankPresent),
+      measurements: 5,
+      outcome: if (partitionExact and sortedIds and offloadedMasked and
+        loaderCompatible and bankPresent) Passed else Failed,
+    },
+  }
+
+  /// The missing-bank branch is correct refusal, not a serving success.
+  action observeMissingBankRefusal = all {
+    s.phase == Configured, s.check == PreemptiveAllocation,
+    s' = { ...s,
+      phase: Assessed, candidateRan: true, pathExercised: false,
+      evidenceComplete: true, assertionOk: true, errorObserved: true,
+      measurements: 1, outcome: Refused,
+    },
+  }
+
+  /// prefill_probe.py::main asserts numerical completeness/finite values and,
+  /// when hybrid is requested, stable healthy providers and advancing dispatches.
+  /// prefill_probe.sh separately compares the reported mean against all-CUDA.
+  action assessPrefill(completeLogprobs: bool, finiteValues: bool,
+                       providerHealthy: bool, dispatchAdvanced: bool,
+                       oracleClose: bool): bool = all {
+    s.phase == BaselineReady, s.check == PrefillOracle,
+    s' = { ...s,
+      phase: Assessed, candidateRan: true,
+      pathExercised: dispatchAdvanced,
+      evidenceComplete: completeLogprobs and finiteValues and providerHealthy,
+      assertionOk: completeLogprobs and finiteValues and providerHealthy and
+        dispatchAdvanced and oracleClose,
+      errorObserved: not(completeLogprobs and finiteValues and providerHealthy and
+        dispatchAdvanced and oracleClose),
+      measurements: 2,
+      outcome: if (completeLogprobs and finiteValues and providerHealthy and
+        dispatchAdvanced and oracleClose) Passed else Failed,
+    },
+  }
+
+  /// prefill_chunk_bench.py::measure records measurements; the curve diagnoses
+  /// a hypothesis but does not by itself establish production correctness.
+  action recordChunkSweep(freshProcesses: bool, warmed: bool,
+                          lengthsMeasured: int): bool = all {
+    s.phase == Configured, s.check == ChunkSweep,
+    lengthsMeasured > 0, lengthsMeasured <= 2,
+    s' = { ...s,
+      phase: Assessed, candidateRan: true, pathExercised: true,
+      evidenceComplete: freshProcesses and warmed,
+      assertionOk: freshProcesses and warmed,
+      errorObserved: not(freshProcesses and warmed),
+      measurements: lengthsMeasured,
+      outcome: if (freshProcesses and warmed) Passed else Failed,
+    },
+  }
+
+  /// stream_crossover_bench.py::main produces a deployment-specific threshold.
+  action recordCrossover(points: int, cudaAvailable: bool): bool = all {
+    s.phase == Configured, s.check == StreamCrossover,
+    points > 0, points <= 10,
+    s' = { ...s,
+      phase: Assessed, candidateRan: cudaAvailable,
+      pathExercised: cudaAvailable,
+      evidenceComplete: cudaAvailable,
+      assertionOk: cudaAvailable,
+      errorObserved: not(cudaAvailable),
+      measurements: if (cudaAvailable) points else 0,
+      outcome: if (cudaAvailable) Passed else Unavailable,
+    },
+  }
+
+  /// tests/test_b70_output_wire.py::test_b70_output_wire_matches_actual_result:
+  /// only the exact environment value "1" requests fp16; otherwise fp32.
+  action assessWire(flagIsOne: bool, actualFp16: bool,
+                    finite: bool, closeToOracle: bool): bool = all {
+    s.phase == Configured, s.check == ResultWire,
+    s' = { ...s,
+      phase: Assessed, candidateRan: true, pathExercised: true,
+      evidenceComplete: finite,
+      assertionOk: (flagIsOne == actualFp16) and finite and closeToOracle,
+      errorObserved: not((flagIsOne == actualFp16) and finite and closeToOracle),
+      measurements: 1,
+      outcome: if ((flagIsOne == actualFp16) and finite and closeToOracle)
+        Passed else Failed,
+    },
+  }
+
+  /// tests/test_b70_output_wire.py::test_grouped_swiglu_preserves_range_and_reused_scratch.
+  action assessGrouped(rangeFinite: bool, oracleClose: bool,
+                       scratchReset: bool, invalidRoutesZero: bool): bool = all {
+    s.phase == Configured, s.check == GroupedProvider,
+    s' = { ...s,
+      phase: Assessed, candidateRan: true, pathExercised: true,
+      evidenceComplete: rangeFinite and scratchReset and invalidRoutesZero,
+      assertionOk: rangeFinite and oracleClose and scratchReset and invalidRoutesZero,
+      errorObserved: not(rangeFinite and oracleClose and scratchReset and invalidRoutesZero),
+      measurements: 3,
+      outcome: if (rangeFinite and oracleClose and scratchReset and invalidRoutesZero)
+        Passed else Failed,
+    },
+  }
+
+  action stay = s' = s
+  action step = any {
+    choose(BuildLink), choose(HybridParity), choose(AllOutParity),
+    choose(PreemptiveAllocation), choose(PrefillOracle), choose(ChunkSweep),
+    choose(StreamCrossover), choose(ResultWire), choose(GroupedProvider),
+    captureBaseline,
+    inspectBuildLink(true, true), inspectBuildLink(false, true),
+    assessHybrid(true, true, true), assessHybrid(true, false, true),
+    assessHybrid(false, false, false),
+    assessAllOut(true, true, true, true, true, true),
+    assessAllOut(true, true, true, false, true, true),
+    assessPreemptive(true, true, true, true, true),
+    assessPreemptive(true, true, true, true, false),
+    observeMissingBankRefusal,
+    assessPrefill(true, true, true, true, true),
+    assessPrefill(true, true, true, true, false),
+    recordChunkSweep(true, true, 2), recordChunkSweep(false, true, 2),
+    recordCrossover(10, true), recordCrossover(10, false),
+    assessWire(true, true, true, true), assessWire(false, false, true, true),
+    assessWire(false, true, true, true),
+    assessGrouped(true, true, true, true), assessGrouped(true, true, false, true),
+    stay,
+  }
+
+  val inv = and {
+    (s.outcome == Passed) implies
+      (s.phase == Assessed and s.evidenceComplete and s.assertionOk),
+    (s.outcome == Failed) implies
+      (s.phase == Assessed and s.errorObserved and not(s.assertionOk)),
+    (s.outcome == Refused) implies
+      (s.phase == Assessed and s.errorObserved and s.assertionOk),
+    (s.check == HybridParity and s.outcome == Passed) implies s.baselineCaptured,
+    (s.check == AllOutParity and s.outcome == Passed) implies s.baselineCaptured,
+    (s.check == PrefillOracle and s.outcome == Passed) implies s.baselineCaptured,
+    s.measurements >= 0,
+  }
+
+  val witnessHybridExact = s.check == HybridParity and s.outcome == Passed and
+    s.pathExercised and s.baselineCaptured
+  val witnessSemanticFallback = s.check == HybridParity and s.outcome == Passed and
+    s.pathExercised
+  val witnessMissingBankRefused = s.check == PreemptiveAllocation and
+    s.outcome == Refused and s.errorObserved
+  val witnessGroupedScratchFailure = s.check == GroupedProvider and
+    s.outcome == Failed and s.errorObserved
+  val witnessUnavailableCrossover = s.check == StreamCrossover and
+    s.outcome == Unavailable
+
+  run buildCompositionTest = init.then(choose(BuildLink))
+    .then(inspectBuildLink(true, true)).expect(inv and s.outcome == Passed)
+  run hybridExactParityTest = init.then(choose(HybridParity)).then(captureBaseline)
+    .then(assessHybrid(true, true, true)).expect(inv and witnessHybridExact)
+  run hybridSemanticParityTest = init.then(choose(HybridParity)).then(captureBaseline)
+    .then(assessHybrid(true, false, true)).expect(inv and witnessSemanticFallback)
+  run hybridMarkerRequiredTest = init.then(choose(HybridParity)).then(captureBaseline)
+    .then(assessHybrid(false, true, true)).expect(inv and s.outcome == Failed)
+  run allOutCpuHealthFailureTest = init.then(choose(AllOutParity)).then(captureBaseline)
+    .then(assessAllOut(true, true, true, false, true, true))
+    .expect(inv and s.outcome == Failed)
+  run preemptiveSuccessTest = init.then(choose(PreemptiveAllocation))
+    .then(assessPreemptive(true, true, true, true, true))
+    .expect(inv and s.outcome == Passed)
+  run missingBankRefusalTest = init.then(choose(PreemptiveAllocation))
+    .then(observeMissingBankRefusal).expect(inv and witnessMissingBankRefused)
+  run prefillOracleTest = init.then(choose(PrefillOracle)).then(captureBaseline)
+    .then(assessPrefill(true, true, true, true, true))
+    .expect(inv and s.outcome == Passed)
+  run chunkFreshProcessEdgeTest = init.then(choose(ChunkSweep))
+    .then(recordChunkSweep(false, true, 2)).expect(inv and s.outcome == Failed)
+  run unavailableCrossoverTest = init.then(choose(StreamCrossover))
+    .then(recordCrossover(10, false)).expect(inv and witnessUnavailableCrossover)
+  run wireFp16Test = init.then(choose(ResultWire))
+    .then(assessWire(true, true, true, true)).expect(inv and s.outcome == Passed)
+  run wireNonOneMeansFp32Test = init.then(choose(ResultWire))
+    .then(assessWire(false, false, true, true)).expect(inv and s.outcome == Passed)
+  run groupedScratchReuseFailureTest = init.then(choose(GroupedProvider))
+    .then(assessGrouped(true, true, false, true))
+    .expect(inv and witnessGroupedScratchFailure)
+}

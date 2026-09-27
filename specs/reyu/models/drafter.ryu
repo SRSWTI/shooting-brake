@@ -1,0 +1,583 @@
+/// Experimental drafter lifecycle, not the production serving state machine.
+/// Sources: experiments/drafter_datagen.py::generate;
+/// experiments/drafter_capture.py::capture;
+/// experiments/drafter_train/adapter.py::validate_record, stage_capture;
+/// experiments/drafter_train/prepare_warmstart.py::convert;
+/// experiments/drafter_train/train.sh; train_runner.py;
+/// experiments/drafter_train/export_laguna.py::export;
+/// experiments/drafter_train/gate.py::compare, _ladder_rows, summarize;
+/// experiments/drafter_overnight.sh::restore_production.
+///
+/// Abstraction: a whole file-producing stage is one atomic action. Tensor values,
+/// HTTP retries, thread interleavings, optimizer mathematics and device kernels
+/// are external; their observable identities, shapes, masks, gates and failures
+/// are represented explicitly. Accepted means research evidence passed, not that
+/// the candidate was promoted into the ordinary recipe. Endpoint health and
+/// ordinary-production identity remain separate fallback outcomes.
+module drafter {
+  type Phase = Collecting | Capturing | Adapting | Warmstarting | Training |
+    Exporting | Gating | Accepted | Rejected
+  type TrainMode = NoTraining | FreshWarmstart | ResumeCheckpoint
+  type Failure = NoFailure | TinyCorpus | CaptureMissing | CaptureContractInvalid |
+    WarmSchemaInvalid | TrainingUnavailable | TrainingFailed | ExportInvalid |
+    EvidenceInvalid | QualityRejected | RestoreFailed
+
+  type State = {
+    phase: Phase,
+    corpusRecords: int,
+    corpusUnique: bool,
+    rawCompletionPresent: bool,
+    capturedRecords: int,
+    captureSalted: bool,
+    captureFormatValid: bool,
+    tokenShapeValid: bool,
+    maskValid: bool,
+    hiddenShapeValid: bool,
+    flatViewSharesStorage: bool,
+    hiddenFinite: bool,
+    stagedRecords: int,
+    skippedTruncated: int,
+    warmSchemaValid: bool,
+    warmKeysValid: bool,
+    qkvShapeValid: bool,
+    trainMode: TrainMode,
+    trained: bool,
+    exportNative: bool,
+    evidenceAligned: bool,
+    ladderValid: bool,
+    qualityPassing: int,
+    qualityTotal: int,
+    drafted: int,
+    acceptedTokens: int,
+    everyRungAccepts: bool,
+    worstTpotTenthsMs: int,
+    productionHealthy: bool,
+    candidateHealthy: bool,
+    candidatePromoted: bool,
+    failure: Failure,
+  }
+
+  var s: State
+
+  pure def validCaptureContract(
+    formatOk: bool,
+    tokenShapeOk: bool,
+    maskOk: bool,
+    hiddenShapeOk: bool,
+    sharedStorage: bool,
+    finiteHidden: bool,
+  ): bool = and {
+    formatOk, tokenShapeOk, maskOk, hiddenShapeOk, sharedStorage, finiteHidden,
+  }
+  pure def validWarmstart(
+    schemaOk: bool,
+    keysOk: bool,
+    qkvShapeOk: bool,
+  ): bool = and { schemaOk, keysOk, qkvShapeOk }
+  pure def validExport(
+    strategyOk: bool,
+    trainingKeysOk: bool,
+    nativeKeysOk: bool,
+    projectionShapesOk: bool,
+  ): bool = and {
+    strategyOk, trainingKeysOk, nativeKeysOk, projectionShapesOk,
+  }
+  pure def thresholdsPass(
+    qualityPassing: int,
+    drafted: int,
+    acceptedTokens: int,
+    everyRungAccepts: bool,
+    worstTpotTenthsMs: int,
+  ): bool = and {
+    qualityPassing >= 108,
+    qualityPassing <= 120,
+    drafted > 0,
+    drafted <= 1000,
+    acceptedTokens >= 0,
+    acceptedTokens <= drafted,
+    acceptedTokens * 100 >= drafted * 60,
+    everyRungAccepts,
+    worstTpotTenthsMs > 0,
+    worstTpotTenthsMs <= 60,
+  }
+
+  action init = s' = {
+    phase: Collecting,
+    corpusRecords: 0,
+    corpusUnique: true,
+    rawCompletionPresent: false,
+    capturedRecords: 0,
+    captureSalted: false,
+    captureFormatValid: false,
+    tokenShapeValid: false,
+    maskValid: false,
+    hiddenShapeValid: false,
+    flatViewSharesStorage: false,
+    hiddenFinite: false,
+    stagedRecords: 0,
+    skippedTruncated: 0,
+    warmSchemaValid: false,
+    warmKeysValid: false,
+    qkvShapeValid: false,
+    trainMode: NoTraining,
+    trained: false,
+    exportNative: false,
+    evidenceAligned: false,
+    ladderValid: false,
+    qualityPassing: 0,
+    qualityTotal: 0,
+    drafted: 0,
+    acceptedTokens: 0,
+    everyRungAccepts: false,
+    worstTpotTenthsMs: 0,
+    productionHealthy: true,
+    candidateHealthy: false,
+    candidatePromoted: false,
+    failure: NoFailure,
+  }
+
+  /// generate() appends deterministic prompt ids and raw completions. The
+  /// overnight supervisor requires at least 500 records, even after deadline.
+  action corpusReady(records: int): bool = all {
+    s.phase == Collecting,
+    records >= 500,
+    records <= 1000,
+    s' = { ...s,
+      phase: Capturing,
+      corpusRecords: records,
+      rawCompletionPresent: true,
+    },
+  }
+  action rejectTinyCorpus(records: int): bool = all {
+    s.phase == Collecting,
+    records >= 0,
+    records < 500,
+    s' = { ...s,
+      phase: Rejected,
+      corpusRecords: records,
+      failure: TinyCorpus,
+    },
+  }
+
+  /// capture() keeps the first duplicate id, salts each replay to defeat prefix
+  /// caching, and succeeds only when every deduplicated record has a feature file.
+  action captureComplete(requested: int, published: int): bool = all {
+    s.phase == Capturing,
+    requested > 0,
+    requested <= s.corpusRecords,
+    published == requested,
+    s.rawCompletionPresent,
+    s' = { ...s,
+      phase: Adapting,
+      corpusUnique: true,
+      capturedRecords: published,
+      captureSalted: true,
+      productionHealthy: false,
+      candidateHealthy: false,
+    },
+  }
+  action rejectMissingCapture(requested: int, published: int): bool = all {
+    s.phase == Capturing,
+    requested > 0,
+    requested <= s.corpusRecords,
+    published >= 0,
+    published < requested,
+    s' = { ...s,
+      phase: Rejected,
+      capturedRecords: published,
+      captureSalted: true,
+      productionHealthy: false,
+      candidateHealthy: false,
+      failure: CaptureMissing,
+    },
+  }
+
+  /// adapter.validate_record requires int32 [T] ids, bool [T] suffix mask,
+  /// bf16 [T,6,3072] and its contiguous no-copy [T,18432] view, exact layer
+  /// ids (1,10,19,29,38,47), finite values, and >=2 supervised tokens.
+  action stageValidCaptures(
+    usable: int,
+    truncated: int,
+    formatOk: bool,
+    tokenShapeOk: bool,
+    maskOk: bool,
+    hiddenShapeOk: bool,
+    sharedStorage: bool,
+    finiteHidden: bool,
+  ): bool = all {
+    s.phase == Adapting,
+    usable >= 0,
+    truncated >= 0,
+    usable + truncated <= s.capturedRecords,
+    validCaptureContract(
+      formatOk, tokenShapeOk, maskOk, hiddenShapeOk, sharedStorage, finiteHidden
+    ),
+    s' = { ...s,
+      phase: Warmstarting,
+      captureFormatValid: formatOk,
+      tokenShapeValid: tokenShapeOk,
+      maskValid: maskOk,
+      hiddenShapeValid: hiddenShapeOk,
+      flatViewSharesStorage: sharedStorage,
+      hiddenFinite: finiteHidden,
+      stagedRecords: usable,
+      skippedTruncated: truncated,
+    },
+  }
+  action rejectCaptureContract(
+    formatOk: bool,
+    tokenShapeOk: bool,
+    maskOk: bool,
+    hiddenShapeOk: bool,
+    sharedStorage: bool,
+    finiteHidden: bool,
+  ): bool = all {
+    s.phase == Adapting,
+    not(validCaptureContract(
+      formatOk, tokenShapeOk, maskOk, hiddenShapeOk, sharedStorage, finiteHidden
+    )),
+    s' = { ...s,
+      phase: Rejected,
+      captureFormatValid: formatOk,
+      tokenShapeValid: tokenShapeOk,
+      maskValid: maskOk,
+      hiddenShapeValid: hiddenShapeOk,
+      flatViewSharesStorage: sharedStorage,
+      hiddenFinite: finiteHidden,
+      failure: CaptureContractInvalid,
+    },
+  }
+
+  /// prepare_warmstart.convert validates the exact Laguna config/key set and
+  /// splits each fused QKV tensor into q/k/v only after its dimensions match.
+  action warmstartConverted(
+    schemaOk: bool,
+    keysOk: bool,
+    qkvShapeOk: bool,
+  ): bool = all {
+    s.phase == Warmstarting,
+    validWarmstart(schemaOk, keysOk, qkvShapeOk),
+    s' = { ...s,
+      phase: Training,
+      warmSchemaValid: schemaOk,
+      warmKeysValid: keysOk,
+      qkvShapeValid: qkvShapeOk,
+    },
+  }
+  action rejectWarmstart(
+    schemaOk: bool,
+    keysOk: bool,
+    qkvShapeOk: bool,
+  ): bool = all {
+    s.phase == Warmstarting,
+    not(validWarmstart(schemaOk, keysOk, qkvShapeOk)),
+    s' = { ...s,
+      phase: Rejected,
+      warmSchemaValid: schemaOk,
+      warmKeysValid: keysOk,
+      qkvShapeValid: qkvShapeOk,
+      failure: WarmSchemaInvalid,
+    },
+  }
+
+  /// train.sh selects exactly one branch: resume if a complete latest state
+  /// exists, otherwise the mandatory converted warm start. Both require a
+  /// stopped server and no >1 GiB competing process on the selected single GPU.
+  action trainFresh(gpuExclusive: bool): bool = all {
+    s.phase == Training,
+    gpuExclusive,
+    s.stagedRecords > 0,
+    s.warmSchemaValid,
+    s.warmKeysValid,
+    s.qkvShapeValid,
+    s' = { ...s,
+      phase: Exporting,
+      trainMode: FreshWarmstart,
+      trained: true,
+      productionHealthy: false,
+    },
+  }
+  action trainResume(gpuExclusive: bool): bool = all {
+    s.phase == Training,
+    gpuExclusive,
+    s.stagedRecords > 0,
+    s.warmSchemaValid,
+    s.warmKeysValid,
+    s.qkvShapeValid,
+    s' = { ...s,
+      phase: Exporting,
+      trainMode: ResumeCheckpoint,
+      trained: true,
+      productionHealthy: false,
+    },
+  }
+  action rejectTrainingUnavailable(gpuExclusive: bool): bool = all {
+    s.phase == Training,
+    or { not(gpuExclusive), s.stagedRecords == 0 },
+    s' = { ...s, phase: Rejected, failure: TrainingUnavailable },
+  }
+  action rejectTrainingFailure(exitCode: int): bool = all {
+    s.phase == Training,
+    exitCode > 0,
+    exitCode <= 255,
+    s' = { ...s, phase: Rejected, failure: TrainingFailed },
+  }
+
+  /// export() accepts only dflash training state with the complete 81-key
+  /// training schema, rejoins q/k/v into the exact 69-key native Laguna schema,
+  /// and copies the validated native config atomically.
+  action exportNativeCheckpoint(
+    strategyOk: bool,
+    trainingKeysOk: bool,
+    nativeKeysOk: bool,
+    projectionShapesOk: bool,
+  ): bool = all {
+    s.phase == Exporting,
+    s.trained,
+    s.trainMode != NoTraining,
+    validExport(strategyOk, trainingKeysOk, nativeKeysOk, projectionShapesOk),
+    s' = { ...s, phase: Gating, exportNative: true },
+  }
+  action rejectExport(
+    strategyOk: bool,
+    trainingKeysOk: bool,
+    nativeKeysOk: bool,
+    projectionShapesOk: bool,
+  ): bool = all {
+    s.phase == Exporting,
+    not(validExport(strategyOk, trainingKeysOk, nativeKeysOk, projectionShapesOk)),
+    s' = { ...s, phase: Rejected, failure: ExportInvalid },
+  }
+
+  /// gate.summarize requires aligned 120-prompt, top-5 evidence; >=108 prompts
+  /// with JSD <=0.10 nats; aggregate and every-rung acceptance >=60%; and all
+  /// six ordered 1K..98K rungs at <=6.0 ms effective decode per token.
+  action acceptEvidence(
+    evidenceAligned: bool,
+    ladderValid: bool,
+    qualityPassing: int,
+    drafted: int,
+    acceptedTokens: int,
+    everyRungAccepts: bool,
+    worstTpotTenthsMs: int,
+  ): bool = all {
+    s.phase == Gating,
+    s.exportNative,
+    evidenceAligned,
+    ladderValid,
+    thresholdsPass(
+      qualityPassing, drafted, acceptedTokens,
+      everyRungAccepts, worstTpotTenthsMs
+    ),
+    s' = { ...s,
+      phase: Accepted,
+      evidenceAligned: evidenceAligned,
+      ladderValid: ladderValid,
+      qualityPassing: qualityPassing,
+      qualityTotal: 120,
+      drafted: drafted,
+      acceptedTokens: acceptedTokens,
+      everyRungAccepts: everyRungAccepts,
+      worstTpotTenthsMs: worstTpotTenthsMs,
+      productionHealthy: false,
+      candidateHealthy: true,
+      candidatePromoted: false,
+    },
+  }
+  action rejectBadEvidence(
+    evidenceAligned: bool,
+    ladderValid: bool,
+  ): bool = all {
+    s.phase == Gating,
+    not(and { evidenceAligned, ladderValid }),
+    s' = { ...s,
+      phase: Rejected,
+      evidenceAligned: evidenceAligned,
+      ladderValid: ladderValid,
+      productionHealthy: false,
+      candidateHealthy: true,
+      failure: EvidenceInvalid,
+    },
+  }
+  action rejectThresholds(
+    qualityPassing: int,
+    drafted: int,
+    acceptedTokens: int,
+    everyRungAccepts: bool,
+    worstTpotTenthsMs: int,
+  ): bool = all {
+    s.phase == Gating,
+    qualityPassing >= 0,
+    qualityPassing <= 120,
+    drafted >= 0,
+    drafted <= 1000,
+    acceptedTokens >= 0,
+    acceptedTokens <= drafted,
+    worstTpotTenthsMs >= 0,
+    worstTpotTenthsMs <= 1000,
+    not(thresholdsPass(
+      qualityPassing, drafted, acceptedTokens,
+      everyRungAccepts, worstTpotTenthsMs
+    )),
+    s' = { ...s,
+      phase: Rejected,
+      evidenceAligned: true,
+      ladderValid: true,
+      qualityPassing: qualityPassing,
+      qualityTotal: 120,
+      drafted: drafted,
+      acceptedTokens: acceptedTokens,
+      everyRungAccepts: everyRungAccepts,
+      worstTpotTenthsMs: worstTpotTenthsMs,
+      productionHealthy: false,
+      candidateHealthy: true,
+      failure: QualityRejected,
+    },
+  }
+
+  /// restore_production only boots the ordinary recipe when /health is down.
+  /// A healthy candidate therefore suppresses restoration and remains live.
+  action preserveHealthyCandidate = all {
+    or { s.phase == Accepted, s.phase == Rejected },
+    s.candidateHealthy,
+    not(s.productionHealthy),
+    s' = s,
+  }
+  action restoreProduction(bootSucceeded: bool): bool = all {
+    or { s.phase == Accepted, s.phase == Rejected },
+    not(s.candidateHealthy),
+    not(s.productionHealthy),
+    bootSucceeded,
+    s' = { ...s, productionHealthy: true },
+  }
+  action rejectRestore(bootSucceeded: bool): bool = all {
+    or { s.phase == Accepted, s.phase == Rejected },
+    not(s.candidateHealthy),
+    not(s.productionHealthy),
+    not(bootSucceeded),
+    s' = { ...s,
+      phase: Rejected,
+      productionHealthy: false,
+      failure: RestoreFailed,
+    },
+  }
+  action stay = s' = s
+
+  action step = any {
+    corpusReady(500), corpusReady(900), rejectTinyCorpus(499),
+    captureComplete(500, 500), captureComplete(590, 590),
+    rejectMissingCapture(500, 499),
+    stageValidCaptures(496, 4, true, true, true, true, true, true),
+    stageValidCaptures(590, 0, true, true, true, true, true, true),
+    stageValidCaptures(0, 500, true, true, true, true, true, true),
+    rejectCaptureContract(true, true, false, true, true, true),
+    warmstartConverted(true, true, true),
+    rejectWarmstart(true, false, true),
+    trainFresh(true), trainResume(true), rejectTrainingUnavailable(false),
+    rejectTrainingFailure(1),
+    exportNativeCheckpoint(true, true, true, true),
+    rejectExport(true, false, true, true),
+    acceptEvidence(true, true, 108, 100, 60, true, 60),
+    rejectBadEvidence(false, true),
+    rejectThresholds(107, 100, 60, true, 60),
+    preserveHealthyCandidate, restoreProduction(true), rejectRestore(false), stay,
+  }
+
+  val captureContract = and {
+    s.captureFormatValid,
+    s.tokenShapeValid,
+    s.maskValid,
+    s.hiddenShapeValid,
+    s.flatViewSharesStorage,
+    s.hiddenFinite,
+  }
+  val witnessAccepted = and {
+    s.phase == Accepted,
+    s.qualityPassing >= 108,
+    s.acceptedTokens * 100 >= s.drafted * 60,
+    s.worstTpotTenthsMs <= 60,
+    s.candidateHealthy,
+    not(s.productionHealthy),
+    not(s.candidatePromoted),
+  }
+  val witnessTruncationEdge = s.skippedTruncated > 0 and s.stagedRecords > 0
+  val witnessResearchOnly = s.phase == Accepted and not(s.candidatePromoted)
+  val witnessFailure = s.phase == Rejected and s.failure != NoFailure
+
+  val inv = and {
+    s.corpusRecords >= 0,
+    s.capturedRecords >= 0,
+    s.stagedRecords >= 0,
+    s.skippedTruncated >= 0,
+    s.capturedRecords <= s.corpusRecords,
+    s.stagedRecords + s.skippedTruncated <= s.capturedRecords,
+    s.acceptedTokens >= 0,
+    s.acceptedTokens <= s.drafted,
+    (s.trained implies (s.trainMode != NoTraining)),
+    (s.exportNative implies s.trained),
+    (s.phase == Accepted implies (s.exportNative and s.failure == NoFailure)),
+    (s.phase == Accepted implies not(s.candidatePromoted)),
+    not(s.productionHealthy and s.candidateHealthy),
+    (s.phase == Rejected implies s.failure != NoFailure),
+  }
+
+  run acceptedBoundaryTest = init.then(corpusReady(500))
+    .then(captureComplete(500, 500))
+    .then(stageValidCaptures(496, 4, true, true, true, true, true, true))
+    .expect(captureContract and witnessTruncationEdge)
+    .then(warmstartConverted(true, true, true)).then(trainFresh(true))
+    .then(exportNativeCheckpoint(true, true, true, true))
+    .then(acceptEvidence(true, true, 108, 100, 60, true, 60))
+    .expect(witnessAccepted and inv)
+  run resumeTrainingTest = init.then(corpusReady(900))
+    .then(captureComplete(590, 590))
+    .then(stageValidCaptures(590, 0, true, true, true, true, true, true))
+    .then(warmstartConverted(true, true, true)).then(trainResume(true))
+    .then(exportNativeCheckpoint(true, true, true, true))
+    .then(acceptEvidence(true, true, 120, 200, 150, true, 45))
+    .expect(witnessResearchOnly and inv)
+  run malformedCaptureRejectedTest = init.then(corpusReady(500))
+    .then(captureComplete(500, 500))
+    .then(rejectCaptureContract(true, true, false, true, true, true))
+    .expect(witnessFailure and s.failure == CaptureContractInvalid and inv)
+  run missingCaptureRejectedTest = init.then(corpusReady(500))
+    .then(rejectMissingCapture(500, 499))
+    .expect(s.failure == CaptureMissing and inv)
+  run invalidWarmstartRejectedTest = init.then(corpusReady(500))
+    .then(captureComplete(500, 500))
+    .then(stageValidCaptures(500, 0, true, true, true, true, true, true))
+    .then(rejectWarmstart(true, false, true))
+    .expect(s.failure == WarmSchemaInvalid and inv)
+  run allTruncatedRejectedAtTrainingTest = init.then(corpusReady(500))
+    .then(captureComplete(500, 500))
+    .then(stageValidCaptures(0, 500, true, true, true, true, true, true))
+    .then(warmstartConverted(true, true, true))
+    .then(rejectTrainingUnavailable(true))
+    .expect(s.failure == TrainingUnavailable and inv)
+  run qualityBelowBoundaryRejectedTest = init.then(corpusReady(500))
+    .then(captureComplete(500, 500))
+    .then(stageValidCaptures(500, 0, true, true, true, true, true, true))
+    .then(warmstartConverted(true, true, true)).then(trainFresh(true))
+    .then(exportNativeCheckpoint(true, true, true, true))
+    .then(rejectThresholds(107, 100, 60, true, 60))
+    .expect(s.failure == QualityRejected and s.candidateHealthy and inv)
+  run trainingRequiresExclusivityTest = init.then(corpusReady(500))
+    .then(captureComplete(500, 500))
+    .then(stageValidCaptures(500, 0, true, true, true, true, true, true))
+    .then(warmstartConverted(true, true, true)).then(trainFresh(false).fail())
+  run acceptanceRequiresAllGatesTest = init.then(corpusReady(500))
+    .then(captureComplete(500, 500))
+    .then(stageValidCaptures(500, 0, true, true, true, true, true, true))
+    .then(warmstartConverted(true, true, true)).then(trainFresh(true))
+    .then(exportNativeCheckpoint(true, true, true, true))
+    .then(acceptEvidence(true, true, 107, 100, 60, true, 60).fail())
+  run healthyCandidateSuppressesRestoreTest = acceptedBoundaryTest
+    .then(preserveHealthyCandidate)
+    .expect(s.candidateHealthy and not(s.productionHealthy) and inv)
+  run restoreFailureVisibleTest = init.then(corpusReady(500))
+    .then(captureComplete(500, 500))
+    .then(stageValidCaptures(500, 0, true, true, true, true, true, true))
+    .then(warmstartConverted(true, true, true))
+    .then(rejectTrainingFailure(1)).then(rejectRestore(false))
+    .expect(s.failure == RestoreFailed and not(s.productionHealthy) and inv)
+}

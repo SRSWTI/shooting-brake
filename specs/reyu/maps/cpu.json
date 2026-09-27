@@ -1,0 +1,255 @@
+{
+  "id": "cpu",
+  "title": "CPU cold-expert tier, CUDA streaming, and poller lifetime",
+  "models": [
+    {
+      "path": "models/cpu_tier.ryu",
+      "main": "cpu_tier",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessPackedResident",
+        "witnessEmptyRouteZero",
+        "witnessSkippedNonresident",
+        "witnessStreamedResult",
+        "witnessPollerSuccess",
+        "witnessReleasedFailure",
+        "witnessLifetimeViolation",
+        "witnessObsoleteHelperInactive"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/cpu_expert_host.py",
+      "role": "behavior",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": [
+        "PackedPlane",
+        "CpuExpertError",
+        "CpuExpertHost",
+        "CpuExpertHost.load_expert",
+        "CpuExpertHost.moe_forward",
+        "CpuExpertHost.expert_block",
+        "CpuExpertHost.expert_gscales",
+        "CpuExpertHost.pin_arena",
+        "CpuExpertHost.close",
+        "CpuExpertPoller",
+        "CpuExpertPoller.register_layer",
+        "CpuExpertPoller.start",
+        "CpuExpertPoller.stop",
+        "CpuExpertPoller.close",
+        "get_cpu_host",
+        "get_cpu_poller"
+      ],
+      "notes": "Python validation, ctypes ownership, borrowed arena views, fail-soft committed-prefix CUDA registration, poller raw-pointer lifetime, counters, and process singletons are modeled. Tensor payloads and ctypes mechanics are abstract. close has no matching cudaHostUnregister and does not coordinate the singleton poller."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/cpu_stream.py",
+      "role": "behavior",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": [
+        "stream_threshold",
+        "ExpertStreamer",
+        "ExpertStreamer._block",
+        "ExpertStreamer._gscale",
+        "ExpertStreamer._views",
+        "ExpertStreamer._dequant",
+        "ExpertStreamer._group_routes",
+        "ExpertStreamer.forward",
+        "ExpertStreamer.stats",
+        "get_streamer"
+      ],
+      "notes": "Models expert-major route grouping, one packed transfer per active expert, copy/compute event ring ordering, borrowed host-block lifetime, exact empty-route zero, weighted scatter, and singleton reuse. Numerical CUDA kernels are abstract. stats slot_bytes disagrees with the packed allocation formula; bytes_streamed uses the correct _block_bytes."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/sb_stream.cu",
+      "role": "artifact",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": [
+        "sb_write_flag_kernel",
+        "sb_wait_flag_kernel",
+        "sb_write_flag",
+        "sb_wait_flag"
+      ],
+      "notes": "Obsolete standalone kernel-spinning signal helper. It has no phase4 caller/build rule, accepts no explicit stream, prints launch errors without returning status, and is modeled only as an inactive alternative to Driver stream-memory operations."
+    },
+    {
+      "path": "src/phase7/cpu_expert_bench.py",
+      "role": "harness",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": ["SHAPES", "THREAD_COUNTS", "bench", "main"],
+      "notes": "Intended median latency/thread-scaling and implied-bandwidth harness. It has source-visible API drift: bench passes bf16 tensors to the live PackedPlane-only load_expert and calculates bf16 rather than packed traffic, so it is inventory and intended comparison, not current execution evidence."
+    },
+    {
+      "path": "src/phase7/cpu_expert_capi.cpp",
+      "role": "behavior",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": [
+        "bf16_to_f32",
+        "e2m1_to_f32",
+        "e4m3_to_f32",
+        "HugeArena",
+        "ThreadPool",
+        "decode_row",
+        "RowScratch",
+        "matmul_nvfp4_bf16in",
+        "matmul_nvfp4_f32in",
+        "CpuExpert",
+        "CpuExpertHost",
+        "CpuExpertHost.load_expert",
+        "CpuExpertHost.ffn",
+        "CpuExpertHost.moe_forward",
+        "PollLayer",
+        "CpuPoller",
+        "CpuPoller.loop",
+        "sb_cpu_create",
+        "sb_cpu_load_expert",
+        "sb_cpu_expert_forward",
+        "sb_cpu_moe_forward",
+        "sb_cpu_expert_block",
+        "sb_cpu_poll_register",
+        "sb_cpu_poll_start",
+        "sb_cpu_poll_stop",
+        "sb_cpu_poll_destroy",
+        "sb_cpu_destroy"
+      ],
+      "notes": "Primary native semantics: hugepage-advised bump arena, dense residency table, checkpoint-native packed decode, persistent generation/barrier worker pool, fp32 SwiGLU, route histogram/prefix/gather/scatter, skipped-route counter, borrowed block, signal sweep, backoff, unconditional completion, telemetry, and destructor ownership. SIMD and floating-point payloads are abstract."
+    },
+    {
+      "path": "src/phase7/cpu_expert_capi.h",
+      "role": "functional",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": [
+        "sb_cpu_host_t",
+        "sb_cpu_create",
+        "sb_cpu_load_expert",
+        "sb_cpu_expert_gscales",
+        "sb_cpu_has_expert",
+        "sb_cpu_expert_forward",
+        "sb_cpu_moe_forward",
+        "sb_cpu_expert_block",
+        "sb_cpu_arena_base",
+        "sb_cpu_arena_used",
+        "sb_cpu_arena_capacity",
+        "sb_cpu_resident_count",
+        "sb_cpu_skipped_routes",
+        "sb_cpu_poller_t",
+        "sb_cpu_poll_create",
+        "sb_cpu_poll_register",
+        "sb_cpu_poll_start",
+        "sb_cpu_poll_stop",
+        "sb_cpu_poll_dispatch_count",
+        "sb_cpu_poll_error_count",
+        "sb_cpu_poll_service_ns",
+        "sb_cpu_poll_destroy",
+        "sb_cpu_destroy"
+      ],
+      "notes": "Authoritative C ABI, packed layout, error convention, routing partial, borrow duration, arena statistics, host-mapped flag protocol, caller-owned pointer lifetime, and destruction-order contract."
+    },
+    {
+      "path": "src/phase7/cpu_expert_test.py",
+      "role": "harness",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": ["check", "close", "reference_ffn", "make_expert", "main"],
+      "notes": "CPU functional comparison intent for arena residency, direct and routed FFN, shared-expert gather/scatter, exact all-skip zero, counted nonresidency, Python guards, and reload-without-growth. No result from this harness is claimed here."
+    },
+    {
+      "path": "src/phase7/cpu_packed_test.py",
+      "role": "harness",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": ["check", "random_plane", "reference", "main"],
+      "notes": "Packed-format differential intent against vLLM dequantize_to_dtype, including density, nibble/sign/scale behavior, gscale order, routed sums, and malformed plane rejection. No result from this harness is claimed here."
+    },
+    {
+      "path": "src/phase7/cpu_poller_test.py",
+      "role": "harness",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": ["check", "Flag", "wait_for", "main"],
+      "notes": "Native poller contract fixture: caller-kept buffers, signal value as M, untouched rows beyond M, direct-compute comparison, telemetry, and failed-dispatch completion release. No result from this harness is claimed here."
+    },
+    {
+      "path": "src/phase7/cpu_stream_test.py",
+      "role": "harness",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": ["check", "make_plane", "make_expert", "main"],
+      "notes": "CUDA-required comparison intent for contiguous packed sections, registration, streamed-versus-host routed partials, ring reuse, -1 routes, exact empty zero, per-layer isolation, and counters. No result from this harness is claimed here."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/stream_signal.py",
+      "role": "dependency",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": ["alloc_host_mapped_flag", "read_flag", "write_flag_host", "write_flag", "wait_flag"],
+      "notes": "Relevant active dependency, not part of the assigned ownership inventory: CUDA Driver stream-memory operations provide the production graph-compatible flag mechanism that distinguishes sb_stream.cu as obsolete."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "role": "dependency",
+      "models": ["models/cpu_tier.ryu"],
+      "symbols": ["HybridRoutedExperts._cpu_issue_graph", "HybridRoutedExperts._cpu_take_graph"],
+      "notes": "Relevant caller boundary, not owned here: stages CPU buffers, enqueues signal/wait operations, selects host versus CUDA streaming by batch policy, and aggregates the CPU partial. Detailed integration is assigned elsewhere."
+    }
+  ],
+  "assumptions": [
+    "The model bounds expert identities to {0,1}, routed entries and signal batch values to 0..2, and layer validity to layer 0 versus bounded invalid layer 1; these are finite identity abstractions, not production geometry.",
+    "Tensor contents, packed floating-point decode, exact reduction order, PCIe timing, THP realization, CUDA memory ordering, and kernel execution are abstracted to route counts, zero/nonzero observation, validity, and event order.",
+    "Direct host computation is split into bucket, gather, FFN, and scatter actions; CpuPoller::loop calls moe_forward atomically and is represented by one guarded pollDispatch action whose result derives from the registered layer identity.",
+    "The caller serializes the shared host scratch and owns placement correctness; the native host implementation is not assumed reentrant.",
+    "Negative and out-of-range IDs are absent routes, while an in-range nonresident ID is counted as a skipped correctness fault and omitted without changing moe_forward's success return.",
+    "Mapped flags and pinned arrays remain alive through poller destruction, and borrowed expert-block views remain valid only until host destruction.",
+    "CUDA arena registration failure is fail-soft for throughput, but absence of a matching unregister in CpuExpertHost.close remains an implementation lifecycle gap.",
+    "The active graph signaling dependency is stream_signal.py; sb_stream.cu is intentionally modeled as inactive because no phase4 call/build path references it.",
+    "Harness source is comparison intent only. No build, test, benchmark, lint, formatter, hardware workload, or Reyu gate was run by this agent."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/phase7/cpu_packed_test.py",
+      "symbol": "main",
+      "description": "Compare native packed FFN and routed output with vLLM dequantize_to_dtype over identical random bytes; cover nibble order, E4M3FN, global-scale multiplication, packed density, and malformed shapes."
+    },
+    {
+      "source": "src/phase7/cpu_expert_test.py",
+      "symbol": "main",
+      "description": "Compare resident direct and bucketed routed results with explicit PyTorch weighted sums; inspect exact empty zeros, repeated expert rows, monotonic skipped nonresident count, and reload arena usage."
+    },
+    {
+      "source": "src/phase7/cpu_poller_test.py",
+      "symbol": "main",
+      "description": "Compare direct moe_forward with signal-driven dispatch for bounded M, verify rows beyond M remain untouched, and inspect completion plus error_count for an invalid layer."
+    },
+    {
+      "source": "src/phase7/cpu_stream_test.py",
+      "symbol": "main",
+      "description": "On CUDA-capable hardware, compare streamed and CPU partials across more experts than ring slots, empty and -1 routes, and same expert ID in different layers; use bounded tolerance rather than bit equality."
+    },
+    {
+      "source": "src/phase7/cpu_expert_capi.cpp",
+      "symbol": "CpuExpertHost::load_expert",
+      "description": "Source-inspect that first load allocates one contiguous six-section block while reload resolves the existing slot and cannot increase arena used bytes."
+    },
+    {
+      "source": "src/phase7/cpu_expert_capi.cpp",
+      "symbol": "CpuPoller::loop",
+      "description": "Source-inspect signal clearing before dispatch, sequential fences, unconditional completion after both return branches, error telemetry, and spin-then-20us-sleep backoff."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/cpu_expert_host.py",
+      "symbol": "CpuExpertHost.close",
+      "description": "Source-inspect lifetime ownership: borrowed tensors and native poller pointers are not reference-counted against host destruction, and pinned arena teardown has no cudaHostUnregister call."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/cpu_stream.py",
+      "symbol": "ExpertStreamer.stats",
+      "description": "Compare reported slot_bytes with _ring allocation and _block_bytes; document the current packed-size telemetry discrepancy rather than treating the report as allocation truth."
+    },
+    {
+      "source": "src/phase7/cpu_expert_bench.py",
+      "symbol": "bench",
+      "description": "Source-inspect benchmark drift before execution: verify whether it constructs PackedPlane inputs and reports packed traffic; the checked-in version instead passes bf16 tensors and computes bf16 bytes."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/sb_stream.cu",
+      "symbol": "sb_wait_flag",
+      "description": "Search phase4 call/build references and compare the helper's implicit stream, print-only error handling, and unbounded spin with the active stream_signal.py Driver operations."
+    }
+  ]
+}

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import zlib
+import hashlib
 import json
 import os
+import platform
 import subprocess
 import sys
 import threading
 import time
+import zlib
 from dataclasses import asdict, dataclass
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +45,9 @@ class RunConfig:
     disable_console: bool
     skip_existing: bool
     profiles: list[str]
+    server_manifest: Path | None = None
+    seed_mode: str = "per-cell"
+    duration_mode: str = "scaled"
 
 
 def parse_args() -> RunConfig:
@@ -64,6 +70,11 @@ def parse_args() -> RunConfig:
         default=Path("/root/testing/bench-matrix/prod_gpu"),
     )
     parser.add_argument(
+        "--server-manifest",
+        type=Path,
+        help="JSON-object server identity/config supplied by the operator; no server properties are inferred.",
+    )
+    parser.add_argument(
         "--contexts",
         default="1024,4096,8192,16384,32768",
         help="Comma-separated prompt token lengths.",
@@ -81,6 +92,12 @@ def parse_args() -> RunConfig:
     )
     parser.add_argument("--output-tokens", type=int, default=512)
     parser.add_argument("--max-seconds", type=float, default=60.0)
+    parser.add_argument(
+        "--duration-mode",
+        choices=("scaled", "fixed"),
+        default="scaled",
+        help="Scale duration by context, or use max-seconds unchanged in every cell.",
+    )
     parser.add_argument("--max-requests", type=int, default=None)
     parser.add_argument("--sample-interval", type=float, default=5.0)
     parser.add_argument(
@@ -90,6 +107,12 @@ def parse_args() -> RunConfig:
     )
     parser.add_argument("--request-format", default="/v1/chat/completions")
     parser.add_argument("--random-seed", type=int, default=42)
+    parser.add_argument(
+        "--seed-mode",
+        choices=("per-cell", "fixed"),
+        default="per-cell",
+        help="Derive seeds per cell, or reuse random-seed. Disable server prefix caching for cold fixed-seed runs.",
+    )
     parser.add_argument("--rampup", type=float, default=10.0)
     parser.add_argument("--warmup", default="0.1")
     parser.add_argument("--cooldown", default="0.1")
@@ -110,7 +133,7 @@ def parse_args() -> RunConfig:
         "--skip-existing",
         action="store_true",
         default=False,
-        help="Skip cells whose run_manifest.json already reports return_code=0.",
+        help="Skip successful cells only when their stored run identity matches this invocation.",
     )
     parser.add_argument(
         "--profiles",
@@ -142,6 +165,9 @@ def parse_args() -> RunConfig:
         disable_console=args.disable_console,
         skip_existing=args.skip_existing,
         profiles=_parse_str_list(args.profiles),
+        server_manifest=args.server_manifest,
+        seed_mode=args.seed_mode,
+        duration_mode=args.duration_mode,
     )
 
 
@@ -155,6 +181,141 @@ def _parse_str_list(value: str) -> list[str]:
 
 def _slugify_model_name(model: str) -> str:
     return model.replace("/", "__")
+
+
+def _identity_json(value: dict[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise TypeError("expected a JSON object")
+        # Reject non-JSON NaN/Infinity values, including overflowed numbers.
+        _identity_json(value)
+    except (OSError, UnicodeError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Cannot read JSON object from {path}: {exc}") from exc
+    return value
+
+
+def _load_server_manifest(path: Path | None) -> dict[str, Any] | None:
+    return None if path is None else _read_json_object(path)
+
+
+def _client_identity() -> dict[str, Any]:
+    # These are local client distributions, NOT remote serving-stack versions.
+    packages = sorted(
+        (
+            {"name": dist.metadata["Name"], "version": dist.version}
+            for dist in metadata.distributions()
+        ),
+        key=lambda item: (item["name"] or "", item["version"]),
+    )
+    return {
+        "python_version": sys.version,
+        "python_implementation": platform.python_implementation(),
+        "installed_packages": packages,
+    }
+
+
+def _run_identity(config: RunConfig, runner_path: Path) -> dict[str, Any]:
+    server_manifest = _load_server_manifest(config.server_manifest)
+    benchmark_config = asdict(config)
+    for key in ("output_root", "skip_existing", "server_manifest"):
+        del benchmark_config[key]
+    return {
+        "schema_version": 1,
+        "benchmark_config": benchmark_config,
+        "client": _client_identity(),
+        "runner_source_sha256": hashlib.sha256(runner_path.read_bytes()).hexdigest(),
+        "server": {
+            "source": "user_supplied" if server_manifest is not None else "not_provided",
+            "manifest": server_manifest,
+        },
+    }
+
+
+def _resume_error(path: Path, reason: str) -> RuntimeError:
+    return RuntimeError(
+        f"Refusing to reuse {path}: {reason}. "
+        "Use a new output directory with --output-root; existing evidence was not overwritten."
+    )
+
+
+def _resume_cells(config: RunConfig, model_dir: Path, identity_sha256: str) -> set[tuple[int, str]]:
+    completed: set[tuple[int, str]] = set()
+    for context_len in config.contexts:
+        for profile in config.profiles:
+            profile_dir = model_dir / f"ctx_{context_len}" / profile
+            if not profile_dir.exists():
+                continue
+            if not profile_dir.is_dir():
+                raise _resume_error(profile_dir, "cell path is not a directory")
+            manifest_path = profile_dir / "run_manifest.json"
+            if not manifest_path.exists():
+                if any(profile_dir.iterdir()):
+                    raise _resume_error(profile_dir, "existing cell artifacts have no provenance")
+                continue
+            try:
+                manifest = _read_json_object(manifest_path)
+            except RuntimeError as exc:
+                raise _resume_error(manifest_path, str(exc)) from exc
+            if (
+                manifest.get("run_identity_sha256") != identity_sha256
+                or manifest.get("profile") != profile
+                or manifest.get("context_tokens") != context_len
+                or "return_code" not in manifest
+                or (
+                    manifest["return_code"] is not None and type(manifest["return_code"]) is not int
+                )
+            ):
+                raise _resume_error(
+                    manifest_path, "cell identity is missing, incompatible, or malformed"
+                )
+            if manifest["return_code"] == 0:
+                completed.add((context_len, profile))
+    return completed
+
+
+def _prepare_run(config: RunConfig, runner_path: Path) -> tuple[Path, str, set[tuple[int, str]]]:
+    # Validate every cell before any network activity or modification of evidence.
+    identity = _run_identity(config, runner_path)
+    identity_json = _identity_json(identity)
+    identity_sha256 = hashlib.sha256(identity_json.encode("utf-8")).hexdigest()
+    model_dir = config.output_root / _slugify_model_name(config.model)
+    identity_path = model_dir / "run_identity.json"
+    identity_exists = identity_path.exists()
+    if model_dir.exists() and not model_dir.is_dir():
+        raise _resume_error(model_dir, "model path is not a directory")
+    if identity_exists:
+        try:
+            stored = _read_json_object(identity_path)
+        except RuntimeError as exc:
+            raise _resume_error(identity_path, str(exc)) from exc
+        if _identity_json(stored) != identity_json:
+            raise _resume_error(
+                identity_path, "workload, client, runner, or supplied server identity changed"
+            )
+    elif model_dir.exists() and any(model_dir.iterdir()):
+        raise _resume_error(model_dir, "existing run has no run_identity.json provenance")
+    completed = _resume_cells(config, model_dir, identity_sha256)
+
+    model_dir.mkdir(parents=True, exist_ok=True)
+    if not identity_exists:
+        # Exclusive creation: an identity is never replaced by a resumed invocation.
+        try:
+            with identity_path.open("x", encoding="utf-8") as handle:
+                handle.write(json.dumps(identity, indent=2, sort_keys=True, allow_nan=False))
+        except FileExistsError as exc:
+            raise _resume_error(
+                identity_path, "another invocation created the run identity"
+            ) from exc
+    config_path = model_dir / "matrix_config.json"
+    if not config_path.exists():
+        with config_path.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(asdict(config), indent=2, default=str, sort_keys=True))
+    return model_dir, identity_sha256, completed
 
 
 def _metric_key(name: str, labels: dict[str, Any]) -> str:
@@ -176,7 +337,9 @@ def _parse_prometheus_metrics(payload: str) -> dict[str, float]:
     return parsed
 
 
-def _scrape_metrics(stop_event: threading.Event, metrics_url: str, output_path: Path, interval: float) -> None:
+def _scrape_metrics(
+    stop_event: threading.Event, metrics_url: str, output_path: Path, interval: float
+) -> None:
     session = requests.Session()
     with output_path.open("a", encoding="utf-8") as handle:
         while not stop_event.is_set():
@@ -203,13 +366,15 @@ def _guidellm_repo_root(script_path: Path) -> Path:
     return script_path.resolve().parents[1]
 
 
-def _cell_seed(config: "RunConfig", profile: str, context_len: int) -> int:
-    """Distinct synthetic prompts per cell, deterministically.
+def _cell_seed(config: RunConfig, profile: str, context_len: int) -> int:
+    """Choose deterministic per-cell prompts or an explicitly fixed seed.
 
     zlib.crc32 rather than hash(): PYTHONHASHSEED randomises str hashing per
     process, which would make a --skip-existing resume generate different
     prompts for a cell than the original run did.
     """
+    if config.seed_mode == "fixed":
+        return config.random_seed
     key = f"{config.random_seed}|{profile}|{context_len}|{config.output_tokens}"
     return zlib.crc32(key.encode()) & 0x7FFF_FFFF
 
@@ -229,11 +394,13 @@ def _guidellm_command(
     warmup = config.warmup if trim_transients else "0"
     cooldown = config.cooldown if trim_transients else "0"
     profile_spec = (
-        f"kind={profile},warmup={warmup},cooldown={cooldown},"
-        f"rampup_duration={config.rampup}"
+        f"kind={profile},warmup={warmup},cooldown={cooldown},rampup_duration={config.rampup}"
     )
     command = [
-        sys.executable, "-m", "guidellm", "run",
+        sys.executable,
+        "-m",
+        "guidellm",
+        "run",
         "--backend",
         (
             "kind=openai_http,"
@@ -252,38 +419,40 @@ def _guidellm_command(
             ),
         ]
     command += [
-        "--profile", profile_spec,
+        "--profile",
+        profile_spec,
         "--data",
-        (
-            "kind=synthetic_text,"
-            f"prompt_tokens={context_len},"
-            f"output_tokens={config.output_tokens}"
-        ),
-        # Per-CELL seed, not per-run. GuideLLM restarts its synthetic generator
-        # in every subprocess, so a constant seed makes cell N's sample K
-        # byte-identical to cell M's sample K -- and with prefix caching on, every
+        (f"kind=synthetic_text,prompt_tokens={context_len},output_tokens={config.output_tokens}"),
+        # By default, derive a per-cell seed. GuideLLM restarts its synthetic
+        # generator in every subprocess, so a fixed seed can reuse identical
+        # prompts across cells. Fixed mode requires explicit cache isolation
+        # for cold comparisons; with prefix caching on, otherwise every
         # cell after the first measures a cache HIT instead of prefill. Measured
         # 2026-08-22: ctx_1024/C=1 read TTFT min 63 / median 89 / max 126 ms on a
         # 1,066-token prompt whose cold cost is ~430 ms. The whole 24-cell grid's
         # TTFT column was warm-path. bench_88b.py:cell_seed already guarded this;
         # matrix_runner did not.
-        "--seed", f"kind=static,value={_cell_seed(config, profile, context_len)}",
+        "--seed",
+        f"kind=static,value={_cell_seed(config, profile, context_len)}",
     ]
 
     # Per-profile load shape. concurrent runs each rate as a fixed
     # concurrency; sweep interpolates across strategies.
     if profile == "concurrent":
         command += [
-            "--override", "profile.streams",
+            "--override",
+            "profile.streams",
             ",".join(str(r) for r in config.concurrent_rates),
         ]
     elif profile == "sweep":
         command += ["--override", "profile.sweep_size", str(config.sweep_steps)]
 
-    # Stop conditions. max_seconds is scaled by context length so large
-    # cells get enough wall time for valid statistics.
+    # Scale durations by default so long-context cells collect enough samples;
+    # fixed mode reproduces a common measurement window across all cells.
     if config.max_seconds is not None:
-        if context_len > 128_000:
+        if config.duration_mode == "fixed":
+            scaled = config.max_seconds
+        elif context_len > 128_000:
             scaled = config.max_seconds * 8
         elif context_len > 32_000:
             scaled = config.max_seconds * 4
@@ -292,9 +461,7 @@ def _guidellm_command(
         else:
             scaled = config.max_seconds
         command += ["--constraint", f"kind=max_duration,seconds={int(scaled)}"]
-    if config.max_requests is not None and (
-        profile != "sweep" or config.max_requests >= 10
-    ):
+    if config.max_requests is not None and (profile != "sweep" or config.max_requests >= 10):
         command += ["--constraint", f"kind=max_requests,count={config.max_requests}"]
     command += ["--constraint", f"kind=max_errors,count={config.max_errors}"]
 
@@ -307,7 +474,14 @@ def _guidellm_command(
     return command
 
 
-def _run_profile(repo_root: Path, config: RunConfig, profile: str, context_len: int, base_dir: Path) -> None:
+def _run_profile(
+    repo_root: Path,
+    config: RunConfig,
+    profile: str,
+    context_len: int,
+    base_dir: Path,
+    identity_sha256: str,
+) -> None:
     profile_dir = base_dir / profile
     profile_dir.mkdir(parents=True, exist_ok=True)
 
@@ -317,6 +491,23 @@ def _run_profile(repo_root: Path, config: RunConfig, profile: str, context_len: 
     stderr_path = profile_dir / "guidellm_stderr.log"
 
     command = _guidellm_command(repo_root, config, profile, context_len, profile_dir)
+    started = time.time()
+    manifest = {
+        "profile": profile,
+        "context_tokens": context_len,
+        "run_identity_sha256": identity_sha256,
+        "started_at": started,
+        "finished_at": None,
+        "return_code": None,
+        "metrics_path": str(metrics_path),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+    }
+    # Establish provenance before starting a cell so interrupted attempts can resume.
+    (profile_dir / "run_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     command_path.write_text(json.dumps({"command": command}, indent=2), encoding="utf-8")
 
     env = os.environ.copy()
@@ -330,11 +521,11 @@ def _run_profile(repo_root: Path, config: RunConfig, profile: str, context_len: 
     )
     scraper.start()
 
-    started = time.time()
     try:
-        with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open(
-            "w", encoding="utf-8"
-        ) as stderr_handle:
+        with (
+            stdout_path.open("w", encoding="utf-8") as stdout_handle,
+            stderr_path.open("w", encoding="utf-8") as stderr_handle,
+        ):
             result = subprocess.run(
                 command,
                 cwd=repo_root,
@@ -347,16 +538,7 @@ def _run_profile(repo_root: Path, config: RunConfig, profile: str, context_len: 
         stop_event.set()
         scraper.join(timeout=max(config.sample_interval * 2, 5.0))
 
-    manifest = {
-        "profile": profile,
-        "context_tokens": context_len,
-        "started_at": started,
-        "finished_at": time.time(),
-        "return_code": result.returncode,
-        "metrics_path": str(metrics_path),
-        "stdout_path": str(stdout_path),
-        "stderr_path": str(stderr_path),
-    }
+    manifest.update(finished_at=time.time(), return_code=result.returncode)
     (profile_dir / "run_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -364,8 +546,7 @@ def _run_profile(repo_root: Path, config: RunConfig, profile: str, context_len: 
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"GuideLLM profile '{profile}' failed for context {context_len}. "
-            f"See {stderr_path}."
+            f"GuideLLM profile '{profile}' failed for context {context_len}. See {stderr_path}."
         )
 
 
@@ -381,34 +562,23 @@ def main() -> int:
     config = parse_args()
     repo_root = _guidellm_repo_root(Path(__file__))
 
-    _preflight_metrics(config.metrics_url)
+    # Identity validation and the supplied server snapshot must precede HTTP requests.
 
-    model_dir = config.output_root / _slugify_model_name(config.model)
-    model_dir.mkdir(parents=True, exist_ok=True)
-    (model_dir / "matrix_config.json").write_text(
-        json.dumps(asdict(config), indent=2, default=str, sort_keys=True),
-        encoding="utf-8",
-    )
+    model_dir, identity_sha256, completed = _prepare_run(config, Path(__file__))
+    _preflight_metrics(config.metrics_url)
 
     for context_len in config.contexts:
         context_dir = model_dir / f"ctx_{context_len}"
         context_dir.mkdir(parents=True, exist_ok=True)
         for profile in config.profiles:
-            if config.skip_existing:
-                manifest_path = context_dir / profile / "run_manifest.json"
-                if manifest_path.exists():
-                    try:
-                        cached = json.loads(manifest_path.read_text(encoding="utf-8"))
-                        if cached.get("return_code") == 0:
-                            print(
-                                f"[run_vllm_matrix] skip (already done) context={context_len} profile={profile}",
-                                flush=True,
-                            )
-                            continue
-                    except Exception:  # noqa: BLE001
-                        pass
+            if config.skip_existing and (context_len, profile) in completed:
+                print(
+                    f"[run_vllm_matrix] skip (already done) context={context_len} profile={profile}",
+                    flush=True,
+                )
+                continue
             print(f"[run_vllm_matrix] context={context_len} profile={profile}", flush=True)
-            _run_profile(repo_root, config, profile, context_len, context_dir)
+            _run_profile(repo_root, config, profile, context_len, context_dir, identity_sha256)
 
     print(f"[run_vllm_matrix] completed output_root={model_dir}", flush=True)
     return 0

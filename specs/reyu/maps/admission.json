@@ -1,0 +1,194 @@
+{
+  "id": "admission",
+  "title": "Model admission, plugin registration, and serving launch recipes",
+  "models": [
+    {
+      "path": "models/admission.ryu",
+      "main": "admission",
+      "invariant": "inv",
+      "witnesses": [
+        "registeredWitness",
+        "disabledWitness",
+        "failClosedBankWitness",
+        "conflictWitness"
+      ]
+    },
+    {
+      "path": "models/launch.ryu",
+      "main": "launch",
+      "invariant": "inv",
+      "witnesses": [
+        "readyWitness",
+        "smokeNotAGateWitness",
+        "timeoutWitness",
+        "precedenceWitness",
+        "sourceContradictionWitness"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "benchmarks/results/rtx_pro_6000_r15_slo/serve_vllm_rtx_pro_6000.sh",
+      "role": "harness",
+      "models": ["models/launch.ryu"],
+      "symbols": [],
+      "notes": "Top-level shell baseline has no named functions. It validates its separate vLLM/CUDA installation, prepares CUDA pip-layout aliases, then execs a non-plugin RTX Pro 6000 r15 server; modeled as a direct external recipe boundary."
+    },
+    {
+      "path": "benchmarks/serve_88b.sh",
+      "role": "harness",
+      "models": ["models/admission.ryu", "models/launch.ryu"],
+      "symbols": [],
+      "notes": "Top-level shell recipe has no named functions. It supplies the split-88B int4 admission modes and direct 32K/MNBT-256 launch contract."
+    },
+    {
+      "path": "benchmarks/serve_88b_128k.sh",
+      "role": "harness",
+      "models": ["models/admission.ryu", "models/launch.ryu"],
+      "symbols": [],
+      "notes": "Top-level shell recipe has no named functions. It supplies the 128K int4 launch and environment-sensitive B70 max-batch precedence; tensor execution is abstract."
+    },
+    {
+      "path": "benchmarks/serve_88b_128k_profile.sh",
+      "role": "harness",
+      "models": ["models/admission.ryu", "models/launch.ryu"],
+      "symbols": [],
+      "notes": "Top-level profiling recipe has no named functions. It is modeled as direct exec with attribution-only profiling settings, not as performance evidence or a health gate."
+    },
+    {
+      "path": "benchmarks/serve_99b_dual.sh",
+      "role": "harness",
+      "models": ["models/admission.ryu", "models/launch.ryu"],
+      "symbols": [],
+      "notes": "Top-level dual-B70 recipe has no named functions. It supplies the 99B CausalLM/NVFP4 mode, bank repetition, BDF selector order, and environment-overridable direct launch."
+    },
+    {
+      "path": "benchmarks/serve_hybrid.sh",
+      "role": "harness",
+      "models": ["models/admission.ryu", "models/launch.ryu"],
+      "symbols": [],
+      "notes": "Top-level older Track A recipe has no named functions. Its direct 35B launch is modeled; the chapter reports that its default phase1/phase7 paths do not match the checkout's src/phase1/src/phase7 layout."
+    },
+    {
+      "path": "benchmarks/serve_jota_r15_dual.sh",
+      "role": "harness",
+      "models": ["models/admission.ryu", "models/launch.ryu"],
+      "symbols": [],
+      "notes": "Top-level tracked recipe has no named functions. It owns current r15 defaults, named-environment precedence, appended SB_EXTRA_ARGS, 95/75 remote placement, executable MNBT 2048, and optional speculative CLI."
+    },
+    {
+      "path": "benchmarks/serve_jota_r20_dual.sh",
+      "role": "harness",
+      "models": ["models/admission.ryu", "models/launch.ryu"],
+      "symbols": [],
+      "notes": "Top-level direct recipe has no named functions. It supplies Laguna r20 47-row topology assumptions and explicitly inferred MNBT-512 launch defaults."
+    },
+    {
+      "path": "pyproject.toml",
+      "role": "build",
+      "models": ["models/admission.ryu"],
+      "symbols": [],
+      "notes": "Declarative TOML has no code symbols. It exposes shooting_brake_vllm:register from the phase4 source tree and defines the root package/dependency boundary."
+    },
+    {
+      "path": "scripts/b70_tune.sh",
+      "role": "functional",
+      "models": ["models/launch.ryu"],
+      "symbols": ["card_for", "hwmon_cap"],
+      "notes": "Card alias/BDF resolution, sysfs frequency and power operations are inventoried as pre-launch hardware state; they are not folded into plugin admission or claimed to schedule requests."
+    },
+    {
+      "path": "serve_production.sh",
+      "role": "behavior",
+      "models": ["models/launch.ryu"],
+      "symbols": [],
+      "notes": "Top-level shell entrypoint has no named functions. The launch model covers process replacement, wrapper/recipe/trailing-argument precedence, health timeout, inspection, smoke, and the non-errexit READY edge."
+    },
+    {
+      "path": "src/phase4/pyproject.toml",
+      "role": "build",
+      "models": ["models/admission.ryu"],
+      "symbols": [],
+      "notes": "Declarative TOML has no code symbols. It is the narrower shooting-brake-vllm packaging surface and registers shooting_brake_vllm:register against vLLM 0.26.0."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/__init__.py",
+      "role": "behavior",
+      "models": ["models/admission.ryu"],
+      "symbols": [
+        "register",
+        "force_piecewise_fired",
+        "_apply_file_env_overrides",
+        "_patch_force_piecewise",
+        "_patch_nested_causallm_naming",
+        "_patch_nested_quant_ignore",
+        "_patch_cs_doorbell_arming",
+        "_patch_seam_trace_step",
+        "_patch_fused_shared",
+        "_patch_hidden_capture"
+      ],
+      "notes": "Mode-gated ordered patch installation and conflicting OOT replacement behavior are modeled. Patch internals beyond their admission/order conditions are explained but delegated to their owning subsystems."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/config.py",
+      "role": "behavior",
+      "models": ["models/admission.ryu"],
+      "symbols": [
+        "SupportedModel",
+        "QualifiedModel",
+        "BankHeader",
+        "QualificationError",
+        "supported_model",
+        "phase4_enabled",
+        "bank_path",
+        "b70_bank_paths",
+        "read_bank_header",
+        "validate_int4_layer_ownership",
+        "validate_int4_hybrid_contract",
+        "require_qualified_config"
+      ],
+      "notes": "Authoritative supported-model, bank identity/topology, text-only, rank/EPLB, alignment, int4 opt-in and exact per-device ownership admission. Binary byte layout and placement generation are referenced dependencies."
+    }
+  ],
+  "assumptions": [
+    "The finite Profile and Architecture values stand for registry families; scenarios carry concrete hidden, layer, expert, top-k, and intermediate dimensions compared by modelContract.",
+    "BankStatus collapses header parsing, model identity, per-card coverage agreement, and explicit int4 ownership while preserving every represented accept/reject class.",
+    "The launch health counter is bounded to two failed polls instead of modeling wall-clock seconds; timeout ordering is preserved.",
+    "Trailing duplicate vLLM CLI options are modeled as the effective candidate because SB_EXTRA_ARGS is appended last; final duplicate-option semantics remain an external vLLM argparse boundary.",
+    "HTTP, JSON parsing, process signaling, oneAPI, sysfs, and accelerator work are external outcomes; the models do not assert their availability.",
+    "The plugin does not own vLLM request scheduling; MNBT/MNS are launch configuration observations only.",
+    "Comments and banner text are explanatory observations, never configuration inputs; source-visible mismatches remain explicit witnesses."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/config.py",
+      "symbol": "supported_model",
+      "description": "CPU-call the registry lookup for all six repo IDs, one HF snapshot-form path, and an unknown ID; compare success/failure with registryMember and UnsupportedModel scenarios."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/config.py",
+      "symbol": "require_qualified_config",
+      "description": "Use the existing CPU-only fake config/header fixtures to vary exact geometry, text-only state, TP/PP, EPLB, absent/wrong banks, and int4 opt-in; compare each outcome with qualify/rejectModel/rejectBank/rejectMode."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/config.py",
+      "symbol": "validate_int4_layer_ownership",
+      "description": "CPU-enumerate small CUDA/card/bank ID sets and compare exact coverage, overlap, cross-device duplication, gap, and extra-ID outcomes with the BadBank abstraction."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/__init__.py",
+      "symbol": "register",
+      "description": "Source-inspect or isolate the OOT registry with empty, identical, and foreign entries; compare installed/idempotent/conflict outcomes and verify file overrides are unreachable when phase4_enabled is false."
+    },
+    {
+      "source": "benchmarks/serve_jota_r15_dual.sh",
+      "symbol": "SHOOTING_BRAKE_PLACEMENT",
+      "description": "CPU-parse the exported environment and final exec arguments under empty, named SB_MNBT, and duplicate SB_EXTRA_ARGS inputs; confirm executable default 2048, 95/75 placement, and trailing argument order independently of comments."
+    },
+    {
+      "source": "serve_production.sh",
+      "symbol": "BOOT_TIMEOUT_S",
+      "description": "Run in an isolated CPU shell with controlled fake process/HTTP utilities to compare health success, bounded timeout, valid smoke, and failed command-substitution smoke; confirm timeout exits while a post-health smoke failure can still reach the banner."
+    }
+  ]
+}

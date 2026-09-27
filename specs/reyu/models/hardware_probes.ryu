@@ -1,0 +1,388 @@
+/// Hardware qualification and reproduction workflows, not serving-path code.
+/// Sources: experiments/*probe*, transport_*.c, provider smoke programs,
+/// experiments/repro/*, and tests/pinned_staging_probe/*.
+/// Breadth-first abstraction: one selected probe family owns a bounded fixture;
+/// setup, handoff/submission, device observation, verdict, and release remain
+/// distinct. Tensor arithmetic, driver calls, timing, and PCIe/cache effects are
+/// atomic observations; concrete fixtures live in the run scenarios below.
+module hardware_probes {
+  type Probe = None | HostFlag | PinnedBounce | ExternalMemory | PcieTopology |
+    NativeQueue | CommandStreamer | ProviderOracle | WorkerIpc | Attention |
+    AllocationRepro | FormatKernel
+  type Phase = Idle | Selected | Ready | Submitted | DeviceDone | Assessed |
+    Released | Refused
+  type Transport = NoTransport | CudaMapped | MemfdPinned | DmaBufFd |
+    SyclUsm | L0CommandList | SharedSequence
+  type Verdict = Pending | Passed | Failed | DiagnosticOnly | Unavailable
+  type State = {
+    probe: Probe,
+    phase: Phase,
+    transport: Transport,
+    runtimeReady: bool,
+    hostOwned: bool,
+    deviceOwned: bool,
+    registered: bool,
+    fdExported: bool,
+    fdImported: bool,
+    submitted: int,
+    completed: int,
+    lanes: int,
+    payloadProduced: bool,
+    payloadObserved: bool,
+    oracleCompared: bool,
+    numericalOk: bool,
+    orderingOk: bool,
+    overlapObserved: bool,
+    timed: bool,
+    errors: int,
+    verdict: Verdict,
+  }
+
+  pure val MAX_OPS = 4
+  var s: State
+
+  pure def boundedCount(n: int): bool = n >= 0 and n <= MAX_OPS
+  pure def strictSuccess(payloadRequired: bool, payloadObserved: bool,
+                         oracleRequired: bool, oracleCompared: bool,
+                         numericalOk: bool, orderingOk: bool): bool =
+    (not(payloadRequired) or payloadObserved) and
+    (not(oracleRequired) or (oracleCompared and numericalOk)) and orderingOk
+
+  action init = s' = {
+    probe: None, phase: Idle, transport: NoTransport,
+    runtimeReady: false, hostOwned: false, deviceOwned: false,
+    registered: false, fdExported: false, fdImported: false,
+    submitted: 0, completed: 0, lanes: 0,
+    payloadProduced: false, payloadObserved: false,
+    oracleCompared: false, numericalOk: false, orderingOk: false,
+    overlapObserved: false, timed: false, errors: 0, verdict: Pending,
+  }
+
+  action choose(p: Probe, t: Transport, lanes: int): bool = all {
+    s.phase == Idle, p != None, boundedCount(lanes), lanes > 0,
+    s' = { ...s, probe: p, transport: t, lanes: lanes, phase: Selected },
+  }
+
+  /// Runtime/device discovery is a real admission boundary. Some sources reject;
+  /// others print a diagnostic or even return success without executing a probe.
+  action admitRuntime = all {
+    s.phase == Selected,
+    s' = { ...s, phase: Ready, runtimeReady: true,
+      hostOwned: true, deviceOwned: true },
+  }
+  action refuseRuntime(diagnosticExitZero: bool): bool = all {
+    s.phase == Selected,
+    s' = { ...s, phase: Refused, runtimeReady: false, errors: 1,
+      verdict: if (diagnosticExitZero) DiagnosticOnly else Unavailable },
+  }
+
+  /// b13_doorbell_flag_probe.cpp; b13_sweep_probe.cpp;
+  /// b70_hostflag_spin_probe.cpp. Registration and publication precede polling.
+  action registerMappedHost(canMap: bool): bool = all {
+    s.phase == Ready, s.probe == HostFlag, s.transport == CudaMapped,
+    s' = { ...s, registered: canMap,
+      errors: if (canMap) s.errors else s.errors + 1 },
+  }
+  action publishHostFlag(sequence: int): bool = all {
+    s.phase == Ready, s.probe == HostFlag, s.registered,
+    sequence > 0, sequence <= MAX_OPS,
+    s' = { ...s, phase: Submitted, submitted: sequence,
+      payloadProduced: true },
+  }
+  action acknowledgeHostFlag(sequence: int, coherent: bool): bool = all {
+    s.phase == Submitted, s.probe == HostFlag, sequence == s.submitted,
+    s' = { ...s, phase: DeviceDone,
+      completed: if (coherent) sequence else 0,
+      payloadObserved: coherent, orderingOk: coherent,
+      errors: if (coherent) s.errors else s.errors + 1 },
+  }
+
+  /// pinned_staging_probe and transport_test/debug families. A CUDA stream
+  /// completes before a memfd/eventfd or plain pinned-page handoff to Level Zero.
+  action registerPinnedMapping = all {
+    s.phase == Ready, s.probe == PinnedBounce,
+    s.transport == MemfdPinned,
+    s' = { ...s, registered: true, fdExported: true },
+  }
+  action producePinnedPayload(patternWritten: bool): bool = all {
+    s.phase == Ready, s.probe == PinnedBounce, s.registered, s.fdExported,
+    s' = { ...s, phase: Submitted, submitted: 1,
+      payloadProduced: patternWritten },
+  }
+  action consumePinnedPayload(providerMapped: bool, copiedBack: bool,
+                              checked: bool): bool = all {
+    s.phase == Submitted, s.probe == PinnedBounce,
+    s' = { ...s, phase: DeviceDone, fdImported: providerMapped,
+      completed: if (providerMapped and copiedBack) 1 else 0,
+      payloadObserved: checked and providerMapped and copiedBack,
+      orderingOk: providerMapped and copiedBack,
+      errors: if (providerMapped and copiedBack) s.errors else s.errors + 1 },
+  }
+
+  /// rbar_dmabuf_probe.cpp and xvendor_p2p_probe.cpp require an actual exported
+  /// device allocation, foreign import, full-pattern provenance, then timed copy.
+  action exportDeviceFd = all {
+    s.phase == Ready, s.probe == ExternalMemory, s.transport == DmaBufFd,
+    s' = { ...s, fdExported: true, payloadProduced: true },
+  }
+  action importDeviceFd(advertised: bool, accepted: bool): bool = all {
+    s.phase == Ready, s.probe == ExternalMemory, s.fdExported,
+    s' = { ...s, fdImported: advertised and accepted,
+      errors: if (advertised and accepted) s.errors else s.errors + 1 },
+  }
+  action copyExternalPattern(wordsChecked: int, allMatch: bool): bool = all {
+    s.phase == Ready, s.probe == ExternalMemory, s.fdImported,
+    wordsChecked > 0, wordsChecked <= MAX_OPS,
+    s' = { ...s, phase: DeviceDone, submitted: 1, completed: 1,
+      payloadObserved: allMatch, orderingOk: allMatch,
+      errors: if (allMatch) s.errors else s.errors + 1 },
+  }
+
+  /// PCIe, memory-topology, fused-copy and queue probes distinguish completion,
+  /// small payload checks, overlap, and diagnostic-only measurement.
+  action submitQueueLanes(count: int): bool = all {
+    s.phase == Ready,
+    any { s.probe == PcieTopology, s.probe == NativeQueue },
+    count > 0, count <= s.lanes,
+    s' = { ...s, phase: Submitted, submitted: count },
+  }
+  action completeQueueLanes(count: int, endpointsCorrect: bool,
+                            overlap: bool): bool = all {
+    s.phase == Submitted,
+    any { s.probe == PcieTopology, s.probe == NativeQueue },
+    count == s.submitted,
+    s' = { ...s, phase: DeviceDone, completed: count,
+      payloadObserved: endpointsCorrect, orderingOk: endpointsCorrect,
+      overlapObserved: overlap, timed: true,
+      errors: if (endpointsCorrect) s.errors else s.errors + 1 },
+  }
+
+  /// zex waits/writes and baked lists are command-stream ordered. The watched
+  /// address must be rung only after the wait is submitted; completion follows
+  /// the kernel/copy chain, not merely command-list creation.
+  action appendCommandChain(waitAccepted: bool): bool = all {
+    s.phase == Ready, s.probe == CommandStreamer,
+    s.transport == L0CommandList,
+    s' = { ...s, registered: waitAccepted,
+      errors: if (waitAccepted) s.errors else s.errors + 1 },
+  }
+  action ringCommand(sequence: int): bool = all {
+    s.phase == Ready, s.probe == CommandStreamer, s.registered,
+    sequence > 0, sequence <= MAX_OPS,
+    s' = { ...s, phase: Submitted, submitted: sequence,
+      payloadProduced: true },
+  }
+  action commandCompletes(sequence: int, payloadAfterCopy: bool): bool = all {
+    s.phase == Submitted, s.probe == CommandStreamer,
+    sequence == s.submitted,
+    s' = { ...s, phase: DeviceDone, completed: sequence,
+      payloadObserved: payloadAfterCopy, orderingOk: payloadAfterCopy,
+      errors: if (payloadAfterCopy) s.errors else s.errors + 1 },
+  }
+
+  /// Real-bank provider and focused kernel probes keep dispatch/take separate
+  /// from an independent same-fixture oracle comparison.
+  action loadProvider(bankValid: bool, geometryValid: bool): bool = all {
+    s.phase == Ready, s.probe == ProviderOracle,
+    s' = { ...s, registered: bankValid and geometryValid,
+      errors: if (bankValid and geometryValid) s.errors else s.errors + 1 },
+  }
+  action issueProvider(rows: int): bool = all {
+    s.phase == Ready, s.probe == ProviderOracle, s.registered,
+    rows > 0, rows <= MAX_OPS,
+    s' = { ...s, phase: Submitted, submitted: rows,
+      payloadProduced: true },
+  }
+  action takeProvider(rows: int, finite: bool): bool = all {
+    s.phase == Submitted, s.probe == ProviderOracle, rows == s.submitted,
+    s' = { ...s, phase: DeviceDone, completed: rows,
+      payloadObserved: finite, orderingOk: true,
+      errors: if (finite) s.errors else s.errors + 1 },
+  }
+  action compareOracle(withinTolerance: bool): bool = all {
+    s.phase == DeviceDone, s.probe == ProviderOracle,
+    s.payloadObserved,
+    s' = { ...s, oracleCompared: true, numericalOk: withinTolerance,
+      errors: if (withinTolerance) s.errors else s.errors + 1 },
+  }
+
+  /// b70_worker.py/b70_esimd_worker.py use controller-owned shared memory and
+  /// monotone sequence publication; completion establishes ordering, not parity.
+  action publishWorkerSlot(sequence: int): bool = all {
+    s.phase == Ready, s.probe == WorkerIpc,
+    s.transport == SharedSequence, sequence > 0, sequence <= MAX_OPS,
+    s' = { ...s, phase: Submitted, submitted: sequence,
+      payloadProduced: true },
+  }
+  action workerCompletes(sequence: int, outputCopied: bool): bool = all {
+    s.phase == Submitted, s.probe == WorkerIpc,
+    sequence == s.submitted,
+    s' = { ...s, phase: DeviceDone, completed: sequence,
+      payloadObserved: outputCopied, orderingOk: outputCopied,
+      errors: if (outputCopied) s.errors else s.errors + 1 },
+  }
+
+  /// attention_decode_probe.py captures repeated calls only after warmup and an
+  /// initial numerical check; captured replay is checked again.
+  action captureAttention(initialClose: bool, replayClose: bool): bool = all {
+    s.phase == Ready, s.probe == Attention,
+    s' = { ...s, phase: DeviceDone, submitted: 2, completed: 2,
+      payloadProduced: true, payloadObserved: true,
+      oracleCompared: true, numericalOk: initialClose and replayClose,
+      orderingOk: true, timed: initialClose,
+      errors: if (initialClose and replayClose) s.errors else s.errors + 1 },
+  }
+
+  /// Device-USM allocation reproducers retain allocations until observation;
+  /// early null allocation can be a source-level false pass in l0v2_memset_crash.
+  action retainTouchedAllocations(requested: int, completed: int,
+                                  sourceCallsPass: bool): bool = all {
+    s.phase == Ready, s.probe == AllocationRepro,
+    requested > 0, requested <= MAX_OPS,
+    completed >= 0, completed <= requested,
+    s' = { ...s, phase: DeviceDone, submitted: requested,
+      completed: completed, payloadProduced: completed > 0,
+      payloadObserved: completed > 0, orderingOk: sourceCallsPass,
+      errors: if (sourceCallsPass) s.errors else s.errors + 1 },
+  }
+
+  /// Format throughput scripts may time successfully without checking output;
+  /// the focused INT4 path does compare decoded layout and a CPU oracle.
+  action runFormatKernel(outputChecked: bool, oracleClose: bool): bool = all {
+    s.phase == Ready, s.probe == FormatKernel,
+    s' = { ...s, phase: DeviceDone, submitted: 1, completed: 1,
+      payloadProduced: true, payloadObserved: outputChecked,
+      oracleCompared: outputChecked, numericalOk: outputChecked and oracleClose,
+      orderingOk: true, timed: true,
+      errors: if (outputChecked and not(oracleClose)) s.errors + 1 else s.errors },
+  }
+
+  action assess(payloadRequired: bool, oracleRequired: bool): bool = all {
+    s.phase == DeviceDone,
+    s' = { ...s, phase: Assessed,
+      verdict: if (strictSuccess(payloadRequired, s.payloadObserved,
+        oracleRequired, s.oracleCompared, s.numericalOk, s.orderingOk))
+        Passed else Failed },
+  }
+  action recordDiagnostic = all {
+    s.phase == DeviceDone, not(s.oracleCompared),
+    s' = { ...s, phase: Assessed, verdict: DiagnosticOnly },
+  }
+  action release = all {
+    s.phase == Assessed,
+    s' = { ...s, phase: Released, hostOwned: false, deviceOwned: false,
+      registered: false, fdExported: false, fdImported: false },
+  }
+  action stay = s' = s
+
+  action step = any {
+    choose(HostFlag, CudaMapped, 1), choose(PinnedBounce, MemfdPinned, 1),
+    choose(ExternalMemory, DmaBufFd, 1), choose(PcieTopology, SyclUsm, 2),
+    choose(NativeQueue, SyclUsm, 2),
+    choose(CommandStreamer, L0CommandList, 1),
+    choose(ProviderOracle, SyclUsm, 2),
+    choose(WorkerIpc, SharedSequence, 1), choose(Attention, CudaMapped, 1),
+    choose(AllocationRepro, SyclUsm, 1), choose(FormatKernel, SyclUsm, 1),
+    admitRuntime, refuseRuntime(false), refuseRuntime(true),
+    registerMappedHost(true), registerMappedHost(false),
+    publishHostFlag(1), acknowledgeHostFlag(1, true), acknowledgeHostFlag(1, false),
+    registerPinnedMapping, producePinnedPayload(true), producePinnedPayload(false),
+    consumePinnedPayload(true, true, true), consumePinnedPayload(true, true, false),
+    exportDeviceFd, importDeviceFd(true, true), importDeviceFd(true, false),
+    copyExternalPattern(4, true), copyExternalPattern(4, false),
+    submitQueueLanes(1), submitQueueLanes(2),
+    completeQueueLanes(1, true, false), completeQueueLanes(2, true, true),
+    completeQueueLanes(2, false, false),
+    appendCommandChain(true), appendCommandChain(false), ringCommand(1),
+    commandCompletes(1, true), commandCompletes(1, false),
+    loadProvider(true, true), loadProvider(false, true), issueProvider(3),
+    takeProvider(3, true), takeProvider(3, false),
+    compareOracle(true), compareOracle(false), publishWorkerSlot(1),
+    workerCompletes(1, true), workerCompletes(1, false),
+    captureAttention(true, true), captureAttention(false, false),
+    retainTouchedAllocations(4, 4, true), retainTouchedAllocations(4, 2, true),
+    retainTouchedAllocations(4, 1, false),
+    runFormatKernel(true, true), runFormatKernel(true, false),
+    runFormatKernel(false, false), assess(true, true), assess(true, false),
+    assess(false, false), recordDiagnostic, release, stay,
+  }
+
+  val inv = and {
+    boundedCount(s.submitted), boundedCount(s.completed), boundedCount(s.lanes),
+    s.completed <= s.submitted,
+    s.fdImported implies s.fdExported,
+    s.oracleCompared implies s.payloadObserved,
+    s.numericalOk implies s.oracleCompared,
+    s.phase == Released implies and {
+      not(s.hostOwned), not(s.deviceOwned), not(s.registered),
+      not(s.fdExported), not(s.fdImported),
+    },
+    s.verdict == Passed implies s.phase == Assessed or s.phase == Released,
+    s.verdict == Failed implies s.phase == Assessed or s.phase == Released,
+  }
+
+  val witnessRegisteredHostRoundTrip = s.probe == HostFlag and
+    s.verdict == Passed and s.completed == 1
+  val witnessPinnedWithoutValidation = s.probe == PinnedBounce and
+    s.verdict == DiagnosticOnly and s.completed == 1
+  val witnessImportedDmaBuf = s.probe == ExternalMemory and
+    s.verdict == Passed and s.payloadObserved
+  val witnessConcurrentQueues = s.probe == NativeQueue and
+    s.verdict == Passed and s.overlapObserved
+  val witnessCommandOrderingFailure = s.probe == CommandStreamer and
+    s.verdict == Failed and not(s.orderingOk)
+  val witnessProviderOracle = s.probe == ProviderOracle and
+    s.verdict == Passed and s.oracleCompared
+  val witnessFalsePassRisk = s.probe == AllocationRepro and
+    s.verdict == DiagnosticOnly and s.completed < s.submitted
+  val witnessUnavailableRuntime = s.phase == Refused and
+    s.verdict == Unavailable
+
+  run mappedHostRoundTripTest = init.then(choose(HostFlag, CudaMapped, 1))
+    .then(admitRuntime).then(registerMappedHost(true)).then(publishHostFlag(1))
+    .then(acknowledgeHostFlag(1, true)).then(assess(true, false))
+    .expect(witnessRegisteredHostRoundTrip and inv).then(release).expect(inv)
+
+  run pinnedScratchDiagnosticTest = init.then(choose(PinnedBounce, MemfdPinned, 1))
+    .then(admitRuntime).then(registerPinnedMapping)
+    .then(producePinnedPayload(true)).then(consumePinnedPayload(true, true, false))
+    .then(recordDiagnostic).expect(witnessPinnedWithoutValidation and inv)
+
+  run dmaBufPatternTest = init.then(choose(ExternalMemory, DmaBufFd, 1))
+    .then(admitRuntime).then(exportDeviceFd).then(importDeviceFd(true, true))
+    .then(copyExternalPattern(4, true)).then(assess(true, false))
+    .expect(witnessImportedDmaBuf and inv)
+
+  run nativeQueueOverlapTest = init.then(choose(NativeQueue, SyclUsm, 2))
+    .then(admitRuntime).then(submitQueueLanes(2))
+    .then(completeQueueLanes(2, true, true)).then(assess(true, false))
+    .expect(witnessConcurrentQueues and inv)
+
+  run commandOrderingFailureTest = init
+    .then(choose(CommandStreamer, L0CommandList, 1)).then(admitRuntime)
+    .then(appendCommandChain(true)).then(ringCommand(1))
+    .then(commandCompletes(1, false)).then(assess(true, false))
+    .expect(witnessCommandOrderingFailure and inv)
+
+  run providerCpuOracleTest = init.then(choose(ProviderOracle, SyclUsm, 2))
+    .then(admitRuntime).then(loadProvider(true, true)).then(issueProvider(3))
+    .then(takeProvider(3, true)).then(compareOracle(true))
+    .then(assess(true, true)).expect(witnessProviderOracle and inv)
+
+  run allocationEarlyNullDiagnosticTest = init
+    .then(choose(AllocationRepro, SyclUsm, 1)).then(admitRuntime)
+    .then(retainTouchedAllocations(4, 2, true)).then(recordDiagnostic)
+    .expect(witnessFalsePassRisk and inv)
+
+  run missingRuntimeTest = init.then(choose(PcieTopology, SyclUsm, 2))
+    .then(refuseRuntime(false)).expect(witnessUnavailableRuntime and inv)
+
+  run attentionReplayFailureTest = init.then(choose(Attention, CudaMapped, 1))
+    .then(admitRuntime).then(captureAttention(true, false))
+    .then(assess(true, true)).expect(s.verdict == Failed and inv)
+
+  run workerCompletionIsNotParityTest = init
+    .then(choose(WorkerIpc, SharedSequence, 1)).then(admitRuntime)
+    .then(publishWorkerSlot(1)).then(workerCompletes(1, true))
+    .then(recordDiagnostic).expect(s.verdict == DiagnosticOnly and inv)
+}

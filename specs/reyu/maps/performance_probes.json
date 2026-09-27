@@ -1,0 +1,324 @@
+{
+  "id": "performance_probes",
+  "title": "Numerical, serving-latency, transport, and orchestration probes",
+  "models": [
+    {
+      "path": "models/performance_probes.ryu",
+      "main": "performance_probes",
+      "invariant": "inv",
+      "witnesses": [
+        "acceptedNumerical",
+        "recordedWithoutAcceptance",
+        "releasedInvalidDummy",
+        "maskedChildFailure",
+        "rejected"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "benchmarks/ab_register.sh",
+      "role": "harness",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": [],
+      "notes": "Historical top-level shell experiment with no functions: selects nominal-off and registered server arms, floor modes, prompt-logprob capture, TTFT and two matrix cells. Nominal off does not clear inherited registration; tee can mask matrix failure. Modeled as non-production arm selection and non-manifest orchestration."
+    },
+    {
+      "path": "benchmarks/ab_register_phase2.sh",
+      "role": "harness",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["boot", "warm"],
+      "notes": "Successor register A/B: boot/warm registered and nominal-off servers, compare 64 generated-token logprobs at gate 0.49, and run selected context cells. Off still inherits ambient registration; warm failures/PSI timeout are nonfatal and tee lacks pipefail."
+    },
+    {
+      "path": "benchmarks/b12x_bank_poc.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["TOP_K", "load_bank_layer", "reference_expert_mats", "main"],
+      "notes": "Real b12x bank versus independently dequantized checkpoint truth; bank/direct scale-layout arms. Enforces cosine >=0.99 and relative L2 <=0.15, then reports the median of synchronized CUDA-event samples."
+    },
+    {
+      "path": "benchmarks/b12x_encoding_probe.py",
+      "role": "functional",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": [],
+      "notes": "Fixed top-level diagnostic with no locally defined symbols. Compares FlashInfer-prepared expert bytes with bank and nibble-swapped bytes and prints checkpoint-reference cosine/L2. No timing or executable verdict."
+    },
+    {
+      "path": "benchmarks/b12x_halfswap_probe.py",
+      "role": "functional",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["swap_halves_sf", "run"],
+      "notes": "Gate/up weight-and-scale half-order and alternate down-scale-layout bisect. Reports numerical metrics and catches the third-arm exception; descriptive signatures are not gates."
+    },
+    {
+      "path": "benchmarks/b12x_w4a16_probe.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["E", "K", "I", "TOP_K", "BASE", "t", "run"],
+      "notes": "Builds checkpoint-native W4A16, ratio-bakes gate/up scale differences, compares with exact FP32 and reports the median of seven CUDA-event samples. Docstring thresholds are printed/advisory, not enforced."
+    },
+    {
+      "path": "benchmarks/b12x_w4a8_gate.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["routed_inputs", "scores", "_converter_inverse_map", "bank_sf_to_b12x", "arm_b_their_oracle", "arm_c_exact", "arm_a_kernel", "main"],
+      "notes": "Three-arm W4A8 attribution: vendor torch oracle B, checkpoint FP32 C, optional serving-style GPU A. CPU-only B-vs-C is available. Writes scores but implements no threshold."
+    },
+    {
+      "path": "benchmarks/b12x_zero_bisect.py",
+      "role": "functional",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["arm"],
+      "notes": "Five cumulative activation/fc2-scale argument arms report nonzero fraction/absmax or caught exceptions. No truth tensor, timing aggregation or acceptance."
+    },
+    {
+      "path": "benchmarks/b70_itl_probe.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["FrequencySampler", "summarize_frequencies", "one_request", "main"],
+      "notes": "Live HTTP DVFS A/B. Times every SSE data line rather than verified text/token delivery, samples sysfs frequency every 5 ms, and averages requests excluding the first when possible. No output-length or quality gate."
+    },
+    {
+      "path": "benchmarks/b70_matrix_probe.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["pct", "summarise", "read_int", "host_mem", "nvidia_mem", "vllm_gauges", "PromptMint", "RequestResult", "one_request", "device_trace_paths", "analyse_window", "run_cell", "main"],
+      "notes": "Concurrent live completion cells with prompt calibration, usage-token identity, HTTP TTFT/E2E/ITL distributions and monotonic native-trace window attribution. Missing traces/request errors are evidence, not fatal."
+    },
+    {
+      "path": "benchmarks/b70_prefill_cost.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["_device_trace_paths", "_fit_affine", "_percentile", "analyse_trace", "chunk_cap_ceiling", "_prefix_cache_counters", "PromptMint", "stream_ttft", "run_ladder", "main"],
+      "notes": "Offline native-service affine fit and live HTTP prefill ladder are distinct modes. Chunk ceiling uses ceil(T/C)*(a+b*C)*48 and charges a full final chunk. HTTP medians group by actual prompt count; cache evidence is advisory."
+    },
+    {
+      "path": "benchmarks/b70_sgl_w4a16_bench.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["pack_int4_codes", "build_weights", "naive_moe_ref", "rotating_routes", "make_run_fn", "run_cell", "main"],
+      "notes": "Isolated XPU sgl/vLLM grouped-W4A16 benchmark. Enforces CPU-reference cosine >0.999, then takes the middle of five averaged XPU-event windows and derives logical bandwidth."
+    },
+    {
+      "path": "benchmarks/b70_ttft_smoke.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["mint", "ttft", "gate", "main"],
+      "notes": "Live cold/warm prefill smoke. Quality requires nonempty text and finite selected logprobs; TTFT is actually full non-streamed one-token wall. Token-weighted cold cost and cache speedup are reported."
+    },
+    {
+      "path": "benchmarks/bench_88b.py",
+      "role": "harness",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["Cell", "build_cells", "cell_seed", "guidellm_command", "_measurement_is_real", "run_cell", "_metric", "summarize", "main"],
+      "notes": "GuideLLM grid and publication harness. Resume requires rc=0 and measured=true; real measurements require positive duration and a successful request in every report. Capacity uses 4176-token blocks and over-context skips are intentional."
+    },
+    {
+      "path": "benchmarks/chain_audit.py",
+      "role": "harness",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["DEFAULT_CONTEXTS", "DEFAULT_PROFILES", "slugify_model", "cell_state", "main"],
+      "notes": "CPU-only matrix audit: only run_manifest.json return_code==0 is OK; missing, corrupt or failed cells abort. Payload/config identity is not inspected."
+    },
+    {
+      "path": "benchmarks/compare_preemptive.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["LOGPROB_TOL", "compare_logprobs", "_worker_field", "compare_load_peak", "main"],
+      "notes": "CPU post-processing gate. Requires equal placement/config/adapter_sha, strictly lower worst-worker load peak, both null controls, and worst logprob delta <=1.5 times null noise. Token/KV equality is informational."
+    },
+    {
+      "path": "benchmarks/cuda_decode_profile.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["RooflineRow", "DeviceEvent", "_minimum_us", "roofline_rows", "_http_json", "_parse_sse", "completion_request", "_trace_files", "run_measure", "_load_trace", "_external_id", "_is_device_execution", "_shape_numbers", "classify_event", "analyze_traces", "compare_runs", "build_parser", "main"],
+      "notes": "Separates CPU roofline, strict exact-count live SSE measurement, profiler capture, Kineto device-interval analysis and real-minus-dummy HTTP comparison. Wait/write-signal APIs are excluded from device execution."
+    },
+    {
+      "path": "benchmarks/decode_gap_probe.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["layer_types", "decode_steps", "main"],
+      "notes": "HTTP-triggered ring-tail diagnostic. Groups M=1 increasing-layer sweeps of length >=40 and reports median service/gaps by attention type. It is not request-window correlated and does not verify output count."
+    },
+    {
+      "path": "benchmarks/decode_ladder_probe.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["spec_counters", "main"],
+      "notes": "Live context ladder using text-chunk arrivals and usage counts. TPOT is last-minus-first arrival over n-1; short streams are skipped and missing speculative counters become zero. No quality/acceptance threshold."
+    },
+    {
+      "path": "benchmarks/dummy_b70_provider.cpp",
+      "role": "functional",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["sb_b70_provider_t", "sb_b70_poller_t", "sb_b70_health_t", "load_u32_le", "steady_ns", "DummyProvider", "PollLayer", "TraceRecord", "DummyPoller", "sb_b70_create", "sb_b70_abi_version", "sb_b70_load", "sb_b70_load_v2", "sb_b70_issue", "sb_b70_take", "sb_b70_num_resident", "sb_b70_device_memory", "sb_b70_health", "sb_b70_poll_create", "sb_b70_poll_register", "sb_b70_poll_start", "sb_b70_poll_stop", "sb_b70_poll_reset", "sb_b70_poll_dispatch_count", "sb_b70_poll_row_count", "sb_b70_poll_error_count", "sb_b70_poll_service_ns", "sb_b70_poll_total_ns", "sb_b70_poll_kernel_ns", "sb_b70_poll_m_bucket_count", "sb_b70_poll_destroy", "sb_b70_shutdown", "sb_b70_destroy"],
+      "notes": "CPU ABI-compatible immediate-zero timing control. Validates a header prefix and dispatch bounds, zero-fills outputs, records service/buckets, and publishes completion even for invalid poll dispatches. Output is intentionally not numerically valid."
+    },
+    {
+      "path": "benchmarks/fp8_wire_numerics.py",
+      "role": "functional",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["E2M1", "FP8_MAX", "find_checkpoint", "unpack_nvfp4", "q_e4m3_per_token", "q_e4m3_blocked", "rt", "metrics", "main"],
+      "notes": "Deterministic FP8 plausibility screen over real checkpoint weights. Regime labels are non-gating. The two labeled combined FP8 scale arms are computationally identical and overwrite the same JSON key. Generic Torch CPU comparison is possible where float8 is supported."
+    },
+    {
+      "path": "benchmarks/gpu_power.sh",
+      "role": "harness",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["status"],
+      "notes": "Privileged NVIDIA power/clock control with status, cap, reset, clocks, unlock arms. It samples no timing/quality data and does not validate the documented watt range."
+    },
+    {
+      "path": "benchmarks/hostregister_probe.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["EXPERT_STRIDE", "REMOTE_EXPERTS", "HEADER_SKIP", "buf_addr", "main"],
+      "notes": "Direct H2D from registered private mmap over an assumed fixed slab. Reports median/min/max/raw event times and registration costs; only main registration/pointer/CUDA prerequisites are hard gates. First-MiB mismatch and throughput are advisory."
+    },
+    {
+      "path": "benchmarks/laguna_gate.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["build_prompt", "main"],
+      "notes": "Stock-vLLM CUDA admission gate with zero Shooting Brake execution: construction, prefix-cache enabled, minimal semantic/finite-logprob checks, and normally cold/warm speedup >1.5. Absolute wall time is not comparable."
+    },
+    {
+      "path": "benchmarks/laguna_l_sweep.py",
+      "role": "harness",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["sh", "vram_used_mib", "kill_server", "post", "metrics_hits", "wait_health", "cold_ttft", "decode_itl", "main"],
+      "notes": "Destructive full-boot local-expert sweep. Records boot/KV/VRAM/cold-wall/mean-ITL rows; point failures and cache-hit contamination do not make the final process fail, and no optimum is selected."
+    },
+    {
+      "path": "benchmarks/logprob_capture.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["capture", "diff", "main"],
+      "notes": "Live capture plus CPU-only diff. Equal length is the only identity gate; max absolute logprob delta must be <= supplied gate. Model/prompt/token IDs/mode are not cross-checked."
+    },
+    {
+      "path": "benchmarks/marlin_prefill_poc.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["load_layer_planes", "dequant_ref", "cpu_reference", "to_gpu_marlin", "run_marlin", "main"],
+      "notes": "Real Marlin bank PoC with independent NumPy oracle. Enforces relative L2 <=0.02 and cosine >=0.999 before median kernel timing; three wall samples time streaming H2D+repack. Projections are not measured forwards."
+    },
+    {
+      "path": "benchmarks/prefill_cliff_probe.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["Timing", "stream_one", "_poller", "_kv_tokens", "run", "main"],
+      "notes": "In-process all-CUDA/hybrid/all-out context-concurrency matrix. Engine-yield timing divides multi-token gaps across new tokens; exceptions abort but output length/content are not gated."
+    },
+    {
+      "path": "benchmarks/prefill_floor_bench.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["_bank", "_register_mmap", "_views", "_moe_call", "_routing", "_thp_vmstat", "_meminfo", "mode_compute", "mode_b12x", "mode_vb12x", "mode_overlap", "mode_register", "main"],
+      "notes": "Compute, synthetic-b12x, real-vendor-b12x, stream/compute overlap and full-registration modes. Mode-specific kill conditions are returned strings only and are modeled as advisory."
+    },
+    {
+      "path": "benchmarks/results/rtx_pro_6000_r15_slo/run_guidellm_context_benchmarks.sh",
+      "role": "harness",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["run_command", "run_profile"],
+      "notes": "24-cell GuideLLM context/profile harness stored beside results. Resume checks nonempty JSON+CSV only; dry-run creates directories, and prefix_cache=disabled is a label rather than server configuration."
+    },
+    {
+      "path": "benchmarks/run_preemptive_parity.sh",
+      "role": "harness",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["preflight", "run_one"],
+      "notes": "Fresh post-hoc/pre-emptive benchmark legs followed by compare_preemptive.py. The runner supplies no null controls, so the comparator's successful quietness verdict is unreachable through this invocation."
+    },
+    {
+      "path": "benchmarks/run_prefill_probe.sh",
+      "role": "harness",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["run_arm"],
+      "notes": "Hybrid/all-CUDA/hybrid-stream launcher. File existence alone resumes an arm; absence of set -e means child failure is logged then normally masked by echo/sleep and the final success-looking message."
+    },
+    {
+      "path": "benchmarks/server_context_probe.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["_read", "pcie_state", "PcieSampler", "build_prompt", "one_request", "_pct", "run", "main"],
+      "notes": "Live TTFT/context bracket plus hard-coded PCIe link-state sampling. Same prompts permit cache reuse; text chunks, not usage, count outputs. Partial failures/sysfs misses are recorded without a gate."
+    },
+    {
+      "path": "benchmarks/slab_h2d_bench.py",
+      "role": "behavior",
+      "models": ["models/performance_probes.ryu"],
+      "symbols": ["EXPERT_STRIDE", "REMOTE_EXPERTS", "HEADER_SKIP", "numa_snapshot", "main"],
+      "notes": "Assumed fixed-slab fault/stage/pinned-H2D/serialized/pageable ceiling benchmark. Each transfer arm emits raw samples plus median/min/max/GiB/s; 48-layer and overlap values are projections. No byte or throughput verdict."
+    }
+  ],
+  "assumptions": [
+    "All assigned files are experiment, qualification, historical, or benchmark-control surfaces; invoking production-format banks or a production-shaped server does not make a probe a production implementation.",
+    "The bounded model uses three integer timing samples to expose aggregation and ordering; real programs retain their source-specific counts, clocks, warmups, trimming, percentiles and raw samples.",
+    "Cosine is represented in ten-thousandths and relative L2 in thousandths; tensor arithmetic, floating-point rounding, device scheduling and HTTP delivery remain external implementation behavior.",
+    "A descriptive source comment, printed regime label, comparison constant or returned kill-condition string is advisory unless the implementation changes process outcome.",
+    "HTTP TTFT/ITL, in-process engine-yield time, device events, native service traces, Kineto engine intervals and host-wall transport time are not interchangeable.",
+    "Several transport probes assume fixed bank offsets/strides without parsing complete identity; model admission makes that assumption visible rather than claiming provenance.",
+    "External checkpoints, expert banks, vLLM, GuideLLM, FlashInfer, sgl-kernel-xpu, CUDA/XPU runtimes, Linux sysfs and native trace files are dependencies and are not modeled internally."
+  ],
+  "implementation_checks": [
+    {
+      "source": "benchmarks/b12x_w4a8_gate.py",
+      "symbol": "arm_c_exact",
+      "description": "On reduced CPU fixtures, compare arm_b_their_oracle with exact checkpoint-dequantized FP32 across gate/up half-order and scale-layout variants; verify wrong-order degradation is observable without invoking the GPU arm."
+    },
+    {
+      "source": "benchmarks/marlin_prefill_poc.py",
+      "symbol": "cpu_reference",
+      "description": "Construct a tiny packed-int4 fixture and compare dequant_ref/cpu_reference with direct NumPy signed-nibble group-128 SwiGLU, including repeated routes and normalized weights."
+    },
+    {
+      "source": "benchmarks/fp8_wire_numerics.py",
+      "symbol": "metrics",
+      "description": "Use finite CPU tensors to compare FP16 and E4M3 round trips, cancellation amplification, block-size arms, and the two currently identical combined-FP8 labels."
+    },
+    {
+      "source": "benchmarks/logprob_capture.py",
+      "symbol": "diff",
+      "description": "Feed same-length and length-mismatched JSON arrays around the exact max-absolute-delta boundary; separately demonstrate that equal-length different provenance is not rejected."
+    },
+    {
+      "source": "benchmarks/compare_preemptive.py",
+      "symbol": "main",
+      "description": "Evaluate CPU JSON fixtures for identity mismatch, absent versus complete null controls, NaN legacy logprobs, equality at 1.5 times the null floor, and strictly lower versus equal load peak."
+    },
+    {
+      "source": "benchmarks/chain_audit.py",
+      "symbol": "cell_state",
+      "description": "Inspect temporary manifest fixtures covering missing, corrupt, absent return_code, nonzero and zero return_code states; confirm payload contents are intentionally ignored."
+    },
+    {
+      "source": "benchmarks/b70_prefill_cost.py",
+      "symbol": "chunk_cap_ceiling",
+      "description": "Compare affine fixture calculations across chunk caps, including a non-divisible token total to confirm that the final partial chunk is charged as full."
+    },
+    {
+      "source": "benchmarks/cuda_decode_profile.py",
+      "symbol": "analyze_traces",
+      "description": "Analyse a small Kineto JSON fixture containing device kernels, overlapping intervals and wait/write-signal APIs; compare category sums with interval union and confirm waits are excluded."
+    },
+    {
+      "source": "benchmarks/dummy_b70_provider.cpp",
+      "symbol": "DummyPoller::loop",
+      "description": "Source-inspect or CPU-drive a valid and invalid row-count dispatch to compare completion release, zero-fill validity, dispatch/error counters and service bucket accounting."
+    },
+    {
+      "source": "benchmarks/run_preemptive_parity.sh",
+      "symbol": "run_one",
+      "description": "Source-level call-graph comparison with compare_preemptive.main: confirm the runner supplies neither --null-a nor --null-b and therefore cannot satisfy the comparator's quietness prerequisite."
+    },
+    {
+      "source": "benchmarks/run_prefill_probe.sh",
+      "symbol": "run_arm",
+      "description": "Source-inspect shell status flow for a nonzero child followed by echo and sleep, and contrast it with a strict harness; also check that any regular JSON-path file is accepted as cached."
+    }
+  ]
+}

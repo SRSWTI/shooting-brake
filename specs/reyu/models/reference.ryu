@@ -1,0 +1,236 @@
+/// Reference provenance, authentication and oracle-comparison model.
+/// Sources: phase0/freeze.yaml; phase3/generate_reference.py::generate;
+/// ReferenceFixture::open; compute_artifact_metrics/output_budget; and
+/// provider_math_test.cpp::run/WireProviderSession.
+/// Hashes/tensor bytes and floating operations are external observations, but
+/// actions consume concrete bounded identity, metric, route and error values.
+module reference {
+  type Identity = FrozenIdentity | ForeignIdentity
+  type KernelBranch = SplitKernel | FusedKernel
+  type ReferencePhase = FrozenEvidence | IdentityAuthenticated | RecordsAudited | QualityAccepted | OracleReady | Compared | Accepted | Rejected
+  type ReferenceState = {
+    phase: ReferencePhase,
+    phase0Recorded: bool,
+    snapshotsOk: bool,
+    bankDigestOk: bool,
+    manifestDigestOk: bool,
+    fixtureDigestOk: bool,
+    schemaOk: bool,
+    finiteOk: bool,
+    recordsExact: bool,
+    relativeRmseMilli: int,
+    cosineMilli: int,
+    stagedRows: int,
+    remoteRoutes: int,
+    withinOutputBudget: bool,
+    smallRouteObserved: bool,
+    zeroRemoteBypassed: bool,
+    poisonPreserved: bool,
+    errorObserved: bool,
+  }
+
+  var s: ReferenceState
+
+  /// Phase-0 values are documentary evidence until authenticated by Phase 3.
+  action init = s' = {
+    phase: FrozenEvidence, phase0Recorded: true,
+    snapshotsOk: false, bankDigestOk: false, manifestDigestOk: false,
+    fixtureDigestOk: false, schemaOk: false, finiteOk: false,
+    recordsExact: false, relativeRmseMilli: 0, cosineMilli: 0,
+    stagedRows: 0, remoteRoutes: 0, withinOutputBudget: false,
+    smallRouteObserved: false, zeroRemoteBypassed: false,
+    poisonPreserved: false, errorObserved: false,
+  }
+
+  /// The exact accepted fixture is 4,227,456 bytes. Identity enums abstract the
+  /// five full strings/digests while retaining fail-closed equality.
+  action authenticate(
+    sourceSnapshot: Identity, nvfp4Snapshot: Identity,
+    bankDigest: Identity, manifestDigest: Identity,
+    fixtureDigest: Identity, fixtureBytes: int,
+  ): bool = all {
+    s.phase == FrozenEvidence,
+    sourceSnapshot == FrozenIdentity, nvfp4Snapshot == FrozenIdentity,
+    bankDigest == FrozenIdentity, manifestDigest == FrozenIdentity,
+    fixtureDigest == FrozenIdentity, fixtureBytes == 4227456,
+    s' = { ...s, phase: IdentityAuthenticated,
+      snapshotsOk: true, bankDigestOk: true, manifestDigestOk: true,
+      fixtureDigestOk: true, schemaOk: true, finiteOk: true },
+  }
+  action rejectAuthentication(foreignFields: int, fixtureBytes: int): bool = all {
+    s.phase == FrozenEvidence, foreignFields >= 0, foreignFields <= 5,
+    (foreignFields > 0 or fixtureBytes != 4227456),
+    s' = { ...s, phase: Rejected, errorObserved: true },
+  }
+
+  /// Phase 3 audits 2 layers x 8 experts = 16 complete SBEXP001 records.
+  action auditRecords(checkedRecords: int, mismatchBytes: int): bool = all {
+    s.phase == IdentityAuthenticated,
+    checkedRecords == 16, mismatchBytes == 0,
+    s' = { ...s, phase: RecordsAudited, recordsExact: true },
+  }
+  action rejectRecordMismatch(checkedRecords: int, mismatchBytes: int): bool = all {
+    s.phase == IdentityAuthenticated,
+    checkedRecords > 0, checkedRecords <= 16, mismatchBytes > 0,
+    s' = { ...s, phase: Rejected, errorObserved: true },
+  }
+
+  /// Integer milli-units explicitly abstract float metrics. Source thresholds
+  /// are relative-RMSE <=180/1000 and cosine >=980/1000.
+  action acceptQuality(relativeRmseMilli: int, cosineMilli: int): bool = all {
+    s.phase == RecordsAudited,
+    relativeRmseMilli >= 0, relativeRmseMilli <= 180,
+    cosineMilli >= 980, cosineMilli <= 1000,
+    s' = { ...s, phase: QualityAccepted,
+      relativeRmseMilli: relativeRmseMilli, cosineMilli: cosineMilli },
+  }
+  action rejectQuality(relativeRmseMilli: int, cosineMilli: int): bool = all {
+    s.phase == RecordsAudited,
+    relativeRmseMilli >= 0, cosineMilli >= 0, cosineMilli <= 1000,
+    (relativeRmseMilli > 180 or cosineMilli < 980),
+    s' = { ...s, phase: Rejected, relativeRmseMilli: relativeRmseMilli,
+      cosineMilli: cosineMilli, errorObserved: true },
+  }
+
+  /// Only rows with remote routes are staged; top-k=8 bounds remoteRoutes.
+  action prepareOracle(rows: int, remoteRoutes: int): bool = all {
+    s.phase == QualityAccepted,
+    rows > 0, rows <= 128, remoteRoutes > 0, remoteRoutes <= rows * 8,
+    s' = { ...s, phase: OracleReady,
+      stagedRows: rows, remoteRoutes: remoteRoutes },
+  }
+
+  /// `deltaUnits` and `budgetUnits` are bounded comparison units, not claimed
+  /// implementation measurements. The second inequality makes a 2^-12 route
+  /// observable beyond the comparator budget when removed.
+  action compareWithinBudget(
+    deltaUnits: int, budgetUnits: int,
+    smallRouteDeltaUnits: int, smallRouteBudgetUnits: int,
+  ): bool = all {
+    s.phase == OracleReady,
+    s.stagedRows > 0, s.remoteRoutes > 0,
+    deltaUnits >= 0, budgetUnits >= 0, deltaUnits <= budgetUnits,
+    smallRouteDeltaUnits > smallRouteBudgetUnits,
+    s' = { ...s, phase: Compared, withinOutputBudget: true,
+      smallRouteObserved: true },
+  }
+  action rejectNumericalMismatch(deltaUnits: int, budgetUnits: int): bool = all {
+    s.phase == OracleReady, deltaUnits > budgetUnits, budgetUnits >= 0,
+    s' = { ...s, phase: Rejected, errorObserved: true },
+  }
+
+  /// Exact zero rows/routes models no ring publication and no dispatch.
+  action observeZeroRemoteBypass(rows: int, remoteRoutes: int): bool = all {
+    s.phase == QualityAccepted, rows == 0, remoteRoutes == 0,
+    s' = { ...s, phase: OracleReady, stagedRows: 0, remoteRoutes: 0,
+      zeroRemoteBypassed: true },
+  }
+
+  /// Split is M<=32, fused is M>32. A failed completion must expose zero bytes
+  /// and preserve poison rather than a partial/stale numerical result.
+  action rejectFailedDispatch(
+    branch: KernelBranch, batch: int, outputBytes: int,
+  ): bool = all {
+    s.phase == OracleReady, batch > 0, batch <= 128,
+    ((branch == SplitKernel and batch <= 32) or
+      (branch == FusedKernel and batch > 32)),
+    outputBytes == 0,
+    s' = { ...s, phase: Rejected, poisonPreserved: true,
+      errorObserved: true },
+  }
+
+  action accept = all { s.phase == Compared, s' = { ...s, phase: Accepted } }
+  action stay = s' = s
+
+  action step = any {
+    authenticate(FrozenIdentity, FrozenIdentity, FrozenIdentity,
+      FrozenIdentity, FrozenIdentity, 4227456),
+    rejectAuthentication(1, 4227456), auditRecords(16, 0),
+    rejectRecordMismatch(1, 1), acceptQuality(168, 985),
+    rejectQuality(181, 985), prepareOracle(4, 32),
+    compareWithinBudget(9, 10, 2, 1), rejectNumericalMismatch(11, 10),
+    observeZeroRemoteBypass(0, 0),
+    rejectFailedDispatch(SplitKernel, 4, 0),
+    rejectFailedDispatch(FusedKernel, 128, 0), accept, stay,
+  }
+
+  val identityBound = and {
+    s.snapshotsOk, s.bankDigestOk, s.manifestDigestOk,
+    s.fixtureDigestOk, s.schemaOk, s.finiteOk,
+  }
+  val inv = and {
+    s.phase0Recorded,
+    (s.phase == IdentityAuthenticated or s.phase == RecordsAudited or
+      s.phase == QualityAccepted or s.phase == OracleReady or
+      s.phase == Compared or s.phase == Accepted) implies identityBound,
+    (s.phase == RecordsAudited or s.phase == QualityAccepted or
+      s.phase == OracleReady or s.phase == Compared or s.phase == Accepted)
+      implies s.recordsExact,
+    (s.phase == QualityAccepted or s.phase == OracleReady or
+      s.phase == Compared or s.phase == Accepted) implies
+      (s.relativeRmseMilli <= 180 and s.cosineMilli >= 980),
+    (s.phase == Compared or s.phase == Accepted) implies and {
+      s.stagedRows > 0, s.remoteRoutes > 0,
+      s.withinOutputBudget, s.smallRouteObserved,
+    },
+    s.zeroRemoteBypassed implies (s.stagedRows == 0 and s.remoteRoutes == 0),
+    s.phase == Accepted implies not(s.errorObserved),
+    s.phase == Rejected implies s.errorObserved,
+  }
+
+  val witnessAuthenticatedOracle =
+    s.phase == OracleReady and identityBound and s.stagedRows > 0
+  val witnessAcceptedComparison = s.phase == Accepted and s.withinOutputBudget
+  val witnessZeroRemoteBypass = s.phase == OracleReady and s.zeroRemoteBypassed
+  val witnessPoisonPreservedFailure =
+    s.phase == Rejected and s.poisonPreserved and s.errorObserved
+  val witnessRejectedProvenance =
+    s.phase == Rejected and not(s.fixtureDigestOk) and s.errorObserved
+
+  run authenticatedReferenceTest = init
+    .then(authenticate(FrozenIdentity, FrozenIdentity, FrozenIdentity,
+      FrozenIdentity, FrozenIdentity, 4227456))
+    .then(auditRecords(16, 0)).then(acceptQuality(168, 985))
+    .then(prepareOracle(4, 32)).expect(witnessAuthenticatedOracle and inv)
+  run successfulWireBudgetTest = authenticatedReferenceTest
+    .then(compareWithinBudget(9, 10, 2, 1)).then(accept)
+    .expect(witnessAcceptedComparison and inv)
+  run zeroRemoteNoPublicationTest = init
+    .then(authenticate(FrozenIdentity, FrozenIdentity, FrozenIdentity,
+      FrozenIdentity, FrozenIdentity, 4227456))
+    .then(auditRecords(16, 0)).then(acceptQuality(158, 987))
+    .then(observeZeroRemoteBypass(0, 0))
+    .expect(witnessZeroRemoteBypass and inv)
+  run badFixtureDigestTest = init.then(rejectAuthentication(1, 4227456))
+    .expect(witnessRejectedProvenance and inv)
+  run badFixtureCannotBeAuditedTest = init
+    .then(rejectAuthentication(1, 4227456)).then(auditRecords(16, 0).fail())
+  run truncatedFixtureTest = init.then(rejectAuthentication(0, 4227455))
+    .expect(s.phase == Rejected and inv)
+  run bankRecordMismatchTest = init
+    .then(authenticate(FrozenIdentity, FrozenIdentity, FrozenIdentity,
+      FrozenIdentity, FrozenIdentity, 4227456))
+    .then(rejectRecordMismatch(16, 1))
+    .expect(s.phase == Rejected and inv)
+  run mismatchedRecordCannotAcceptQualityTest = init
+    .then(authenticate(FrozenIdentity, FrozenIdentity, FrozenIdentity,
+      FrozenIdentity, FrozenIdentity, 4227456))
+    .then(rejectRecordMismatch(16, 1)).then(acceptQuality(168, 985).fail())
+  run qualityThresholdFailureTest = init
+    .then(authenticate(FrozenIdentity, FrozenIdentity, FrozenIdentity,
+      FrozenIdentity, FrozenIdentity, 4227456))
+    .then(auditRecords(16, 0)).then(rejectQuality(181, 985))
+    .expect(s.phase == Rejected and inv)
+  run outputBudgetFailureTest = authenticatedReferenceTest
+    .then(rejectNumericalMismatch(11, 10)).expect(s.phase == Rejected and inv)
+  run splitFailurePreservesPoisonTest = authenticatedReferenceTest
+    .then(rejectFailedDispatch(SplitKernel, 4, 0))
+    .expect(witnessPoisonPreservedFailure and inv)
+  run fusedFailurePreservesPoisonTest = init
+    .then(authenticate(FrozenIdentity, FrozenIdentity, FrozenIdentity,
+      FrozenIdentity, FrozenIdentity, 4227456))
+    .then(auditRecords(16, 0)).then(acceptQuality(168, 985))
+    .then(prepareOracle(128, 128))
+    .then(rejectFailedDispatch(FusedKernel, 128, 0))
+    .expect(witnessPoisonPreservedFailure and inv)
+}

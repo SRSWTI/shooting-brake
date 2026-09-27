@@ -1,0 +1,255 @@
+/// Static expert ownership and built-in placement-policy contract.
+/// Source: src/phase4/src/shooting_brake_vllm/placement.py::Placement,
+/// AllCudaPolicy, ExpertGroupPolicy, FractionalRemotePolicy, SplitPolicy,
+/// InterleavedPolicy, LayerSubsetPolicy, AllOutPolicy, validate_placement,
+/// b70_bank_covers, policy_from_name.
+/// Abstraction: policies execute over one bounded ten-expert row. `capable`
+/// denotes whether its absolute model layer has a bank row. Python publishes a
+/// complete immutable table atomically, so each successful build is one action.
+/// Owner sets preserve identity; `denseSlots` abstracts the source validator's
+/// per-concrete-target [0,count) check. partition.ryu deepens CUDA remapping.
+module placement {
+  type Policy = None | AllCuda | ExplicitGroups | Fractional | Split | Interleaved | Subset | AllOut
+  type Phase = Empty | Accepted | Rejected
+  type Failure = NoFailure | InvalidGroups | InvalidWeights | InvalidCapacity | OffloadOutsideBank | CpuTierDisabled
+  type RemoteCounts = { card0: int, card1: int }
+  type State = {
+    phase: Phase,
+    policy: Policy,
+    capable: bool,
+    cuda: Set[int],
+    b70Card0: Set[int],
+    b70Card1: Set[int],
+    cpu: Set[int],
+    denseSlots: bool,
+    bankCovers: bool,
+    capacityOk: bool,
+    allOutArmed: bool,
+    generation: int,
+    failure: Failure,
+  }
+
+  pure val EXPERTS = Set(0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+  var s: State
+
+  /// Exact two-card largest-remainder reference for remoteN >= 0 and positive
+  /// integer weights. Stable remainder ties favor card0, matching Python's
+  /// stable sort over positions. Source uses binary-float shares; this rational
+  /// model corresponds where float rounding preserves remainder ordering.
+  pure def apportionTwoRemote(remoteN: int, weight0: int, weight1: int): RemoteCounts = {
+    val total = weight0 + weight1
+    val base0 = remoteN * weight0 / total
+    val base1 = remoteN * weight1 / total
+    val leftover = remoteN - base0 - base1
+    val remainder0 = (remoteN * weight0) % total
+    val remainder1 = (remoteN * weight1) % total
+    if (leftover == 0) {
+      card0: base0, card1: base1,
+    } else if (remainder0 >= remainder1) {
+      card0: base0 + 1, card1: base1,
+    } else {
+      card0: base0, card1: base1 + 1,
+    }
+  }
+  pure def below(stop: int): Set[int] = EXPERTS.filter(e => e < stop)
+  pure def interval(start: int, stop: int): Set[int] =
+    EXPERTS.filter(e => e >= start and e < stop)
+  pure def atOrAbove(start: int): Set[int] = EXPERTS.filter(e => e >= start)
+  val remote: Set[int] = s.b70Card0.union(s.b70Card1).union(s.cpu)
+  val pairwiseDisjoint: bool = and {
+    s.cuda.intersect(s.b70Card0).size() == 0,
+    s.cuda.intersect(s.b70Card1).size() == 0,
+    s.cuda.intersect(s.cpu).size() == 0,
+    s.b70Card0.intersect(s.b70Card1).size() == 0,
+    s.b70Card0.intersect(s.cpu).size() == 0,
+    s.b70Card1.intersect(s.cpu).size() == 0,
+  }
+  val completeOwnership: bool =
+    pairwiseDisjoint and s.cuda.union(remote) == EXPERTS
+
+  action init = s' = {
+    phase: Empty, policy: None, capable: true,
+    cuda: Set(), b70Card0: Set(), b70Card1: Set(), cpu: Set(),
+    denseSlots: false, bankCovers: false, capacityOk: false,
+    allOutArmed: false, generation: 1, failure: NoFailure,
+  }
+
+  action buildAllCuda = all {
+    s.phase == Empty,
+    s' = { ...s, phase: Accepted, policy: AllCuda, cuda: EXPERTS,
+      denseSlots: true, bankCovers: true, capacityOk: true },
+  }
+
+  /// ExpertGroupPolicy with [0,cut0)->b70:0, [cut0,cut1)->b70:1,
+  /// and [cut1,10)->cuda:0. Guards are the complete/disjoint range contract.
+  action buildExplicitGroups(cut0: int, cut1: int): bool = all {
+    s.phase == Empty, cut0 > 0, cut0 < cut1, cut1 <= 10,
+    s' = { ...s, phase: Accepted, policy: ExplicitGroups,
+      b70Card0: if (s.capable) below(cut0) else Set(),
+      b70Card1: if (s.capable) interval(cut0, cut1) else Set(),
+      cuda: if (s.capable) atOrAbove(cut1) else EXPERTS,
+      denseSlots: true, bankCovers: true, capacityOk: true },
+  }
+
+  /// FractionalRemotePolicy after Python has computed cudaN=round(10*fraction).
+  /// The remaining prefix is apportioned by the actual pure function above.
+  action buildWeightedFractional(cudaN: int, weight0: int, weight1: int): bool = all {
+    s.phase == Empty, cudaN >= 0, cudaN <= 10, weight0 > 0, weight1 > 0,
+    val remoteN = 10 - cudaN
+    val counts = apportionTwoRemote(remoteN, weight0, weight1)
+    s' = { ...s, phase: Accepted, policy: Fractional,
+      b70Card0: if (s.capable) below(counts.card0) else Set(),
+      b70Card1: if (s.capable) interval(counts.card0, remoteN) else Set(),
+      cuda: if (s.capable) atOrAbove(remoteN) else EXPERTS,
+      denseSlots: true, bankCovers: true, capacityOk: true },
+  }
+
+  /// SplitPolicy's source clamp is represented by accepting any integer and
+  /// deriving boundedCuda in [0,10].
+  action buildSplit(cudaPerLayer: int): bool = all {
+    s.phase == Empty,
+    val boundedCuda = if (cudaPerLayer < 0) 0 else if (cudaPerLayer > 10) 10 else cudaPerLayer
+    s' = { ...s, phase: Accepted, policy: Split,
+      cuda: if (s.capable) below(boundedCuda) else EXPERTS,
+      b70Card0: if (s.capable) atOrAbove(boundedCuda) else Set(),
+      denseSlots: true, bankCovers: true, capacityOk: true },
+  }
+
+  action buildInterleaved(period: int): bool = all {
+    s.phase == Empty, period >= 2,
+    s' = { ...s, phase: Accepted, policy: Interleaved,
+      b70Card0: if (s.capable)
+        EXPERTS.filter(e => e % period == period - 1) else Set(),
+      cuda: if (s.capable)
+        EXPERTS.filter(e => not(e % period == period - 1)) else EXPERTS,
+      denseSlots: true, bankCovers: true, capacityOk: true },
+  }
+
+  /// `active` abstracts membership in the last K sorted capable layers.
+  action buildSubset(active: bool, cudaPerLayer: int): bool = all {
+    s.phase == Empty,
+    val boundedCuda = if (cudaPerLayer < 0) 0 else if (cudaPerLayer > 10) 10 else cudaPerLayer
+    val useRemote = active and s.capable
+    s' = { ...s, phase: Accepted, policy: Subset,
+      cuda: if (useRemote) below(boundedCuda) else EXPERTS,
+      b70Card0: if (useRemote) atOrAbove(boundedCuda) else Set(),
+      denseSlots: true, bankCovers: true, capacityOk: true },
+  }
+
+  action armAllOut = all {
+    s.phase == Empty, not(s.allOutArmed), s' = { ...s, allOutArmed: true },
+  }
+  action buildAllOut(active: bool, cudaPerLayer: int, cpuPerLayer: int): bool = all {
+    s.phase == Empty, s.allOutArmed, cpuPerLayer >= 0,
+    val cudaN = if (cudaPerLayer < 0) 0 else if (cudaPerLayer > 10) 10 else cudaPerLayer
+    val cpuN = if (cpuPerLayer > 10 - cudaN) 10 - cudaN else cpuPerLayer
+    val b70End = 10 - cpuN
+    val useRemote = active and s.capable
+    s' = { ...s, phase: Accepted, policy: AllOut,
+      cuda: if (useRemote) below(cudaN) else EXPERTS,
+      b70Card0: if (useRemote) interval(cudaN, b70End) else Set(),
+      cpu: if (useRemote) atOrAbove(b70End) else Set(),
+      denseSlots: true, bankCovers: true, capacityOk: true },
+  }
+
+  action markNonCapable = all {
+    s.phase == Empty, s.capable, s' = { ...s, capable: false },
+  }
+
+  action rejectBadGroups(cut0: int, cut1: int): bool = all {
+    s.phase == Empty, not(cut0 > 0 and cut0 < cut1 and cut1 <= 10),
+    s' = { ...s, phase: Rejected, policy: ExplicitGroups, failure: InvalidGroups },
+  }
+  action rejectBadWeights(weight0: int, weight1: int): bool = all {
+    s.phase == Empty, weight0 <= 0 or weight1 <= 0,
+    s' = { ...s, phase: Rejected, policy: Fractional, failure: InvalidWeights },
+  }
+  action rejectOverCapacity(resident: int, bytesPerExpert: int, capacity: int): bool = all {
+    s.phase == Empty, resident >= 0, bytesPerExpert > 0,
+    resident * bytesPerExpert > capacity,
+    s' = { ...s, phase: Rejected, policy: ExplicitGroups, failure: InvalidCapacity },
+  }
+  action rejectMissingBankCoverage(offloaded: int, bankResident: int): bool = all {
+    s.phase == Empty, offloaded > bankResident,
+    s' = { ...s, phase: Rejected, policy: Split, failure: OffloadOutsideBank },
+  }
+  action rejectUnarmedCpuTier(cpuPerLayer: int): bool = all {
+    s.phase == Empty, not(s.allOutArmed), cpuPerLayer > 0,
+    s' = { ...s, phase: Rejected, policy: AllOut, failure: CpuTierDisabled },
+  }
+  action nextGeneration = all {
+    s.phase == Accepted, s' = { ...s, generation: s.generation + 1 },
+  }
+  action stay = s' = s
+
+  /// Finite exploration uses representative values; parameterized actions and
+  /// apportionTwoRemote, not these examples, define the modeled behavior.
+  action step = any {
+    buildAllCuda, buildExplicitGroups(3, 5), buildWeightedFractional(5, 3, 2),
+    buildWeightedFractional(0, 1, 1), buildSplit(4), buildInterleaved(2),
+    buildSubset(true, 2), buildSubset(false, 2), armAllOut,
+    buildAllOut(true, 3, 2), markNonCapable, rejectBadGroups(3, 3),
+    rejectBadWeights(0, 2), rejectOverCapacity(6, 10, 59),
+    rejectMissingBankCoverage(6, 5), rejectUnarmedCpuTier(2),
+    nextGeneration, stay,
+  }
+
+  val inv = and {
+    s.generation >= 1,
+    s.phase == Accepted implies and {
+      completeOwnership, s.denseSlots, s.bankCovers, s.capacityOk,
+      (not(s.capable)) implies remote.size() == 0,
+      s.cpu.size() > 0 implies (s.policy == AllOut and s.allOutArmed),
+    },
+    s.phase == Rejected implies s.failure != NoFailure,
+  }
+
+  val witnessWeightedLargestRemainder = s.phase == Accepted and
+    s.policy == Fractional and s.b70Card0 == Set(0, 1, 2) and
+    s.b70Card1 == Set(3, 4) and s.cuda == Set(5, 6, 7, 8, 9)
+  val witnessSparseLayerForcedCuda = s.phase == Accepted and not(s.capable) and s.cuda == EXPERTS
+  val witnessThreeTier = s.phase == Accepted and s.cpu == Set(8, 9)
+  val witnessAllRemotePlacement = s.phase == Accepted and s.cuda.size() == 0
+  val witnessCapacityRejection = s.phase == Rejected and s.failure == InvalidCapacity
+
+  run weightedApportionmentFunctionTest = {
+    apportionTwoRemote(5, 3, 2) == { card0: 3, card1: 2 }
+  }
+  run unweightedOddApportionmentFunctionTest = {
+    apportionTwoRemote(181, 1, 1) == { card0: 91, card1: 90 }
+  }
+  run allCudaTest = init.then(buildAllCuda).expect(inv and s.cuda == EXPERTS)
+  run explicitGroupTest = init.then(buildExplicitGroups(3, 5)).expect(inv)
+  run weightedLargestRemainderTest = init.then(buildWeightedFractional(5, 3, 2))
+    .expect(inv and witnessWeightedLargestRemainder)
+  run splitTest = init.then(buildSplit(4)).expect(inv and s.b70Card0.size() == 6)
+  run splitClampTest = init.then(buildSplit(99)).expect(inv and s.cuda == EXPERTS)
+  run interleavedTest = init.then(buildInterleaved(2)).expect(inv and s.cuda.size() == 5)
+  run interleavedPeriodErrorTest = init.then(buildInterleaved(1).fail())
+  run subsetActiveTest = init.then(buildSubset(true, 2)).expect(inv and s.b70Card0.size() == 8)
+  run subsetInactiveTest = init.then(buildSubset(false, 2)).expect(inv and s.b70Card0.size() == 0)
+  run allOutDisabledTest = init.then(buildAllOut(true, 3, 2).fail())
+  run allOutRequiresArmTest = init.then(rejectUnarmedCpuTier(2))
+    .expect(inv and s.failure == CpuTierDisabled)
+  run allOutSuccessTest = init.then(armAllOut).then(buildAllOut(true, 3, 2))
+    .expect(inv and witnessThreeTier)
+  run sparseCapableLayerTest = init.then(markNonCapable).then(buildSubset(true, 2))
+    .expect(inv and witnessSparseLayerForcedCuda)
+  run sparseExplicitGroupsForcedCudaTest = init.then(markNonCapable)
+    .then(buildExplicitGroups(3, 5)).expect(inv and witnessSparseLayerForcedCuda)
+  run sparseFractionalForcedCudaTest = init.then(markNonCapable)
+    .then(buildWeightedFractional(0, 1, 1)).expect(inv and witnessSparseLayerForcedCuda)
+  run sparseSplitForcedCudaTest = init.then(markNonCapable)
+    .then(buildSplit(4)).expect(inv and witnessSparseLayerForcedCuda)
+  run sparseInterleavedForcedCudaTest = init.then(markNonCapable)
+    .then(buildInterleaved(2)).expect(inv and witnessSparseLayerForcedCuda)
+  run allRemoteAcceptedHereTest = init.then(buildWeightedFractional(0, 1, 1))
+    .expect(inv and witnessAllRemotePlacement)
+  run capacityFailureTest = init.then(rejectOverCapacity(6, 10, 59))
+    .expect(inv and witnessCapacityRejection)
+  run groupGapFailureTest = init.then(rejectBadGroups(3, 3)).expect(inv)
+  run invalidWeightFailureTest = init.then(rejectBadWeights(0, 2)).expect(inv)
+  run sparseBankFailureTest = init.then(rejectMissingBankCoverage(6, 5)).expect(inv)
+  run generationBoundaryTest = init.then(buildSplit(4)).then(nextGeneration)
+    .expect(inv and s.generation == 2)
+}

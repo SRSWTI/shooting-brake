@@ -1,0 +1,213 @@
+/// Level 2: CUDA/host weight residency before the routed hot path.
+/// Source: routed_experts.py::preemptive_surgery_enabled,
+/// _reject_unsupported_preemptive_tiers, _load_host_experts,
+/// _load_host_experts_from_bank, _maybe_perform_vram_surgery;
+/// prefill_mirror.py::select_mirror_ids, validate_mirror_budget.
+/// Abstraction: four experts stand for a production layer. Exact packed tensor
+/// planes become resident counts; remap/loader-map booleans retain the dangerous
+/// indexing handoff. Mirror helpers are modeled as standalone planning state and
+/// deliberately never become runtime-integrated because no serving caller exists.
+module residency {
+  type Phase = Cold | Allocated | HostReady | CompactReady | Serving | Rejected
+  type Allocation = Unset | FullThenSlice | CompactFromStart
+  type State = {
+    phase: Phase,
+    allocation: Allocation,
+    totalExperts: int,
+    cudaExperts: int,
+    offloadedExperts: int,
+    hostCopies: int,
+    bankReadable: bool,
+    hybrid: bool,
+    deviceReady: bool,
+    remapReady: bool,
+    loaderMapLive: bool,
+    mirrorRequested: int,
+    mirrorSelected: int,
+    mirrorDevice0: int,
+    mirrorDevice1: int,
+    mirrorAvailable: int,
+    mirrorHeadroom: int,
+    mirrorCostPerExpert: int,
+    mirrorBalanced: bool,
+    mirrorBudgetSafe: bool,
+    mirrorIntegrated: bool,
+    errorObserved: bool,
+  }
+
+  pure def clampedMirror(requested: int, remote: int): int =
+    if (requested < remote) requested else remote
+
+  var s: State
+
+  action init = s' = {
+    phase: Cold, allocation: Unset, totalExperts: 4, cudaExperts: 0,
+    offloadedExperts: 2, hostCopies: 0, bankReadable: false,
+    hybrid: false, deviceReady: false, remapReady: false,
+    loaderMapLive: false, mirrorRequested: 0, mirrorSelected: 0,
+    mirrorDevice0: 0, mirrorDevice1: 0, mirrorAvailable: 0,
+    mirrorHeadroom: 2, mirrorCostPerExpert: 2,
+    mirrorBalanced: false, mirrorBudgetSafe: false,
+    mirrorIntegrated: false, errorObserved: false,
+  }
+
+  /// Default post-load path transiently allocates the complete CUDA bank.
+  action allocateFull(hybrid: bool, deviceReady: bool): bool = all {
+    s.phase == Cold,
+    s' = { ...s, phase: Allocated, allocation: FullThenSlice,
+      cudaExperts: s.totalExperts, hybrid: hybrid, deviceReady: deviceReady },
+  }
+
+  /// Host copies must be materialized before post-hoc slicing destroys source
+  /// weights. CPU-owned and B70-streamed experts share one disjoint arena.
+  action copyHostBeforeSlice(count: int): bool = all {
+    s.phase == Allocated, s.allocation == FullThenSlice,
+    count >= 0, count <= s.offloadedExperts,
+    s' = { ...s, phase: HostReady, hostCopies: count },
+  }
+
+  action compactPostLoad = all {
+    s.phase == HostReady, s.allocation == FullThenSlice,
+    s.hybrid, s.deviceReady, s.hostCopies == s.offloadedExperts,
+    s' = { ...s, phase: CompactReady,
+      cudaExperts: s.totalExperts - s.offloadedExperts,
+      remapReady: true, loaderMapLive: false },
+  }
+
+  action rejectPostLoadFlags = all {
+    s.phase == HostReady, s.allocation == FullThenSlice,
+    (not(s.hybrid) or not(s.deviceReady)),
+    s' = { ...s, phase: Rejected, errorObserved: true },
+  }
+
+  /// Preemptive hooks allocate only CUDA owners, and the checkpoint loader uses
+  /// a temporary expert map until _finalize_compact_experts retires it.
+  action allocatePreemptive(bankReadable: bool, hybrid: bool, deviceReady: bool): bool = all {
+    s.phase == Cold,
+    s' = { ...s, phase: Allocated, allocation: CompactFromStart,
+      cudaExperts: s.totalExperts - s.offloadedExperts,
+      bankReadable: bankReadable, hybrid: hybrid, deviceReady: deviceReady,
+      loaderMapLive: true },
+  }
+
+  /// With a host tier, the offline bank is the only source for experts that
+  /// were never allocated in VRAM.
+  action loadPreemptiveHost = all {
+    s.phase == Allocated, s.allocation == CompactFromStart,
+    s.bankReadable, s.hybrid, s.deviceReady,
+    s' = { ...s, phase: HostReady, hostCopies: s.offloadedExperts },
+  }
+  action rejectPreemptivePrerequisite = all {
+    s.phase == Allocated, s.allocation == CompactFromStart,
+    (not(s.bankReadable) or not(s.hybrid) or not(s.deviceReady)),
+    s' = { ...s, phase: Rejected, errorObserved: true },
+  }
+
+  /// Finalization is required even when the tensor was already compact: it
+  /// creates the global-to-local remap and retires the loader's map.
+  action finalizePreemptive = all {
+    s.phase == HostReady, s.allocation == CompactFromStart,
+    s.hostCopies == s.offloadedExperts,
+    s' = { ...s, phase: CompactReady,
+      remapReady: true, loaderMapLive: false },
+  }
+
+  action startServing = all {
+    s.phase == CompactReady, s.remapReady, not(s.loaderMapLive),
+    s.cudaExperts + s.offloadedExperts == s.totalExperts,
+    s' = { ...s, phase: Serving },
+  }
+
+  /// Standalone DRAM-mirror helper behavior: the selected count is clamped to
+  /// remote ownership. Per-card counts are explicit action inputs but are
+  /// accepted only when they exactly cover that count and differ by at most one,
+  /// matching round-robin selection. Budget outcome is derived arithmetically.
+  action planMirror(requested: int, available: int, dev0: int, dev1: int): bool = all {
+    s.phase == Cold, requested >= 0, requested <= 4,
+    available >= 0, available <= 8, dev0 >= 0, dev1 >= 0,
+    dev0 + dev1 == clampedMirror(requested, s.offloadedExperts),
+    dev0 <= dev1 + 1, dev1 <= dev0 + 1,
+    s' = { ...s, mirrorRequested: requested,
+      mirrorSelected: clampedMirror(requested, s.offloadedExperts),
+      mirrorDevice0: dev0, mirrorDevice1: dev1, mirrorAvailable: available,
+      mirrorBalanced: true },
+  }
+  action acceptMirrorBudget = all {
+    s.phase == Cold, s.mirrorSelected > 0, s.mirrorBalanced,
+    s.mirrorSelected * s.mirrorCostPerExpert <=
+      s.mirrorAvailable - s.mirrorHeadroom,
+    s' = { ...s, mirrorBudgetSafe: true },
+  }
+  action rejectMirrorBudget = all {
+    s.phase == Cold, s.mirrorSelected > 0, s.mirrorBalanced,
+    s.mirrorSelected * s.mirrorCostPerExpert >
+      s.mirrorAvailable - s.mirrorHeadroom,
+    s' = { ...s, phase: Rejected, errorObserved: true },
+  }
+
+  action stay = s' = s
+  action step = any {
+    allocateFull(true, true), allocateFull(false, true),
+    copyHostBeforeSlice(0), copyHostBeforeSlice(2), compactPostLoad,
+    rejectPostLoadFlags,
+    allocatePreemptive(true, true, true),
+    allocatePreemptive(false, true, true),
+    allocatePreemptive(true, false, true),
+    loadPreemptiveHost, rejectPreemptivePrerequisite,
+    finalizePreemptive, startServing,
+    planMirror(0, 6, 0, 0), planMirror(1, 6, 1, 0),
+    planMirror(2, 6, 1, 1), planMirror(4, 5, 1, 1),
+    acceptMirrorBudget, rejectMirrorBudget, stay,
+  }
+
+  val inv = and {
+    s.totalExperts == 4, s.offloadedExperts == 2,
+    s.cudaExperts >= 0, s.cudaExperts <= s.totalExperts,
+    s.hostCopies >= 0, s.hostCopies <= s.offloadedExperts,
+    s.mirrorSelected >= 0, s.mirrorSelected <= s.offloadedExperts,
+    s.mirrorDevice0 + s.mirrorDevice1 == s.mirrorSelected,
+    s.mirrorBalanced implies and {
+      s.mirrorDevice0 <= s.mirrorDevice1 + 1,
+      s.mirrorDevice1 <= s.mirrorDevice0 + 1,
+    },
+    s.mirrorBudgetSafe implies
+      s.mirrorSelected * s.mirrorCostPerExpert <=
+        s.mirrorAvailable - s.mirrorHeadroom,
+    not(s.mirrorIntegrated),
+    s.remapReady implies not(s.loaderMapLive),
+    s.phase == Serving implies and {
+      s.remapReady, not(s.loaderMapLive),
+      s.cudaExperts + s.offloadedExperts == s.totalExperts,
+    },
+    s.phase == Rejected implies s.errorObserved,
+  }
+  val postLoadWitness = s.phase == Serving and s.allocation == FullThenSlice and
+    s.hostCopies == 2 and s.cudaExperts == 2
+  val preemptiveWitness = s.phase == Serving and s.allocation == CompactFromStart and
+    s.bankReadable and s.cudaExperts == 2
+  val mirrorHelperWitness = s.phase == Cold and s.mirrorSelected == 2 and
+    s.mirrorBalanced and s.mirrorBudgetSafe and not(s.mirrorIntegrated)
+  val prerequisiteErrorWitness = s.phase == Rejected and s.errorObserved
+
+  run postLoadSurgeryTest = init.then(allocateFull(true, true))
+    .then(copyHostBeforeSlice(2)).then(compactPostLoad).then(startServing)
+    .expect(postLoadWitness and inv)
+  run cannotSliceBeforeHostCopyTest = init.then(allocateFull(true, true))
+    .then(copyHostBeforeSlice(0)).then(compactPostLoad.fail())
+  run postLoadMissingHybridRejectedTest = init.then(allocateFull(false, true))
+    .then(copyHostBeforeSlice(2)).then(rejectPostLoadFlags)
+    .expect(prerequisiteErrorWitness and inv)
+  run preemptiveBankLoadTest = init.then(allocatePreemptive(true, true, true))
+    .then(loadPreemptiveHost).then(finalizePreemptive).then(startServing)
+    .expect(preemptiveWitness and inv)
+  run preemptiveMissingBankRejectedTest = init
+    .then(allocatePreemptive(false, true, true))
+    .then(rejectPreemptivePrerequisite).expect(prerequisiteErrorWitness and inv)
+  run cannotServeWithLoaderMapTest = init
+    .then(allocatePreemptive(true, true, true)).then(loadPreemptiveHost)
+    .then(startServing.fail())
+  run disconnectedMirrorHelperTest = init.then(planMirror(4, 6, 1, 1))
+    .then(acceptMirrorBudget).expect(mirrorHelperWitness and inv)
+  run mirrorBudgetRefusalTest = init.then(planMirror(2, 5, 1, 1))
+    .then(rejectMirrorBudget).expect(prerequisiteErrorWitness and inv)
+}

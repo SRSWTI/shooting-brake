@@ -1,0 +1,12 @@
+{
+  "id": "system",
+  "title": "System overview and cross-lane result observations",
+  "models": [{"path": "models/system.ryu", "main": "system", "invariant": "inv", "witnesses": ["successfulJoin", "releasedFailure"]}],
+  "sources": [
+    {"path": "serve_production.sh", "role": "behavior", "models": ["models/system.ryu"], "symbols": [], "notes": "Top-level startup outcome abstracted; exact shell/health semantics belong to admission/launch."},
+    {"path": "src/phase4/src/shooting_brake_vllm/routed_experts.py", "role": "behavior", "models": ["models/system.ryu", "models/architecture.ryu"], "symbols": ["_hybrid_forward_modular", "_b70_issue_graph", "_b70_take_graph"], "notes": "One invocation's routing, concurrent partial work and join; tensor payloads and detailed stream ordering abstracted."},
+    {"path": "src/phase7/b70_capi.cpp", "role": "behavior", "models": ["models/system.ryu", "models/architecture.ryu"], "symbols": ["B70Poller", "loop"], "notes": "Completion publication is distinct from provider success."}
+  ],
+  "assumptions": ["Two remote lanes form a bounded concrete instance.", "Startup and local/provider computation are atomic only at this HLD level.", "No GPU numerical, memory-coherence or timing proof.", "Temporal fairness property is typechecked, not model-checked by the default suite."],
+  "implementation_checks": [{"source": "src/phase7/b70_capi.cpp", "symbol": "loop", "description": "Source inspection: errors counter increments on non-ok status and completion is still published unconditionally after the fence."}]
+}

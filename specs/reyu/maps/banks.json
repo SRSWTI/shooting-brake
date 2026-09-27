@@ -1,0 +1,293 @@
+{
+  "id": "banks",
+  "title": "Expert banks, frozen evidence, and authenticated numerical references",
+  "models": [
+    {
+      "path": "models/banks.ryu",
+      "main": "banks",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessNVFP4Published",
+        "witnessInt4Published",
+        "witnessMarlinDirectPublication",
+        "witnessB12xScaleFactorization",
+        "witnessRejectedArtifact",
+        "witnessFrozenNVFP4Layout",
+        "witnessTinyInt4Layout"
+      ]
+    },
+    {
+      "path": "models/reference.ryu",
+      "main": "reference",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessAuthenticatedOracle",
+        "witnessAcceptedComparison",
+        "witnessZeroRemoteBypass",
+        "witnessPoisonPreservedFailure",
+        "witnessRejectedProvenance"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/phase0/baseline_cuda_eager.json",
+      "role": "artifact",
+      "models": ["models/reference.ryu"],
+      "symbols": [],
+      "notes": "Recorded eager evidence has no program symbols; modeled only as unauthenticated Phase-0 evidence, including all_pass=false and zero/approximated timing fields."
+    },
+    {
+      "path": "src/phase0/baseline_cuda_graph.json",
+      "role": "artifact",
+      "models": ["models/reference.ryu"],
+      "symbols": [],
+      "notes": "Recorded graph evidence has no symbols and differs from freeze.yaml values; it is not promoted to authenticated oracle state."
+    },
+    {
+      "path": "src/phase0/benchmark_cuda.py",
+      "role": "harness",
+      "models": ["models/reference.ryu"],
+      "symbols": ["load_correctness_prompts", "check_correctness", "run_correctness", "run_decode_workload", "run_batched_decode", "run_prefill_workload", "main"],
+      "notes": "Owns substring checks and CUDA-only workload measurement; only the evidence boundary is modeled, not vLLM execution."
+    },
+    {
+      "path": "src/phase0/capability_manifest.yaml",
+      "role": "functional",
+      "models": ["models/banks.ryu", "models/reference.ryu"],
+      "symbols": [],
+      "notes": "Declarative geometry, format/hash and startup-gate contract; YAML has no code symbols and does not itself authenticate artifacts."
+    },
+    {
+      "path": "src/phase0/env.sh",
+      "role": "harness",
+      "models": ["models/reference.ryu"],
+      "symbols": [],
+      "notes": "Shell environment preset for build concurrency and model selection; no function symbols or behavioral bank API."
+    },
+    {
+      "path": "src/phase0/freeze.yaml",
+      "role": "artifact",
+      "models": ["models/banks.ryu", "models/reference.ryu"],
+      "symbols": [],
+      "notes": "Frozen compatibility/evidence values seed concrete scenarios but remain documentary until Phase-3 authentication."
+    },
+    {
+      "path": "src/phase0/guidellm_config.yaml",
+      "role": "harness",
+      "models": ["models/reference.ryu"],
+      "symbols": [],
+      "notes": "Alternative synthetic graph-throughput configuration; no symbols and not equivalent to benchmark_cuda.py workloads."
+    },
+    {
+      "path": "src/phase0/provider_protocol.yaml",
+      "role": "functional",
+      "models": ["models/reference.ryu"],
+      "symbols": [],
+      "notes": "Historical logical protocol-v1 schema and intended recovery; modeled only as frozen evidence because Phase 2 owns the later executable ABI."
+    },
+    {
+      "path": "src/phase0/workload.yaml",
+      "role": "functional",
+      "models": ["models/reference.ryu"],
+      "symbols": [],
+      "notes": "Frozen workload/acceptance declaration; no code symbols and its broader correctness prose is distinguished from the implemented substring checker."
+    },
+    {
+      "path": "src/phase0/correctness_prompts.jsonl",
+      "role": "artifact",
+      "models": ["models/reference.ryu"],
+      "symbols": [],
+      "notes": "Twelve prompt/max-token/expected-substring records consumed by the Phase-0 harness; not a formal API or numerical proof."
+    },
+    {
+      "path": "src/phase1/build_b12x_bank.py",
+      "role": "behavior",
+      "models": ["models/banks.ryu"],
+      "symbols": ["ShardCache", "load_layer_planes", "write_plane", "main"],
+      "notes": "Models fixed resident selection, ratio/alpha scale factorization, underflow guard, aligned six-plane write, atomic rename and optional byte comparison; FlashInfer conversion is abstract."
+    },
+    {
+      "path": "src/phase1/build_marlin_bank.py",
+      "role": "behavior",
+      "models": ["models/banks.ryu"],
+      "symbols": ["_rss_guard", "_anon_rss_bytes", "_Int4LayerReader", "_repack_layer_into", "_arena_views", "main"],
+      "notes": "Models int4 source dependence, scale dtype, 4-GiB anonymous-RSS guard, transformed arenas, fresh-repack comparison and direct non-atomic destination publication; CUDA repack bytes are abstract."
+    },
+    {
+      "path": "src/phase1/extract_experts.py",
+      "role": "behavior",
+      "models": ["models/banks.ryu", "models/reference.ryu"],
+      "symbols": ["BankShape", "read_config", "index_shards", "discover_shape", "load_layer", "write_layer", "main"],
+      "notes": "NVFP4 record and total-size functions are modeled exactly; checkpoint discovery, fused scale constraint, one-layer residency, exact-size check and atomic replacement are represented."
+    },
+    {
+      "path": "src/phase1/extract_experts_int4.py",
+      "role": "behavior",
+      "models": ["models/banks.ryu"],
+      "symbols": ["BankShape", "parse_expert_ids", "discover_shape", "assert_qzeros", "assert_g_idx_trivial", "CountingDevNull", "write_layer", "dequantize_int4", "validate_bank_against_shards", "cross_validate_nvfp4", "main"],
+      "notes": "Six-plane byte geometry, 4096 header extent, two qzero conventions, trivial g_idx, explicit resident IDs, exact sample validation and publication branches are modeled; dequant numerics remain implementation evidence."
+    },
+    {
+      "path": "src/phase1/generate_golden.py",
+      "role": "harness",
+      "models": ["models/reference.ryu"],
+      "symbols": ["unpack_e2m1", "decode_e4m3", "dequantize_weight", "main"],
+      "notes": "Legacy one-expert golden path is inventoried and distinguished from authenticated Phase 3; tensor arithmetic is not reproduced symbolically."
+    },
+    {
+      "path": "src/phase1/validate_expert_bank.py",
+      "role": "harness",
+      "models": ["models/banks.ryu", "models/reference.ryu"],
+      "symbols": ["index_shards", "discover_layout", "expected_record", "main"],
+      "notes": "Models exact header/size/source-byte acceptance and mismatch rejection; deterministic sampling and neighbor layer-shift diagnostics are documented but abstract."
+    },
+    {
+      "path": "src/phase1/validate_reference.py",
+      "role": "harness",
+      "models": ["models/reference.ryu"],
+      "symbols": ["load_tensor", "official_weight", "main"],
+      "notes": "Focused expert-0 compressed-tensors comparison and tiny numerical thresholds are inventory evidence, not the Phase-3 provenance model."
+    },
+    {
+      "path": "src/phase3/Makefile",
+      "role": "build",
+      "models": ["models/reference.ryu"],
+      "symbols": [],
+      "notes": "Build/orchestration file with no language symbols; establishes generator, normal/fault provider and mathematics-test dependencies only."
+    },
+    {
+      "path": "src/phase3/generate_reference.py",
+      "role": "behavior",
+      "models": ["models/reference.ryu"],
+      "symbols": ["verify_file_hash", "canonical_shard_manifest", "verify_nvfp4_manifest", "TensorStore", "audit_bank_header", "audit_bank_record", "deterministic_hidden", "expert_forward", "quality_metrics", "report_and_check_quality", "fixture_layout", "validate_fixture", "write_fixture", "validate_snapshot_configs", "generate", "main"],
+      "notes": "Models ordered identity authentication, 16 selected record audits, concrete quality thresholds, exact fixture size and atomic publication; float64 tensor computations are explicit external observations."
+    },
+    {
+      "path": "src/phase3/math_cases.cpp",
+      "role": "behavior",
+      "models": ["models/reference.ryu"],
+      "symbols": ["make_one_route_sweep", "make_all_remote_case", "make_mixed_case", "make_zero_remote_case", "stage_remote_routes", "compute_nvfp4_oracle", "remote_materialization_equal", "small_route_is_sensitivity_checked", "output_budget", "compute_artifact_metrics"],
+      "notes": "Models bounded staged rows/routes, zero bypass, budget relation and 2^-12 sensitivity; actual double/fp32 formulas remain source contracts for differential comparison."
+    },
+    {
+      "path": "src/phase3/math_cases.hpp",
+      "role": "functional",
+      "models": ["models/reference.ryu"],
+      "symbols": ["RouteOwner", "CanonicalRoute", "CanonicalToken", "CanonicalCase", "StagedCase", "OracleResult", "ArtifactMetrics", "stage_remote_routes", "compute_nvfp4_oracle", "output_budget"],
+      "notes": "Public domain types and algorithms define the oracle boundary represented by the reference state."
+    },
+    {
+      "path": "src/phase3/provider_math_test.cpp",
+      "role": "harness",
+      "models": ["models/reference.ryu"],
+      "symbols": ["verify_runtime_bank", "inspect_wire", "WireProviderSession", "run_trusted_bootstrap_negative", "run_direct_shape_negatives", "report_artifact_matrix", "run", "main"],
+      "notes": "Named model scenarios correspond to authenticated success, zero bypass, stale provenance, split/fused failure with poison, M bounds and allocation accounting; hardware execution is not modeled as proof."
+    },
+    {
+      "path": "src/phase3/reference_fixture.cpp",
+      "role": "behavior",
+      "models": ["models/reference.ryu"],
+      "symbols": ["sha256_file", "ReferenceFixture::open", "ReferenceFixture::reset", "ReferenceFixture::hidden_bits", "ReferenceFixture::nvfp4_output", "ReferenceFixture::source_output", "ReferenceFixture::layer_index", "ReferenceFixture::expert_index"],
+      "notes": "Exact size/digest/schema/layout/ID/padding/finite checks and bounded access are represented by authenticated identity state."
+    },
+    {
+      "path": "src/phase3/reference_fixture.hpp",
+      "role": "functional",
+      "models": ["models/reference.ryu"],
+      "symbols": ["ReferenceFixtureHeader", "sha256_file", "ReferenceFixture"],
+      "notes": "Packed fixture ABI and fixed H/I/top-k/layer/expert/input extents define concrete model bounds."
+    },
+    {
+      "path": "src/phase4/int4_bank_roundtrip_test.py",
+      "role": "harness",
+      "models": ["models/banks.ryu"],
+      "symbols": ["fake_vllm_config", "WriterReaderRoundTripTest", "WriterReaderRoundTripTest.test_real_builder_and_plugin_reader_share_every_header_field"],
+      "notes": "Supplies the concrete two-layer/eight-expert int4 layout witness and cross-owner header/plane/nonresident checks."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/b12x_bank_format.py",
+      "role": "functional",
+      "models": ["models/banks.ryu"],
+      "symbols": ["B12xBankHeader", "plane_geometry", "layer_stride", "make_header", "parse_header", "read_b12x_bank_header", "default_b12x_bank_path"],
+      "notes": "Owns SBB12X01 six-plane header geometry/path; the map records that the reader validates magic/version but not all derived/file-size properties."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/bank_source.py",
+      "role": "behavior",
+      "models": ["models/banks.ryu"],
+      "symbols": ["BankSource", "BankSource.__init__"],
+      "notes": "Host mapping/pinning lifetime and fatal registration failure are documented; pageable/registered transfer implementation is outside the bank build state machine."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/int4_bank_format.py",
+      "role": "functional",
+      "models": ["models/banks.ryu"],
+      "symbols": ["_align_up", "Int4BankHeader", "Int4BankHeader.validate", "Int4BankHeader.to_bytes", "parse_int4_bank_header", "read_int4_bank_header"],
+      "notes": "Canonical SBINT401 v2 ABI; int4DataOffset exactly mirrors _align_up/data_offset and the model preserves strict IDs, six planes, padding and version rejection."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/marlin_bank_format.py",
+      "role": "functional",
+      "models": ["models/banks.ryu"],
+      "symbols": ["plane_geometry", "MarlinBankHeader", "MarlinBankHeader.validate", "MarlinBankHeader.pack", "parse_marlin_bank_header", "read_marlin_bank_header", "default_marlin_bank_path"],
+      "notes": "Canonical SBMARL01 geometry, activation scale dtype, ordered IDs and exact-size reader define the transformed sidecar contract."
+    }
+  ],
+  "assumptions": [
+    "The Reyu domains bound layers to 48, experts to 256, hidden size to 3072 and intermediate size to 1024; these cover the assigned concrete fixtures but are not universal format maxima.",
+    "Identity enums stand for exact source snapshot strings and SHA-256 values; digest computation and collision resistance are external, while fail-closed equality/order are modeled.",
+    "Integer milli-units abstract relative RMSE and cosine; the thresholds 180 and 980 mirror source values 0.18 and 0.98, but Reyu does not prove floating-point computations.",
+    "Comparison units in output-budget scenarios are representative bounded integers used to exercise <= and small-route observability; they are not claimed measured tensor deltas.",
+    "Sidecar plane derivation and GPU/FlashInfer transformations remain with their Python/CUDA implementations; the model checks aligned positive stride and exact header-plus-layer extent.",
+    "SBEXP001 source-layer identity is externally reconstructed from a contiguous checkpoint run because the format stores no layer-ID table.",
+    "A successful builder validation does not by itself qualify model placement, provider kernels, runtime transport or serving output."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/phase1/extract_experts.py",
+      "symbol": "BankShape",
+      "description": "Instantiate BankShape(hidden=2048, intermediate=512, experts=256, 32 contiguous NVFP4 layers) and compare expert_bytes/total_bytes to Reyu nvfp4ExpertBytes(2048,512)=1769480 and nvfp4BankBytes(32,256,2048,512)=14495580220."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/int4_bank_format.py",
+      "symbol": "Int4BankHeader.data_offset",
+      "description": "For resident counts 1, 8, 126 and 256, compare the Python data_offset with Reyu int4DataOffset(experts)=align4096(128+4*experts)."
+    },
+    {
+      "source": "src/phase1/extract_experts_int4.py",
+      "symbol": "BankShape",
+      "description": "Derive the two-layer/eight-expert H=3072/I=1024 fixture and compare expert_stride=4866048 and total_bytes=77860864 with Reyu int4ExpertBytes/int4BankBytes."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/int4_bank_format.py",
+      "symbol": "parse_int4_bank_header",
+      "description": "CPU-only differential: serialize a valid header, then independently corrupt magic, version, reserved fields, ID order, padding and one plane offset; each malformed case must reject."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/marlin_bank_format.py",
+      "symbol": "read_marlin_bank_header",
+      "description": "CPU-only synthetic-file check of derived plane geometry, activation scale dtype, ascending IDs and exact file-size rejection."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/b12x_bank_format.py",
+      "symbol": "read_b12x_bank_header",
+      "description": "CPU source comparison: recompute geometry/stride/file extent around a parsed header and demonstrate which malformed size/geometry cases the current header-only reader does not reject."
+    },
+    {
+      "source": "src/phase1/validate_expert_bank.py",
+      "symbol": "expected_record",
+      "description": "On a tiny synthetic safetensors snapshot, compare extractor ordering and reciprocal bits, then shift a bank row and confirm the independent validator identifies byte mismatch/layer shift."
+    },
+    {
+      "source": "src/phase3/reference_fixture.cpp",
+      "symbol": "ReferenceFixture::open",
+      "description": "CPU-only mutation matrix over a copied fixture: whole digest, exact size, reserved bytes, offsets, fixed IDs and non-finite payloads must all reject before spans are exposed."
+    },
+    {
+      "source": "src/phase3/math_cases.cpp",
+      "symbol": "output_budget",
+      "description": "CPU-only compare canonical cases with independently recomputed route counts, absolute-weight sums and weighted magnitudes; verify zero bypass and the 2^-12 sensitivity predicate without launching a provider."
+    }
+  ]
+}

@@ -1,0 +1,181 @@
+/// vLLM integration lifecycle: gated registration, runner/container construction,
+/// legacy provider bookkeeping, Laguna shared-expert fusion, and hidden capture.
+/// Sources: shooting_brake_vllm/__init__.py::register;
+/// runner.py::HybridMoERunner; provider.py::ShootingBrakeExpertProviderClient;
+/// fused_shared.py::install; hidden_capture.py::CaptureAccumulator.
+/// Abstraction: one state-machine action is one Python hook call or one complete
+/// tensor operation. vLLM construction, CUDA kernels, and filesystem syscalls are
+/// external; their source-visible success/failure observations remain explicit.
+module integration {
+  type Phase = Boot | Disabled | Registered | Constructed | Serving | Failed
+  type Fusion = FusionOff | FusionReady | FusionArmed | FusionDisarmed
+  type Capture = CaptureOff | CaptureReady | CapturePartial | CaptureWritten
+  type State = {
+    phase: Phase,
+    routedRegistered: bool,
+    runnerRegistered: bool,
+    qualified: bool,
+    legacyAllCudaCalls: int,
+    fusion: Fusion,
+    capture: Capture,
+    capturedTokens: int,
+    targetTokens: int,
+    atomicWrite: bool,
+    error: bool,
+  }
+  var s: State
+
+  action init = s' = {
+    phase: Boot,
+    routedRegistered: false,
+    runnerRegistered: false,
+    qualified: false,
+    legacyAllCudaCalls: 0,
+    fusion: FusionOff,
+    capture: CaptureOff,
+    capturedTokens: 0,
+    targetTokens: 2,
+    atomicWrite: false,
+    error: false,
+  }
+
+  /// register() is a true no-op when phase4_enabled() is false.
+  action skipDisabled = all {
+    s.phase == Boot,
+    s' = { ...s, phase: Disabled },
+  }
+
+  /// Successful plugin registration installs both replacements as one boot step.
+  action register(fuse: bool, capture: bool): bool = all {
+    s.phase == Boot,
+    s' = { ...s,
+      phase: Registered,
+      routedRegistered: true,
+      runnerRegistered: true,
+      fusion: if (fuse) FusionReady else FusionOff,
+      capture: if (capture) CaptureReady else CaptureOff,
+    },
+  }
+
+  /// A foreign out-of-tree replacement makes register() fail closed.
+  action rejectRegistryConflict = all {
+    s.phase == Boot,
+    s' = { ...s, phase: Failed, error: true },
+  }
+
+  /// HybridMoERunner re-qualifies and requires HybridRoutedExperts.
+  action constructQualified = all {
+    s.phase == Registered,
+    s.routedRegistered,
+    s.runnerRegistered,
+    s' = { ...s, phase: Constructed, qualified: true },
+  }
+  action rejectWrongContainer = all {
+    s.phase == Registered,
+    s' = { ...s, phase: Failed, error: true },
+  }
+
+  /// _forward_impl increments the historical begin_all_cuda counter, then delegates.
+  /// Real remote issue/take belongs to HybridRoutedExperts, not this legacy seam.
+  action delegateRunner = all {
+    s.phase == Constructed or s.phase == Serving,
+    s.qualified,
+    s' = { ...s,
+      phase: Serving,
+      legacyAllCudaCalls: s.legacyAllCudaCalls + 1,
+    },
+  }
+
+  /// A compatible inference-only Laguna module caches merged gate/up planes.
+  action armFusion = all {
+    s.phase == Serving,
+    s.fusion == FusionReady,
+    s' = { ...s, fusion: FusionArmed },
+  }
+  /// Training, autograd, incompatible layouts, or a runtime exception use stock;
+  /// unsafe runtime/layout failures permanently disarm that module.
+  action disarmFusion = all {
+    s.phase == Serving,
+    s.fusion == FusionReady or s.fusion == FusionArmed,
+    s' = { ...s, fusion: FusionDisarmed },
+  }
+
+  /// Ordinary request IDs are ignored without changing capture progress.
+  action ignoreOrdinaryRequest = all {
+    s.phase == Serving,
+    s.capture == CaptureReady or s.capture == CapturePartial,
+    s' = s,
+  }
+  /// Each accepted chunk is already copied to CPU and truncated to remaining rows.
+  action captureOneToken = all {
+    s.phase == Serving,
+    s.capture == CaptureReady or s.capture == CapturePartial,
+    s.capturedTokens < s.targetTokens,
+    s' = { ...s,
+      capture: CapturePartial,
+      capturedTokens: s.capturedTokens + 1,
+    },
+  }
+  /// Completion writes a .part record then atomically replaces the destination.
+  action persistCapture = all {
+    s.phase == Serving,
+    s.capture == CapturePartial,
+    s.capturedTokens == s.targetTokens,
+    s' = { ...s, capture: CaptureWritten, atomicWrite: true },
+  }
+
+  action stay = s' = s
+  action step = any {
+    skipDisabled,
+    register(false, false), register(true, false), register(false, true),
+    register(true, true), rejectRegistryConflict,
+    constructQualified, rejectWrongContainer, delegateRunner,
+    armFusion, disarmFusion, ignoreOrdinaryRequest,
+    captureOneToken, persistCapture, stay,
+  }
+
+  val inv = and {
+    s.runnerRegistered == s.routedRegistered,
+    s.qualified implies (s.routedRegistered and s.runnerRegistered),
+    s.legacyAllCudaCalls >= 0,
+    s.capturedTokens >= 0,
+    s.capturedTokens <= s.targetTokens,
+    s.atomicWrite == (s.capture == CaptureWritten),
+    s.capture == CaptureWritten implies s.capturedTokens == s.targetTokens,
+    s.error implies s.phase == Failed,
+  }
+  val witnessRegistered = s.phase == Registered and s.routedRegistered and s.runnerRegistered
+  val witnessDelegated = s.phase == Serving and s.legacyAllCudaCalls == 1
+  val witnessFused = witnessDelegated and s.fusion == FusionArmed
+  val witnessCaptureWritten = s.capture == CaptureWritten and s.atomicWrite
+  val witnessDisabled = s.phase == Disabled and not(s.routedRegistered)
+
+  /// Failure assertions are terminal runs: a failed action has no next state.
+  run disabledPluginRejectsConstructionTest =
+    init.then(skipDisabled).then(constructQualified.fail())
+  run disabledPluginWitnessTest = init.then(skipDisabled)
+    .expect(witnessDisabled and inv)
+  run registrationAndDelegationTest = init.then(register(false, false))
+    .then(constructQualified).then(delegateRunner)
+    .expect(witnessDelegated and inv)
+  run registryConflictRejectsConstructionTest =
+    init.then(rejectRegistryConflict).then(constructQualified.fail())
+  run registryConflictWitnessTest = init.then(rejectRegistryConflict)
+    .expect(s.error and inv)
+  run fusedSharedSuccessTest = init.then(register(true, false))
+    .then(constructQualified).then(delegateRunner).then(armFusion)
+    .expect(witnessFused and inv)
+  run fusedSharedFallbackTest = init.then(register(true, false))
+    .then(constructQualified).then(delegateRunner).then(disarmFusion)
+    .expect(s.fusion == FusionDisarmed and inv)
+  run fusedSharedCannotRearmTest = init.then(register(true, false))
+    .then(constructQualified).then(delegateRunner).then(disarmFusion)
+    .then(armFusion.fail())
+  run incompleteCaptureCannotPersistTest = init.then(register(false, true))
+    .then(constructQualified).then(delegateRunner).then(captureOneToken)
+    .then(persistCapture.fail())
+  run hiddenCaptureTest = init.then(register(false, true))
+    .then(constructQualified).then(delegateRunner).then(ignoreOrdinaryRequest)
+    .then(captureOneToken).then(captureOneToken)
+    .then(persistCapture).expect(witnessCaptureWritten and inv)
+}

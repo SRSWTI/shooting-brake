@@ -1,0 +1,326 @@
+/// Optional Level-Zero command-streamer doorbell modes.
+/// Sources: b70_capi.cpp::B70Poller::loop and
+/// b70_provider.cpp::{issue_cs_chain,issue_cs_ride,cs_step_fence,
+/// baked_record_layer,baked_execute_step,baked_wait,baked_disable}.
+/// Abstraction: two layers stand for the loaded bank's complete layer set.
+/// CUDA graph capture is an independent boolean; it never selects a CS mode.
+module command_streamer {
+  type Mode = Classic | Chain | Ride | Baked
+  type Phase = Configuring | Capturing | Dormant | Armed | Recording | Ready |
+    FastInFlight | FenceRequired | BakedInFlight | Recovering | ClassicFallback
+  type State = {
+    mode: Mode,
+    graphEnabled: bool,
+    phase: Phase,
+    registered: Set[int],
+    captureDone: bool,
+    armed: bool,
+    csDisabled: bool,
+    outFp16: bool,
+    batch: int,
+    signals: Set[int],
+    completions: Set[int],
+    valid: Set[int],
+    progress: Set[int],
+    poisoned: bool,
+    errors: int,
+    steps: int,
+  }
+
+  pure val LAYERS = Set(0, 1)
+  pure val FAST_BATCHES = Set(1, 2, 32)
+  pure val ALL_BATCHES = Set(1, 2, 32, 33)
+  pure def classicEligible(
+    mode: Mode, armed: bool, disabled: bool, phase: Phase,
+    batch: int, outFp16: bool,
+  ): bool =
+    mode == Classic or not(armed) or disabled or phase == ClassicFallback or
+    ((mode == Chain or mode == Ride) and batch > 32) or
+    (mode == Baked and (batch != 1 or not(outFp16)))
+  var s: State
+
+  action init = s' = {
+    mode: Classic, graphEnabled: false, phase: Configuring,
+    registered: Set(), captureDone: false, armed: false, csDisabled: false,
+    outFp16: true, batch: 0, signals: Set(), completions: Set(),
+    valid: Set(), progress: Set(), poisoned: false, errors: 0, steps: 0,
+  }
+
+  action configureMode(mode: Mode, graphEnabled: bool, outFp16: bool): bool = all {
+    s.phase == Configuring,
+    s' = { ...s, mode: mode, graphEnabled: graphEnabled, outFp16: outFp16,
+      phase: if (graphEnabled) Capturing else Dormant,
+    },
+  }
+
+  action register(layer: int): bool = all {
+    LAYERS.contains(layer), not(s.registered.contains(layer)),
+    s.phase != ClassicFallback,
+    s' = { ...s, registered: s.registered.union(Set(layer)) },
+  }
+
+  /// The Python arm hook is post-capture. Without this transition all optional
+  /// CS modes remain dormant and the classic host sweep stays authoritative.
+  action finishCapture = all {
+    s.phase == Capturing,
+    s' = { ...s, phase: Dormant, captureDone: true },
+  }
+  action arm = all {
+    s.phase == Dormant, s.graphEnabled, s.captureDone,
+    s.mode != Classic, s.registered == LAYERS, not(s.csDisabled),
+    s' = { ...s, phase: if (s.mode == Baked) Recording else Armed, armed: true },
+  }
+
+  /// Classic is valid with or without CUDA graph signaling. This is the live
+  /// r15 recipe combination: graphEnabled=true and mode=Classic.
+  action ringClassic(layer: int, batch: int): bool = all {
+    LAYERS.contains(layer), ALL_BATCHES.contains(batch),
+    classicEligible(s.mode, s.armed, s.csDisabled, s.phase, batch, s.outFp16),
+    not(s.signals.contains(layer)), not(s.completions.contains(layer)),
+    s' = { ...s, batch: batch, signals: s.signals.union(Set(layer)) },
+  }
+  action classicServeSuccess(layer: int): bool = all {
+    LAYERS.contains(layer), s.signals.contains(layer),
+    classicEligible(s.mode, s.armed, s.csDisabled, s.phase, s.batch, s.outFp16),
+    s' = { ...s,
+      signals: s.signals.exclude(Set(layer)),
+      completions: s.completions.union(Set(layer)),
+      valid: s.valid.union(Set(layer)),
+    },
+  }
+  action classicServeFailure(layer: int): bool = all {
+    LAYERS.contains(layer), s.signals.contains(layer),
+    classicEligible(s.mode, s.armed, s.csDisabled, s.phase, s.batch, s.outFp16),
+    s' = { ...s,
+      signals: s.signals.exclude(Set(layer)),
+      completions: s.completions.union(Set(layer)),
+      errors: s.errors + 1,
+    },
+  }
+
+  /// Modes 1/2 accept only decode/split shapes M<=32 after explicit arming.
+  action ringFast(batch: int): bool = all {
+    FAST_BATCHES.contains(batch),
+    (s.mode == Chain or s.mode == Ride), s.phase == Armed,
+    not(s.csDisabled), s.signals.size() == 0, s.completions.size() == 0,
+    s' = { ...s, batch: batch, signals: LAYERS },
+  }
+  action appendFastStep = all {
+    (s.mode == Chain or s.mode == Ride), s.phase == Armed,
+    s.signals == LAYERS, s.batch <= 32,
+    s' = { ...s, phase: FastInFlight },
+  }
+  action hardwareCompletesFast = all {
+    s.phase == FastInFlight,
+    s' = { ...s, phase: FenceRequired, signals: Set(),
+      completions: LAYERS, valid: LAYERS,
+    },
+  }
+  /// Mandatory full-step fence: returning to scan before this can let the
+  /// classic loop steal a later layer's signal from its hardware WAIT.
+  action fenceFastStep = all {
+    s.phase == FenceRequired,
+    s' = { ...s, phase: Armed, steps: s.steps + 1 },
+  }
+  action failFastAppend = all {
+    s.phase == FastInFlight,
+    s' = { ...s, phase: ClassicFallback, csDisabled: true, errors: s.errors + 1 },
+  }
+  action failFastFence = all {
+    s.phase == FenceRequired,
+    s' = { ...s, phase: ClassicFallback, csDisabled: true, errors: s.errors + 1 },
+  }
+
+  /// Mode 3 records once only after arming/all-layer registration. It is
+  /// restricted to M=1 and fp16 output wire.
+  action recordBaked = all {
+    s.mode == Baked, s.phase == Recording, s.outFp16,
+    s.registered == LAYERS, not(s.csDisabled),
+    s' = { ...s, phase: Ready },
+  }
+  action failBakedRecord = all {
+    s.mode == Baked, s.phase == Recording,
+    s' = { ...s, phase: ClassicFallback, csDisabled: true, errors: s.errors + 1 },
+  }
+  action ringBakedFull = all {
+    s.mode == Baked, s.phase == Ready,
+    s.signals.size() == 0, s.completions.size() == 0,
+    s' = { ...s, batch: 1, signals: LAYERS, progress: Set(), poisoned: false },
+  }
+  /// A partial warmup-like step is modeled to make the bounded recovery path
+  /// reachable even though post-capture arming excludes known capture sweeps.
+  action ringBakedPartial = all {
+    s.mode == Baked, s.phase == Ready,
+    s.signals.size() == 0, s.completions.size() == 0,
+    s' = { ...s, batch: 1, signals: Set(0), progress: Set(), poisoned: false },
+  }
+  action executeBaked = all {
+    s.mode == Baked, s.phase == Ready, s.signals.contains(0),
+    s' = { ...s, phase: BakedInFlight },
+  }
+  action bakedLayerFinishes(layer: int): bool = all {
+    s.phase == BakedInFlight, LAYERS.contains(layer),
+    s.signals.contains(layer), not(s.progress.contains(layer)),
+    s' = { ...s,
+      signals: s.signals.exclude(Set(layer)),
+      completions: s.completions.union(Set(layer)),
+      valid: s.valid.union(Set(layer)),
+      progress: s.progress.union(Set(layer)),
+    },
+  }
+  action bakedDrained = all {
+    s.phase == BakedInFlight, s.progress == LAYERS,
+    s' = { ...s, phase: Ready, steps: s.steps + 1 },
+  }
+  /// One wait slice with no monotone progress starts poison-drain recovery.
+  action detectNoProgress = all {
+    s.phase == BakedInFlight, s.progress != LAYERS,
+    s' = { ...s, phase: Recovering, errors: s.errors + 1 },
+  }
+  action poisonMissingSignals = all {
+    s.phase == Recovering, not(s.poisoned),
+    s' = { ...s, signals: LAYERS, poisoned: true },
+  }
+  action poisonDrainCompletes = all {
+    s.phase == Recovering, s.poisoned,
+    s' = { ...s, completions: LAYERS, signals: Set(),
+      phase: ClassicFallback, csDisabled: true,
+    },
+  }
+  /// A real doorbell can race recovery. The fallback must not scrub an
+  /// unconsumed signal whose completion is still zero.
+  action racingDoorbell(layer: int): bool = all {
+    s.phase == Recovering, LAYERS.contains(layer),
+    not(s.completions.contains(layer)),
+    s' = { ...s, signals: s.signals.union(Set(layer)) },
+  }
+  action disableAfterRecovery = all {
+    s.phase == Recovering,
+    s' = { ...s, phase: ClassicFallback, csDisabled: true,
+      signals: s.signals.intersect(LAYERS.exclude(s.completions)),
+    },
+  }
+
+  /// CUDA consumes completion=1 and resets it; this contains no result or
+  /// sequence identity. Validity is kept separately for the model observation.
+  action resetCompletions = all {
+    s.completions.size() > 0,
+    s' = { ...s, completions: Set(), valid: Set(), progress: Set(), batch: 0 },
+  }
+  action stay = s' = s
+
+  action step = any {
+    configureMode(Classic, true, true), configureMode(Chain, true, true),
+    configureMode(Ride, true, true), configureMode(Baked, true, true),
+    configureMode(Baked, true, false),
+    register(0), register(1), finishCapture, arm,
+    ringClassic(0, 1), ringClassic(1, 32), ringClassic(0, 33),
+    classicServeSuccess(0), classicServeSuccess(1),
+    classicServeFailure(0), classicServeFailure(1),
+    ringFast(1), ringFast(32), appendFastStep, hardwareCompletesFast,
+    fenceFastStep, failFastAppend, failFastFence,
+    recordBaked, failBakedRecord, ringBakedFull, ringBakedPartial,
+    executeBaked, bakedLayerFinishes(0), bakedLayerFinishes(1), bakedDrained,
+    detectNoProgress, poisonMissingSignals, poisonDrainCompletes,
+    racingDoorbell(0), racingDoorbell(1), disableAfterRecovery,
+    resetCompletions, stay,
+  }
+
+  val inv = and {
+    s.registered.subseteq(LAYERS), s.signals.subseteq(LAYERS),
+    s.completions.subseteq(LAYERS), s.valid.subseteq(s.completions),
+    s.progress.subseteq(LAYERS),
+    s.armed implies (s.graphEnabled and s.captureDone and s.mode != Classic),
+    s.csDisabled implies s.phase == ClassicFallback,
+    s.phase == FenceRequired implies (s.mode == Chain or s.mode == Ride),
+    (s.phase == Recording or s.phase == Ready or s.phase == BakedInFlight or
+      s.phase == Recovering) implies s.mode == Baked,
+  }
+
+  val witnessGraphWithClassic = s.graphEnabled and s.mode == Classic and not(s.armed)
+  val witnessFenceBlocksRescan = s.phase == FenceRequired
+  val witnessBakedHealthy = s.mode == Baked and s.steps == 1 and not(s.csDisabled)
+  val witnessLatchedFallback = s.csDisabled and s.phase == ClassicFallback
+  val witnessRacingSignalPreserved = s.phase == ClassicFallback and
+    s.signals.size() > 0 and s.signals.intersect(s.completions).size() == 0
+
+  run productionClassicGraphWitnessTest =
+    init.then(configureMode(Classic, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture)
+    .expect(witnessGraphWithClassic and inv)
+
+  run productionClassicGraphTest = init.then(configureMode(Classic, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture)
+    .then(ringClassic(0, 1)).then(classicServeSuccess(0))
+    .then(resetCompletions).expect(inv)
+
+  run chainFenceWitnessTest = init.then(configureMode(Chain, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture).then(arm)
+    .then(ringFast(32)).then(appendFastStep).then(hardwareCompletesFast)
+    .expect(witnessFenceBlocksRescan and inv)
+
+  run chainCannotRescanBeforeFenceTest =
+    init.then(configureMode(Chain, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture).then(arm)
+    .then(ringFast(32)).then(appendFastStep).then(hardwareCompletesFast)
+    .then(appendFastStep.fail())
+
+  run chainFenceTest = init.then(configureMode(Chain, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture).then(arm)
+    .then(ringFast(32)).then(appendFastStep).then(hardwareCompletesFast)
+    .then(fenceFastStep).then(resetCompletions).expect(s.steps == 1 and inv)
+
+  run rideFailureFallbackTest = init.then(configureMode(Ride, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture).then(arm)
+    .then(ringFast(1)).then(appendFastStep).then(failFastAppend)
+    .then(classicServeSuccess(0)).then(classicServeSuccess(1))
+    .expect(witnessLatchedFallback and s.completions == LAYERS and inv)
+
+  run bakedHealthyStepTest = init.then(configureMode(Baked, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture).then(arm)
+    .then(recordBaked).then(ringBakedFull).then(executeBaked)
+    .then(bakedLayerFinishes(1)).then(bakedLayerFinishes(0)).then(bakedDrained)
+    .expect(witnessBakedHealthy and inv)
+
+  run bakedPoisonFallbackTest = init.then(configureMode(Baked, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture).then(arm)
+    .then(recordBaked).then(ringBakedPartial).then(executeBaked)
+    .then(bakedLayerFinishes(0)).then(detectNoProgress)
+    .then(poisonMissingSignals).then(poisonDrainCompletes)
+    .expect(witnessLatchedFallback and inv)
+
+  run bakedRacePreservationTest = init.then(configureMode(Baked, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture).then(arm)
+    .then(recordBaked).then(ringBakedPartial).then(executeBaked)
+    .then(bakedLayerFinishes(0)).then(detectNoProgress)
+    .then(racingDoorbell(1)).then(disableAfterRecovery)
+    .expect(witnessRacingSignalPreserved and inv)
+
+  run unarmedFastPathRejectedTest =
+    init.then(configureMode(Chain, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture)
+    .then(ringFast(1).fail())
+
+  run unarmedModeStaysClassicTest = init.then(configureMode(Chain, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture)
+    .then(ringClassic(0, 1)).then(classicServeSuccess(0))
+    .then(resetCompletions)
+    .expect(s.phase == Dormant and s.steps == 0 and inv)
+
+  run largeBatchBypassesFastPathTest = init.then(configureMode(Chain, true, true))
+    .then(register(0)).then(register(1)).then(finishCapture).then(arm)
+    .then(ringClassic(0, 33)).then(classicServeSuccess(0))
+    .expect(s.phase == Armed and s.completions.contains(0) and inv)
+
+  run bakedWireRecordRejectedTest =
+    init.then(configureMode(Baked, true, false))
+    .then(register(0)).then(register(1)).then(finishCapture).then(arm)
+    .then(recordBaked.fail())
+
+  run bakedWireMismatchUsesClassicTest =
+    init.then(configureMode(Baked, true, false))
+    .then(register(0)).then(register(1)).then(finishCapture).then(arm)
+    .then(ringClassic(0, 1)).then(classicServeSuccess(0))
+    .expect(s.phase == Recording and s.completions.contains(0) and inv)
+
+}

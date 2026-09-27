@@ -1,0 +1,181 @@
+{
+  "id": "prefill",
+  "title": "Weight residency and offloaded prefill",
+  "models": [
+    {
+      "path": "models/prefill.ryu",
+      "main": "prefill",
+      "invariant": "inv",
+      "witnesses": [
+        "chunkCopiedBeforeReuse",
+        "streamedPrefill",
+        "missingGraphWitness",
+        "b12xWitness"
+      ]
+    },
+    {
+      "path": "models/residency.ryu",
+      "main": "residency",
+      "invariant": "inv",
+      "witnesses": [
+        "postLoadWitness",
+        "preemptiveWitness",
+        "mirrorHelperWitness",
+        "prerequisiteErrorWitness"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/b12x_prefill.py",
+      "role": "behavior",
+      "models": ["models/prefill.ryu"],
+      "symbols": [
+        "B12xPrefillStreamer",
+        "B12xPrefillStreamer.__init__",
+        "B12xPrefillStreamer.prefetch",
+        "B12xPrefillStreamer._run_tile",
+        "B12xPrefillStreamer.partial",
+        "B12xPrefillStreamer.stats"
+      ],
+      "notes": "Models ring ownership, copy-before-reuse events, missing-bank and bf16 admission, sentinel masking, tiling, next-layer prefetch and the W4A4 alternative; FlashInfer numerics are abstract."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/marlin_prefill.py",
+      "role": "behavior",
+      "models": ["models/prefill.ryu"],
+      "symbols": [
+        "MarlinPrefillStreamer",
+        "MarlinPrefillStreamer.__init__",
+        "MarlinPrefillStreamer._open_bank_source",
+        "MarlinPrefillStreamer.prefetch",
+        "MarlinPrefillStreamer.partial",
+        "MarlinPrefillStreamer.stats",
+        "_get_streamer",
+        "_marlin_prefill_partial_impl",
+        "_marlin_prefill_partial_fake",
+        "marlin_prefill_partial"
+      ],
+      "notes": "Models the singleton engine choice, dtype failure, arena ring, event ordering, route masking, token tiling, consumption and opaque custom-op boundary; fused Marlin numerics are abstract."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/prefill_mirror.py",
+      "role": "functional",
+      "models": ["models/residency.ryu"],
+      "symbols": [
+        "mirror_expert_count",
+        "mirror_enabled",
+        "headroom_gib",
+        "host_available_gib",
+        "select_mirror_ids",
+        "build_slot_map",
+        "arena_gib",
+        "validate_mirror_budget",
+        "max_mirror_experts"
+      ],
+      "notes": "Models bounded balanced selection and pre-allocation headroom outcome while explicitly preserving that these helpers are disconnected from the serving path."
+    },
+    {
+      "path": "src/phase6/prefill_mirror_unit_test.py",
+      "role": "harness",
+      "models": ["models/residency.ryu"],
+      "symbols": ["check", "make_placement", "device_of", "main"],
+      "notes": "CPU-only contract harness for balance, clamp/all-CUDA cases, dense sentinel slot maps, NVFP4 sizing, MemAvailable headroom refusal and stable selection; it does not establish runtime integration."
+    },
+    {
+      "path": "src/phase8/async_overlap_test.py",
+      "role": "harness",
+      "models": ["models/prefill.ryu"],
+      "symbols": ["run_case", "main"],
+      "notes": "Real eager decode comparison among all-CUDA, asynchronous B70 and synchronous B70. It informs issue-before-local overlap but is not a prefill test; async and sync require exact token equality after a weaker baseline semantic fallback."
+    },
+    {
+      "path": "src/phase8/smoke_benchmark.py",
+      "role": "harness",
+      "models": ["models/prefill.ryu", "models/residency.ryu"],
+      "symbols": ["main"],
+      "notes": "Manual all-CUDA versus hybrid+surgery decode throughput client. It prints whole-request per-token time rather than isolated TTFT and asserts neither parity nor VRAM reduction."
+    },
+    {
+      "path": "src/phase8/vram_surgery_test.py",
+      "role": "harness",
+      "models": ["models/residency.ryu"],
+      "symbols": ["run_case", "main"],
+      "notes": "Real post-load surgery path/marker and output-parity harness. It prints pre/post-run CUDA allocation values but does not assert a positive VRAM reduction; the lazy surgery occurs on first forward."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "role": "dependency",
+      "models": ["models/prefill.ryu", "models/residency.ryu"],
+      "symbols": [
+        "b70_prefill_stream_enabled",
+        "preemptive_surgery_enabled",
+        "b70_stream_threshold",
+        "_reject_unsupported_preemptive_tiers",
+        "_preemptive_cuda_ids",
+        "HybridRoutedExperts._load_host_experts_from_bank",
+        "HybridRoutedExperts._load_host_experts",
+        "HybridRoutedExperts._maybe_perform_vram_surgery",
+        "HybridRoutedExperts.forward_modular",
+        "HybridRoutedExperts._prefill_forward_offloaded",
+        "HybridRoutedExperts._b70_prefill_partial",
+        "HybridRoutedExperts._b70_prefill_partial_dispatch",
+        "HybridRoutedExperts._cpu_prefill_partial"
+      ],
+      "notes": "Shared integration-owned source reference that selects the modeled branches and owns surgery, compact remapping, partial composition, batch-capacity chunking, per-card join/copy, CPU fallback and fail-closed missing-Tier-3 behavior."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/cpu_stream.py",
+      "role": "dependency",
+      "models": ["models/prefill.ryu"],
+      "symbols": ["ExpertStreamer", "get_streamer", "stream_threshold"],
+      "notes": "Referenced boundary for packed NVFP4 expert streaming to CUDA; detailed CPU-stream implementation is owned by the CPU subsystem."
+    }
+  ],
+  "assumptions": [
+    "Placement has already established disjoint CUDA, B70 and optional CPU route ownership; this branch models the resulting residency and prefill mechanics, not placement construction.",
+    "Small row and expert counts preserve ordering, coverage and reuse hazards but do not represent production capacity or performance.",
+    "A valid abstract partial stands for the selected engine's routing-weighted tensor result; floating-point and quantization equivalence are not inferred.",
+    "The provider slot space and host-arena global expert-ID space remain distinct even though both are represented by finite identities.",
+    "Marlin/B12x bank formats and BankSource validation are dependencies whose binary layout is modeled in the bank subsystem.",
+    "prefill_mirror.py is standalone experimental helper code because no live routed-expert source imports it.",
+    "No assigned gate, benchmark, build, lint or hardware workload was executed during authoring."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/phase6/prefill_mirror_unit_test.py",
+      "symbol": "main",
+      "description": "Run the existing CPU-only helper harness to compare balanced selection, clamp/all-CUDA behavior, dense slot maps, NVFP4 arena arithmetic and budget refusal with disconnectedMirrorHelperTest and mirrorBudgetRefusalTest."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "symbol": "HybridRoutedExperts._b70_prefill_partial_dispatch",
+      "description": "Source-inspect the nested loops to confirm every lane is issued before the first take and out[start:end] is assigned before the next chunk can overwrite take views; compare with the two ordering-failure scenarios in prefill.ryu."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "symbol": "HybridRoutedExperts._maybe_perform_vram_surgery",
+      "description": "Source-inspect full-versus-already-compact branches to confirm compact tensors always finalize the remap and retire the loader map, while full tensors require surgery, device and hybrid gates before slicing."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/marlin_prefill.py",
+      "symbol": "MarlinPrefillStreamer.partial",
+      "description": "Source-inspect sentinel zero-weight masking, tile slicing, consumed-event recording and next-layer prefetch; numerical comparison must use the real bank/kernel rather than a mock."
+    },
+    {
+      "source": "src/phase4/src/shooting_brake_vllm/b12x_prefill.py",
+      "symbol": "B12xPrefillStreamer.__init__",
+      "description": "Source-inspect bf16 admission and explicit input/FC2 scales, then compare its ring lifecycle against MarlinPrefillStreamer without asserting W4A4/W4A16 numerical identity."
+    },
+    {
+      "source": "src/phase8/vram_surgery_test.py",
+      "symbol": "main",
+      "description": "Source-inspect the harness predicate: it checks token/semantic parity and path markers but only prints the VRAM delta, so a future CPU review can distinguish its asserted contract from its diagnostic output."
+    },
+    {
+      "source": "src/phase8/smoke_benchmark.py",
+      "symbol": "main",
+      "description": "Source-inspect timing boundaries and confirm the printed mean ITL includes full generation wall time and no separate first-token timestamp despite the module's TTFT description."
+    }
+  ]
+}

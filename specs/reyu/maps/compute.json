@@ -1,0 +1,212 @@
+{
+  "id": "compute",
+  "title": "Grouped NVFP4 route and quantized compute",
+  "models": [
+    {
+      "path": "models/compute.ryu",
+      "main": "compute",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessNativeAtomic",
+        "witnessDeterministic",
+        "witnessOverflowSafe",
+        "witnessOneDnnDisarmedFallback",
+        "witnessApproximateMxFp4",
+        "witnessUnsupportedShape"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/phase7/xe2_nvfp4/grouped_moe.cpp",
+      "role": "behavior",
+      "models": ["models/compute.ryu"],
+      "symbols": [
+        "grouped_moe_nvfp4",
+        "launch",
+        "launch_nvfp4",
+        "launch_nvfp4_big",
+        "launch_mxfp4",
+        "backend",
+        "mxfp4_scale_plane"
+      ],
+      "notes": "Primary eight-stage behavior: route histogram/scan/scatter/gather, backend-selected gate-up, finite overflow scaling, down GEMM, atomic or fixed-order output; device arithmetic and scheduling are explicit abstractions."
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/grouped_moe.hpp",
+      "role": "functional",
+      "models": ["models/compute.ryu"],
+      "symbols": ["grouped_moe_nvfp4"],
+      "notes": "Public raw-pointer tensor and scratch shape contract; false return delegates fallback to the caller and no exception crosses the boundary."
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/grouped_moe_onednn.cpp",
+      "role": "behavior",
+      "models": ["models/compute.ryu"],
+      "symbols": ["QueueCtx", "ctx_for", "onednn_grouped_armed", "onednn_grouped_gemm"],
+      "notes": "Models process-lifetime queue/primitive/scale caches, geometry stability, canonical scale copy and permanent atomic disarm after any caught internal failure."
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/grouped_moe_onednn.hpp",
+      "role": "functional",
+      "models": ["models/compute.ryu"],
+      "symbols": ["onednn_grouped_armed", "onednn_grouped_gemm"],
+      "notes": "oneDNN grouped-leg contract: allocation capacity versus device offsets, bank-native packed weights, asynchronous in-order submission, and false-without-serving refusal."
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/xe_2/gemm_xe2.hpp",
+      "role": "dependency",
+      "models": ["models/compute.ryu"],
+      "symbols": ["A_DTYPE", "B_DTYPE", "apply_scale", "xe_gemm", "xe_gemm_4bits"],
+      "notes": "Imported Xe2 GEMM mainloop with local NVFP4 dtype/E4M3 group-scale decode and bank-native scale indexing; exact DPAS, copy, rounding and subgroup behavior are not modeled."
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/xe_2/gemm_xe2_policy.hpp",
+      "role": "dependency",
+      "models": ["models/compute.ryu"],
+      "symbols": [
+        "xe_gemm_policy_base",
+        "w4a16_policy_m_32",
+        "w4a16_policy_k16",
+        "w4a16_policy_m_32_k16",
+        "w4a16_policy_m_64_k16",
+        "w4a16_policy_m_64_n128_k16",
+        "w4a16_policy_m_128_k16",
+        "w4a16_policy_k16_d32",
+        "w4a16_policy_d32"
+      ],
+      "notes": "Imported tile-policy catalog plus local group-16 K-tile and FP32-store policies. The model preserves selection branches, not tile geometry performance."
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/xe_2/grouped_gemm_xe2.hpp",
+      "role": "dependency",
+      "models": ["models/compute.ryu"],
+      "symbols": ["make_moe_tensor", "MoEGEMM"],
+      "notes": "Imported grouped scheduling, packed expert offsets, group-size dispatch and persistent atomic work queue; modeled as each grouped GEMM leg and reused atom scratch."
+    },
+    {
+      "path": "src/phase7/xe2_probe/build.sh",
+      "role": "build",
+      "models": ["models/compute.ryu"],
+      "symbols": [],
+      "notes": "Shell build recipe has no program symbols; builds the vendored MXFP4 speed harness with required SYCL/CUTLASS definitions and SPIR-V extensions, not a serving binary."
+    },
+    {
+      "path": "src/phase7/xe2_probe/build_backend_verify.sh",
+      "role": "build",
+      "models": ["models/compute.ryu"],
+      "symbols": [],
+      "notes": "Shell build recipe has no program symbols; links the current grouped wrapper objects and oneDNN for A/B verification."
+    },
+    {
+      "path": "src/phase7/xe2_probe/build_nvfp4.sh",
+      "role": "build",
+      "models": ["models/compute.ryu"],
+      "symbols": [],
+      "notes": "Shell build recipe has no program symbols; shadows vendor Xe2 headers with the local group-16/NVFP4 fork for policy probing."
+    },
+    {
+      "path": "src/phase7/xe2_probe/build_onednn_probe.sh",
+      "role": "build",
+      "models": ["models/compute.ryu"],
+      "symbols": [],
+      "notes": "Shell build recipe has no program symbols; compiles and links the oneDNN numerical/performance probe against the vendor build tree."
+    },
+    {
+      "path": "src/phase7/xe2_probe/grouped_backend_verify.cpp",
+      "role": "harness",
+      "models": ["models/compute.ryu"],
+      "symbols": ["run_dump", "run_compare", "main"],
+      "notes": "Current full-entry deterministic fixture, finite/nonzero output check, backend dump and tolerance/cosine A/B comparison. Its tolerance contradicts a strict bit-equivalence reading."
+    },
+    {
+      "path": "src/phase7/xe2_probe/onednn_grouped_probe.cpp",
+      "role": "harness",
+      "models": ["models/compute.ryu"],
+      "symbols": ["decode_e4m3", "oracle", "max_rel_err", "Runner", "Fixture", "DeviceCopy", "check", "main"],
+      "notes": "CPU oracle and oneDNN harness for nibble order, E4M3 arithmetic, canonical scale repacking, empty expert groups, offsets as an upper bound, untouched padded tail and performance."
+    },
+    {
+      "path": "src/phase7/xe2_probe/xe2_grouped_moe.cpp",
+      "role": "harness",
+      "models": ["models/compute.ryu"],
+      "symbols": ["main"],
+      "notes": "Historical real-bank full-layer timing harness. It predates current FP32 intermediate/output scratch, overflow-safe scaling and deterministic reduce; it is not current serving correctness behavior."
+    },
+    {
+      "path": "src/phase7/xe2_probe/xe2_grouped_probe.cpp",
+      "role": "harness",
+      "models": ["models/compute.ryu"],
+      "symbols": ["main"],
+      "notes": "Speed-only policy sweep over vendored MXFP4 and optional forked NVFP4 policies; explicitly not a numerical correctness or production-path harness."
+    },
+    {
+      "path": "src/phase7/xe2_probe/xe2_nvfp4_verify.cpp",
+      "role": "harness",
+      "models": ["models/compute.ryu"],
+      "symbols": ["launch", "e2m1_to_float", "main"],
+      "notes": "Controlled one-hot format harness for E4M3 scale decode, E2M1 nibble order, group-16 addressing and layout; not full MoE equivalence."
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/.provenance",
+      "role": "dependency",
+      "models": ["models/compute.ryu"],
+      "symbols": [],
+      "notes": "Data-only provenance marker with no code symbols: Xe2 machinery derives from vLLM-XPU kernel tree a07c4844; local changes add NVFP4 E4M3/group-16 to upstream MXFP4 E8M0/group-32."
+    }
+  ],
+  "assumptions": [
+    "The caller supplies an in-order SYCL queue, live device-accessible pointers, and buffers with the shapes and capacities declared by grouped_moe.hpp.",
+    "Route IDs outside [0,E) are unowned compaction markers and are intentionally omitted rather than treated as errors.",
+    "The finite model's two experts, four routes and scalar arithmetic witness structure and algebra only; they do not stand for production sizing or floating-point bit equivalence.",
+    "Power-of-two scaling preserves the exact linear product algebraically, while FP16 narrowing, SiLU evaluation, DPAS order, non-finite inputs and float atomics require implementation checks.",
+    "The host rows-per-expert estimate divides by two because the source targets the shipped two-card split; it is not a topology-independent selection formula.",
+    "Environment-selected backend, big-tile arm and scatter mode are parsed once per process.",
+    "oneDNN queue/primitive and canonical scale caches, and successful MXFP4 derived-scale caches, intentionally live for the process/bank lifetime.",
+    "MXFP4 derived scales are approximate and quality-gated; they are never assumed equivalent to native NVFP4.",
+    "Copied Xe2/CUTE/CUTLASS-SYCL internals are external-derived machinery at tree a07c4844 with documented local NVFP4 changes, not a general first-party architecture claim.",
+    "Probe measurements and dated silicon comments are evidence from their captured configuration, not invariant performance guarantees."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/phase7/xe2_nvfp4/grouped_moe.cpp",
+      "symbol": "grouped_moe_nvfp4",
+      "description": "Use a small CPU route bucket/oracle to compare histogram totals, exclusive offsets, inverse-map membership and deterministic top-k weighted accumulation, including -1 and out-of-range route IDs."
+    },
+    {
+      "source": "src/phase7/xe2_nvfp4/grouped_moe.cpp",
+      "symbol": "grouped_moe_nvfp4",
+      "description": "Compare finite rows below, at and above FP16 overflow against a CPU calculation of the minimal power-of-two shift and restored weighted down-projection product; include Inf and NaN to inspect the finite-only branch."
+    },
+    {
+      "source": "src/phase7/xe2_nvfp4/grouped_moe.cpp",
+      "symbol": "mxfp4_scale_plane",
+      "description": "Decode paired E4M3 scales on CPU, reproduce geometric-mean log2 rounding and compare every cached E8M0 byte; then quantify output error against the exact NVFP4 CPU oracle rather than requiring equality."
+    },
+    {
+      "source": "src/phase7/xe2_nvfp4/grouped_moe_onednn.cpp",
+      "symbol": "onednn_grouped_gemm",
+      "description": "Source-inspect or CPU-drive an invalid live-cache geometry/failed allocation and confirm false return, one-time permanent g_armed clear, and native completion of the same leg."
+    },
+    {
+      "source": "src/phase7/xe2_probe/xe2_nvfp4_verify.cpp",
+      "symbol": "main",
+      "description": "Run the controlled 0x21/0x38 one-hot fixture when Xe2 hardware is available and require the low nibble to decode as even K with outputs alternating 0.5 and 1.0."
+    },
+    {
+      "source": "src/phase7/xe2_probe/onednn_grouped_probe.cpp",
+      "symbol": "oracle",
+      "description": "CPU-execute the scalar E2M1/E4M3 oracle for the small fixture and compare canonical-scale oneDNN output, empty-group handling, actual offsets and untouched padded tail."
+    },
+    {
+      "source": "src/phase7/xe2_probe/grouped_backend_verify.cpp",
+      "symbol": "run_compare",
+      "description": "Compare native and oneDNN full-entry dumps using the harness contract max_rel < 5e-2 and cosine > 0.9999; do not relabel this tolerance check as bit equivalence."
+    },
+    {
+      "source": "src/phase7/xe2_nvfp4/xe_2/grouped_gemm_xe2.hpp",
+      "symbol": "MoEGEMM",
+      "description": "Source-inspect that NVFP4 remains in the four-bit offset family, group size 16 selects the group-16 instantiation, and the chosen native policies retain tile_k=16."
+    }
+  ]
+}

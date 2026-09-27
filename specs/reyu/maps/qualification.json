@@ -1,0 +1,220 @@
+{
+  "id": "qualification",
+  "title": "Qualification, oracle, and build-evidence workflows",
+  "models": [
+    {
+      "path": "models/qualification.ryu",
+      "main": "qualification",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessHybridExact",
+        "witnessSemanticFallback",
+        "witnessMissingBankRefused",
+        "witnessGroupedScratchFailure",
+        "witnessUnavailableCrossover"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/phase7/Makefile",
+      "role": "build",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["all", "b70", "cpu", "libsb_b70_provider.so", "libsb_cpu_expert.so"],
+      "notes": "Models source-inspected linkage facts only: B70 composes the Phase-1 provider, grouped objects, QuixiCore-XPU, Level Zero and oneDNN under icpx/SYCL; the CPU library is a separate stock-g++/pthread target. Explicit Xe2 header prerequisites prevent stale grouped objects. No successful build is inferred."
+    },
+    {
+      "path": "src/phase7/allout_correctness_test.py",
+      "role": "harness",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["check", "run_case", "main"],
+      "notes": "Models the three-run assertion workflow: subset baseline, allout with zero CPU experts for exact policy parity, and a live CPU tier requiring loader verification, positive routes/dispatches, zero poller errors/skipped routes, resident experts and coherent output. This is test acceptance, not production execution semantics."
+    },
+    {
+      "path": "src/phase7/hybrid_b70_test.py",
+      "role": "harness",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["run_case", "main"],
+      "notes": "Models fresh all-CUDA and split:128+B70 child runs, mandatory hybrid marker, exact-token acceptance and the narrow fallback where both texts contain 42. Provider and hybrid computation remain in their owning branches."
+    },
+    {
+      "path": "src/phase7/nvfp4_testutil.py",
+      "role": "functional",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["make_plane", "dequant", "make_expert", "ffn"],
+      "notes": "Provides packed-byte fixtures and the vLLM dequantization plus FP32 SwiGLU oracle used for CPU-tier differential checks. The Reyu model abstracts tensor payloads to oracle-agreement evidence."
+    },
+    {
+      "path": "src/phase7/preemptive_surgery_test.py",
+      "role": "harness",
+      "models": ["models/qualification.ryu"],
+      "symbols": [
+        "check",
+        "build",
+        "expert_map_for",
+        "test_partition_is_exact",
+        "test_cuda_ids_are_sorted",
+        "test_non_cuda_experts_are_masked",
+        "test_all_cuda_layer_keeps_stock_path",
+        "test_subset_policy_matches_allout_cuda_set",
+        "test_input_scales_are_locally_indexed",
+        "test_placement_assigns_before_module_init",
+        "test_host_tiers_require_a_bank",
+        "test_owner_device_matches_accessor",
+        "main"
+      ],
+      "notes": "Models the aggregate assertion result for exact ownership, compact-id order and masks, stock tail behavior, policy agreement, version-sensitive loader naming, pre-super attribute ordering, accessor consistency and missing-bank refusal. Placement itself is not reimplemented."
+    },
+    {
+      "path": "src/phase7/prefill_chunk_bench.py",
+      "role": "harness",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["measure", "run", "main"],
+      "notes": "Models a warmed long-prompt TTFT measurement set with derived prefill throughput and dispatches per layer. The observed curve diagnoses chunking, dispatch overhead or kernel throughput; it is not a correctness proof."
+    },
+    {
+      "path": "src/phase7/prefill_chunk_bench.sh",
+      "role": "harness",
+      "models": ["models/qualification.ryu"],
+      "symbols": [],
+      "notes": "Shell launcher has no declared function symbols. It supplies one fresh process per chunk size because pinned staging buffers are construction-sized, and sweeps CHUNKS, LENGTHS and TRIALS into per-chunk JSON outputs."
+    },
+    {
+      "path": "src/phase7/prefill_probe.py",
+      "role": "harness",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["_install_logit_diagnostics", "_install_layer_diagnostics", "_enable_aggregation_capture", "main"],
+      "notes": "Models prompt/generated logprob completeness and finiteness plus, for requested B70 hybrid runs, stable provider generation, health, positive dispatch delta and graph-poller activity. Optional diagnostic hooks observe or fail the probe; they are not serving features."
+    },
+    {
+      "path": "src/phase7/prefill_probe.sh",
+      "role": "harness",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["run_case"],
+      "notes": "Launches all-CUDA, Phase-6 B70, forced-stream and all-out cases, optionally reusing cached JSON. Its final comparison prints prompt-logprob deltas but enforces no numeric closeness threshold, so oracleClose is explicit external evidence in the model."
+    },
+    {
+      "path": "src/phase7/stream_crossover_bench.py",
+      "role": "harness",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["make_plane", "build_routes", "timed", "main"],
+      "notes": "Models the availability and measurement evidence for a deployment-specific CPU-moe_forward versus CUDA ExpertStreamer crossover. Realistic filtered routes, a forced cold route for empty small samples, warmup and synchronized median timing are source behavior; no universal threshold is inferred."
+    },
+    {
+      "path": "tests/test_b70_output_wire.py",
+      "role": "harness",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["_write_unit_bank", "b70_binding", "wire_provider", "test_b70_output_wire_matches_actual_result", "test_grouped_swiglu_preserves_range_and_reused_scratch"],
+      "notes": "Models actual-provider assertions for exact wire selection (only environment value 1 means FP16), shape, finiteness and scalar oracle agreement; and grouped overflow-range preservation, numerical agreement, scratch reuse isolation and exact zero for invalid routes across both pipeline and wire modes. These are assertions, not provider implementation."
+    },
+    {
+      "path": "src/phase10/results/comparison.json",
+      "role": "artifact",
+      "models": ["models/qualification.ryu"],
+      "symbols": [],
+      "notes": "Generated historical comparison with no symbols or runtime behavior. It records 3/8 exact token agreement, common prefixes, KV-cache tokens, and captured throughput/ITL differences; values are evidence for one run, not guarantees or policy."
+    },
+    {
+      "path": "src/phase10/results/hybrid.json",
+      "role": "artifact",
+      "models": ["models/qualification.ryu"],
+      "symbols": [],
+      "notes": "Generated subset:16:8 hybrid result bank with correctness, single-stream, batched, prefill and worker snapshots. It is an input to comparison.json and has no executable symbols."
+    },
+    {
+      "path": "src/phase10/results/all-cuda.json",
+      "role": "artifact",
+      "models": ["models/qualification.ryu"],
+      "symbols": [],
+      "notes": "Generated all-CUDA result bank with correctness, single-stream, batched, prefill and worker snapshots. It is the captured baseline for comparison.json and has no executable symbols."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/placement.py",
+      "role": "dependency",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["AllOutPolicy", "LayerSubsetPolicy", "build_placement"],
+      "notes": "Referenced by the preemptive assertion harness. Ownership behavior is modeled in the placement branch; qualification only records assertion outcomes."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "role": "dependency",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["_reject_unsupported_preemptive_tiers"],
+      "notes": "Referenced for host-tier bank admission/refusal and hybrid execution. Qualification does not duplicate routed execution."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/cpu_expert_host.py",
+      "role": "dependency",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["PackedPlane", "CpuExpertHost"],
+      "notes": "Supplies packed fixtures and native CPU execution to the differential/crossover programs. Storage and execution semantics belong to the CPU-tier branch."
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/cpu_stream.py",
+      "role": "dependency",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["ExpertStreamer"],
+      "notes": "Supplies the CUDA streaming side of the deployment-specific crossover comparison; residency/streaming semantics are modeled elsewhere."
+    },
+    {
+      "path": "src/phase1/b70_provider.cpp",
+      "role": "dependency",
+      "models": ["models/qualification.ryu"],
+      "symbols": ["B70Provider"],
+      "notes": "Linked into the Phase-7 B70 library and exercised by actual-provider tests. Provider state and issue/take semantics belong to the provider model."
+    }
+  ],
+  "assumptions": [
+    "Qualification actions summarize assertions over other subsystems; passing them does not add behavior to the production serving path.",
+    "Fresh-process comparisons inherit an explicit model, bank, library, driver, vLLM and hardware environment; parity is meaningful only when those identities are controlled.",
+    "The hybrid semantic fallback is intentionally limited to both outputs containing 42 and is not a general semantic-equivalence oracle.",
+    "Prompt-logprob closeness to all-CUDA is an external comparison because prefill_probe.sh prints deltas but does not enforce a tolerance.",
+    "Only the exact string value 1 selects the FP16 B70 result wire in the covered binding; unset, 0 and 01 are FP32 cases.",
+    "CUDA absence makes the crossover unavailable; it does not establish that CPU compute is faster.",
+    "Phase-10 JSON values are generated historical observations and must not be promoted to current performance, parity, capacity or SLO guarantees.",
+    "The all-out harness phrase bf16 CPU GEMM describes compute precision informally; packed NVFP4 storage and dequantized floating-point computation are the source-backed representation boundary.",
+    "Reyu tensor and timing observations are abstract and atomic; floating-point tolerance, subprocess execution, driver ordering and performance require implementation evidence."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/phase7/preemptive_surgery_test.py",
+      "symbol": "main",
+      "description": "CPU-executable assertion sweep for disjoint/full ownership, compact sorted CUDA ids, offload masks, stock tail layers, policy agreement, loader-name compatibility, module initialization ordering, accessor consistency and missing-bank refusal."
+    },
+    {
+      "source": "src/phase7/nvfp4_testutil.py",
+      "symbol": "ffn",
+      "description": "Differentially compare CPU-tier native output against vLLM dequantization of identical packed NVFP4 bytes followed by the FP32 SwiGLU reference; cover nibble codes, scale exponents and global scale."
+    },
+    {
+      "source": "src/phase7/allout_correctness_test.py",
+      "symbol": "main",
+      "description": "Compare subset:K:N against allout:K:N:0 for exact policy parity, then require a live all-out CPU run to report loader verification, positive CPU routes/poller dispatches, zero errors/skips and coherent output."
+    },
+    {
+      "source": "src/phase7/stream_crossover_bench.py",
+      "symbol": "main",
+      "description": "On a qualified deployment, compare CpuExpertHost.moe_forward and ExpertStreamer.forward over identical packed experts and sampled cold routes to derive a local threshold; report pinning state and retain raw points rather than universalizing the crossover."
+    },
+    {
+      "source": "tests/test_b70_output_wire.py",
+      "symbol": "test_b70_output_wire_matches_actual_result",
+      "description": "With an explicitly supplied actual B70 library, compare FP16/FP32 wire dtype and values against the deterministic unit-bank sigmoid oracle for unset, 0, 1 and 01 flag values."
+    },
+    {
+      "source": "tests/test_b70_output_wire.py",
+      "symbol": "test_grouped_swiglu_preserves_range_and_reused_scratch",
+      "description": "With the actual provider, compare grouped output against the float64 oracle around FP16 overflow, repeat after changing activations to detect scratch-scale leakage, and require exact zero for all-invalid routes under both pipelines and wire modes."
+    },
+    {
+      "source": "src/phase7/prefill_probe.py",
+      "symbol": "main",
+      "description": "For a controlled real-model run, inspect complete finite prompt/generated logprobs and verify provider generation stability, health and dispatch deltas; compare the saved mean prompt logprob with an identity-matched all-CUDA baseline using an explicitly chosen tolerance."
+    },
+    {
+      "source": "src/phase10/results/comparison.json",
+      "symbol": "token_agreement",
+      "description": "Source-inspect that the saved report records only 3 of 8 exact token matches and treat this as a counterexample to blanket token-identical hybrid claims, not as a current-code test."
+    }
+  ]
+}

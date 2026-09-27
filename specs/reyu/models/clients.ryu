@@ -1,0 +1,293 @@
+/// HTTP measurement and human-facing chat/tool client loops.
+/// Sources: benchmarks/slo_split_matrix.py::one_request, summarize;
+/// benchmarks/sb_chat.py::wait_for_server, stream_turn, main;
+/// benchmarks/sb_agent.py::parse_tool_calls, run_tool, stream_turn,
+/// trim_oversized_history, main.
+///
+/// Abstraction and atomicity: transport setup and one SSE delivery are actions.
+/// Token text is abstracted to Empty/Reasoning/Content/ToolXml while cumulative
+/// usage, delivery bundling, termination, history effects, and tool-loop bounds
+/// remain observable. One agentToolRound atomically represents one model
+/// generation followed by its sequential parsed tool calls; device/server work
+/// and tool payload bytes remain outside this finite model.
+module clients {
+  type Client = None | SloCollector | Chat | Agent
+  type Phase = Offline | AwaitingServer | Ready | Streaming | Tooling | TurnDone | Failed | Stopped
+  type Payload = Empty | Reasoning | Content | ToolXml
+  type Summary = NotSummarized | NoSuccessfulRequests | PartialMeasurements | MeasurementsAvailable
+  type ClientState = {
+    client: Client,
+    phase: Phase,
+    usage: int,
+    usageSeen: bool,
+    deliveries: int,
+    bundled: bool,
+    doneMarker: bool,
+    contentSeen: bool,
+    reasoningSeen: bool,
+    contentHistory: int,
+    reasoningHistory: int,
+    pendingUser: bool,
+    attempts: int,
+    successes: int,
+    failures: int,
+    summary: Summary,
+    toolIterations: int,
+    toolResults: int,
+    toolErrors: int,
+    contextTrimmed: bool,
+    capped: bool,
+  }
+
+  var s: ClientState
+
+  pure def validUsage(previous: int, current: int): bool =
+    previous >= 0 and current >= previous
+  pure def deliveryDelta(previous: int, current: int): int = current - previous
+  pure def measurementValid(doneMarker: bool, usageSeen: bool, deliveries: int): bool =
+    doneMarker and usageSeen and deliveries > 0
+  pure def classifySummary(successes: int, failures: int): Summary =
+    if (successes == 0) NoSuccessfulRequests
+    else if (failures > 0) PartialMeasurements
+    else MeasurementsAvailable
+
+  action init = s' = {
+    client: None, phase: Offline, usage: 0, usageSeen: false,
+    deliveries: 0, bundled: false, doneMarker: false,
+    contentSeen: false, reasoningSeen: false,
+    contentHistory: 0, reasoningHistory: 0, pendingUser: false,
+    attempts: 0, successes: 0, failures: 0, summary: NotSummarized,
+    toolIterations: 0, toolResults: 0, toolErrors: 0,
+    contextTrimmed: false, capped: false,
+  }
+
+  action configure(client: Client): bool = all {
+    s.phase == Offline, client != None,
+    s' = { ...s, client: client, phase: AwaitingServer },
+  }
+  action serverReady = all {
+    s.phase == AwaitingServer,
+    s' = { ...s, phase: Ready },
+  }
+  action serverTimeout = all {
+    s.phase == AwaitingServer,
+    s' = { ...s, phase: Failed },
+  }
+
+  action startSloRequest = all {
+    s.client == SloCollector,
+    s.phase == Ready or s.phase == TurnDone,
+    s' = { ...s, phase: Streaming, usage: 0, usageSeen: false,
+      deliveries: 0, bundled: false, doneMarker: false,
+      contentSeen: false, reasoningSeen: false },
+  }
+  /// Continuous cumulative usage, not SSE frame count, owns token identity.
+  action sloDelivery(cumulativeUsage: int): bool = all {
+    s.client == SloCollector, s.phase == Streaming,
+    cumulativeUsage > s.usage, validUsage(s.usage, cumulativeUsage),
+    s' = { ...s, usage: cumulativeUsage, usageSeen: true,
+      deliveries: s.deliveries + 1,
+      bundled: s.bundled or deliveryDelta(s.usage, cumulativeUsage) != 1,
+      contentSeen: true },
+  }
+  /// Decreasing/invalid usage, HTTP/chunk errors, or payload without required
+  /// usage become a failed record rather than an escaped exception.
+  action failSloProtocol = all {
+    s.client == SloCollector, s.phase == Streaming,
+    s' = { ...s, phase: Failed, attempts: s.attempts + 1,
+      failures: s.failures + 1 },
+  }
+  action finishSlo(doneMarker: bool): bool = all {
+    s.client == SloCollector, s.phase == Streaming,
+    measurementValid(doneMarker, s.usageSeen, s.deliveries),
+    s' = { ...s, phase: TurnDone, doneMarker: doneMarker,
+      attempts: s.attempts + 1, successes: s.successes + 1 },
+  }
+  action rejectIncompleteSlo(doneMarker: bool): bool = all {
+    s.client == SloCollector, s.phase == Streaming,
+    not(measurementValid(doneMarker, s.usageSeen, s.deliveries)),
+    s' = { ...s, phase: Failed, doneMarker: doneMarker,
+      attempts: s.attempts + 1, failures: s.failures + 1 },
+  }
+  /// A failed request is retained; the enclosing cell can continue collecting.
+  action continueSloCell = all {
+    s.client == SloCollector, s.phase == Failed,
+    s' = { ...s, phase: Ready },
+  }
+  /// This classifies measurement availability only. Source has no numeric SLO.
+  action summarizeSlo = all {
+    s.client == SloCollector,
+    s.phase == TurnDone or s.phase == Failed or s.phase == Ready,
+    s.attempts > 0,
+    s' = { ...s, phase: Stopped,
+      summary: classifySummary(s.successes, s.failures) },
+  }
+
+  action startChatTurn = all {
+    s.client == Chat, s.phase == Ready or s.phase == TurnDone,
+    s' = { ...s, phase: Streaming, pendingUser: true, usage: 0,
+      usageSeen: false, deliveries: 0, doneMarker: false,
+      contentSeen: false, reasoningSeen: false },
+  }
+  action interactiveDelta(payload: Payload, cumulativeUsage: int): bool = all {
+    s.client == Chat or s.client == Agent, s.phase == Streaming,
+    cumulativeUsage >= 0, validUsage(s.usage, cumulativeUsage),
+    s' = { ...s, usage: cumulativeUsage,
+      usageSeen: s.usageSeen or cumulativeUsage > 0,
+      deliveries: if (payload == Empty) s.deliveries else s.deliveries + 1,
+      contentSeen: s.contentSeen or payload == Content or payload == ToolXml,
+      reasoningSeen: s.reasoningSeen or payload == Reasoning },
+  }
+  /// Chat accepts [DONE] or transport EOF; reasoning is intentionally not replayed.
+  action finishChat(doneMarker: bool): bool = all {
+    s.client == Chat, s.phase == Streaming,
+    s' = { ...s, phase: TurnDone, doneMarker: doneMarker, pendingUser: false,
+      contentHistory: s.contentHistory + (if (s.contentSeen) 1 else 0),
+      reasoningHistory: s.reasoningHistory,
+      attempts: s.attempts + 1, successes: s.successes + 1 },
+  }
+  /// Handled request failure removes the pending user message.
+  action failChatTurn = all {
+    s.client == Chat, s.phase == Streaming, s.pendingUser,
+    s' = { ...s, phase: Ready, pendingUser: false,
+      attempts: s.attempts + 1, failures: s.failures + 1 },
+  }
+  action resetChat = all {
+    s.client == Chat, s.phase == Ready or s.phase == TurnDone,
+    s' = { ...s, phase: Ready, contentHistory: 0,
+      reasoningHistory: 0, pendingUser: false },
+  }
+
+  action startAgentRequest = all {
+    s.client == Agent, s.phase == Ready or s.phase == TurnDone,
+    s' = { ...s, phase: Streaming, pendingUser: true,
+      usage: 0, usageSeen: false, deliveries: 0, doneMarker: false,
+      contentSeen: false, reasoningSeen: false, toolIterations: 0,
+      toolResults: 0, toolErrors: 0, contextTrimmed: false, capped: false },
+  }
+  /// Raw assistant XML enters history while display filtering is not modeled as history.
+  action agentToolRound(toolSucceeded: bool): bool = all {
+    s.client == Agent, s.phase == Streaming, s.pendingUser,
+    s.toolIterations < 20,
+    s' = { ...s,
+      phase: if (s.toolIterations + 1 == 20) TurnDone else Streaming,
+      toolIterations: s.toolIterations + 1,
+      toolResults: s.toolResults + 1,
+      toolErrors: s.toolErrors + (if (toolSucceeded) 0 else 1),
+      contentHistory: s.contentHistory + 2,
+      reasoningHistory: s.reasoningHistory,
+      capped: s.toolIterations + 1 == 20,
+      pendingUser: if (s.toolIterations + 1 == 20) false else true,
+    },
+  }
+  action finishAgentWithoutTool(doneMarker: bool): bool = all {
+    s.client == Agent, s.phase == Streaming, s.pendingUser,
+    s' = { ...s, phase: TurnDone, doneMarker: doneMarker,
+      pendingUser: false, contentHistory: s.contentHistory + 1,
+      reasoningHistory: s.reasoningHistory,
+      attempts: s.attempts + 1, successes: s.successes + 1 },
+  }
+  /// A context-size HTTP error may replace large interior messages and retry;
+  /// the retry consumes one of the bounded model-call iterations.
+  action trimContextAndRetry = all {
+    s.client == Agent, s.phase == Streaming, s.pendingUser,
+    not(s.contextTrimmed), s.toolIterations < 20,
+    s' = { ...s, contextTrimmed: true,
+      toolIterations: s.toolIterations + 1 },
+  }
+  /// Other server/connection failures pop only the current tail message.
+  action failAgentTurn = all {
+    s.client == Agent, s.phase == Streaming,
+    s' = { ...s, phase: Ready, pendingUser: false,
+      attempts: s.attempts + 1, failures: s.failures + 1 },
+  }
+  action stopInteractive = all {
+    s.client == Chat or s.client == Agent,
+    s.phase == Ready or s.phase == TurnDone,
+    s' = { ...s, phase: Stopped },
+  }
+  action stay = s' = s
+
+  action step = any {
+    configure(SloCollector), configure(Chat), configure(Agent), serverReady,
+    serverTimeout, startSloRequest, sloDelivery(1), sloDelivery(2),
+    sloDelivery(4), failSloProtocol, finishSlo(true),
+    rejectIncompleteSlo(false), continueSloCell, summarizeSlo,
+    startChatTurn, interactiveDelta(Reasoning, 0),
+    interactiveDelta(Content, 1), interactiveDelta(ToolXml, 1),
+    finishChat(true), finishChat(false), failChatTurn, resetChat,
+    startAgentRequest, agentToolRound(true), agentToolRound(false),
+    finishAgentWithoutTool(true), finishAgentWithoutTool(false),
+    trimContextAndRetry, failAgentTurn, stopInteractive, stay,
+  }
+
+  val inv = and {
+    s.usage >= 0, s.deliveries >= 0, s.contentHistory >= 0,
+    s.reasoningHistory == 0,
+    s.attempts >= s.successes + s.failures,
+    s.toolIterations >= 0, s.toolIterations <= 20,
+    s.toolResults >= s.toolErrors,
+    s.capped implies (s.client == Agent and s.toolIterations == 20),
+    s.summary == NoSuccessfulRequests implies s.successes == 0,
+    s.summary == PartialMeasurements implies s.successes > 0 and s.failures > 0,
+    s.summary == MeasurementsAvailable implies s.successes > 0 and s.failures == 0,
+  }
+
+  val bundledDeliveryWitness = s.client == SloCollector and s.bundled
+  val missingDoneFailureWitness = s.client == SloCollector and
+    s.phase == Failed and not(s.doneMarker)
+  val partialMeasurementWitness = s.summary == PartialMeasurements
+  val eofAcceptedChatWitness = s.client == Chat and s.phase == TurnDone and
+    not(s.doneMarker)
+  val reasoningExcludedWitness = s.reasoningSeen and s.reasoningHistory == 0
+  val toolErrorAsResultWitness = s.client == Agent and s.toolErrors > 0 and
+    s.phase == Streaming
+  val contextRetryWitness = s.client == Agent and s.contextTrimmed and
+    s.phase == Streaming
+  val toolCapWitness = s.client == Agent and s.capped and s.phase == TurnDone
+
+  run validSloRequestTest = init.then(configure(SloCollector)).then(serverReady)
+    .then(startSloRequest).then(sloDelivery(1)).then(sloDelivery(2))
+    .then(finishSlo(true)).then(summarizeSlo)
+    .expect(s.summary == MeasurementsAvailable and inv)
+  run bundledDeliveryInvalidatesItlTest = init.then(configure(SloCollector))
+    .then(serverReady).then(startSloRequest).then(sloDelivery(1))
+    .then(sloDelivery(4)).expect(bundledDeliveryWitness and inv)
+    .then(finishSlo(true)).expect(inv)
+  run missingDoneRejectsMeasurementTest = init.then(configure(SloCollector))
+    .then(serverReady).then(startSloRequest).then(sloDelivery(1))
+    .then(rejectIncompleteSlo(false)).expect(missingDoneFailureWitness and inv)
+  run partialCellStillHasMeasurementsTest = init.then(configure(SloCollector))
+    .then(serverReady).then(startSloRequest).then(sloDelivery(1))
+    .then(finishSlo(true)).then(startSloRequest).then(failSloProtocol)
+    .then(summarizeSlo).expect(partialMeasurementWitness and inv)
+  run chatAcceptsEofTest = init.then(configure(Chat)).then(serverReady)
+    .then(startChatTurn).then(interactiveDelta(Reasoning, 0))
+    .then(interactiveDelta(Content, 1)).then(finishChat(false))
+    .expect(eofAcceptedChatWitness and reasoningExcludedWitness and inv)
+  run chatFailureRollsBackPendingUserTest = init.then(configure(Chat))
+    .then(serverReady).then(startChatTurn).then(failChatTurn)
+    .expect(not(s.pendingUser) and s.phase == Ready and inv)
+  run agentToolErrorIsNormalResultTest = init.then(configure(Agent))
+    .then(serverReady).then(startAgentRequest).then(agentToolRound(false))
+    .expect(toolErrorAsResultWitness and inv)
+    .then(finishAgentWithoutTool(false)).expect(reasoningExcludedWitness or inv)
+  run agentContextTrimRetryTest = init.then(configure(Agent)).then(serverReady)
+    .then(startAgentRequest).then(trimContextAndRetry)
+    .expect(contextRetryWitness and inv)
+  run agentTwentyRoundCapTest = init.then(configure(Agent)).then(serverReady)
+    .then(startAgentRequest)
+    .then(agentToolRound(true)).then(agentToolRound(true))
+    .then(agentToolRound(true)).then(agentToolRound(true))
+    .then(agentToolRound(true)).then(agentToolRound(true))
+    .then(agentToolRound(true)).then(agentToolRound(true))
+    .then(agentToolRound(true)).then(agentToolRound(true))
+    .then(agentToolRound(true)).then(agentToolRound(true))
+    .then(agentToolRound(true)).then(agentToolRound(true))
+    .then(agentToolRound(true)).then(agentToolRound(true))
+    .then(agentToolRound(true)).then(agentToolRound(true))
+    .then(agentToolRound(true)).then(agentToolRound(true))
+    .expect(toolCapWitness and inv)
+  run serverReadinessTimeoutTest = init.then(configure(Chat))
+    .then(serverTimeout).expect(s.phase == Failed and inv)
+}

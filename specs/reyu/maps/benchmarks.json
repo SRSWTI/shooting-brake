@@ -1,0 +1,234 @@
+{
+  "id": "benchmarks",
+  "title": "Benchmark identity, comparison, SLO, offload, and client workflows",
+  "models": [
+    {
+      "path": "models/benchmarks.ryu",
+      "main": "benchmarks",
+      "invariant": "inv",
+      "witnesses": [
+        "completedWithoutReportWitness",
+        "immutableIdentityRejectionWitness",
+        "recordedColdContaminationWitness",
+        "unmatchedComparisonWitness",
+        "cpuComparisonEvidenceWitness",
+        "pairwiseIdentityFailureWitness"
+      ]
+    },
+    {
+      "path": "models/clients.ryu",
+      "main": "clients",
+      "invariant": "inv",
+      "witnesses": [
+        "bundledDeliveryWitness",
+        "missingDoneFailureWitness",
+        "partialMeasurementWitness",
+        "eofAcceptedChatWitness",
+        "reasoningExcludedWitness",
+        "toolErrorAsResultWitness",
+        "contextRetryWitness",
+        "toolCapWitness"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "benchmarks/compare.py",
+      "role": "behavior",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["CONFIGS", "run_config", "_common_prefix", "compare_correctness", "_delta", "compare_throughput", "compare_capacity", "main"],
+      "notes": "Models positional comparison and missing provenance gate. run_config names absent benchmarks/benchmark.py; capacity consumption also disagrees with the current nested producer schema."
+    },
+    {
+      "path": "benchmarks/compare_pro_matrix.py",
+      "role": "functional",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["pro_sweep_peak", "our_grid_cells", "decode_and_peak_tables", "pro_concurrent_means", "ours_concurrent_means", "fmt_gap", "report_ttft", "history_path", "history_table", "all_metrics_c1_table", "main"],
+      "notes": "Maps stored measurements to markdown. Row-order concurrency, nominal context equivalence, missing-data tolerance, and same-checkpoint language are assumptions/inferences rather than validated identity."
+    },
+    {
+      "path": "benchmarks/matrix_progress.sh",
+      "role": "harness",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": [],
+      "notes": "Top-level shell observer has no named functions. It counts report.json rather than successful manifests and probes fixed port 8017; observations are advisory."
+    },
+    {
+      "path": "benchmarks/matrix_runner.py",
+      "role": "behavior",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["RunConfig", "parse_args", "_identity_json", "_read_json_object", "_load_server_manifest", "_client_identity", "_run_identity", "_resume_error", "_resume_cells", "_prepare_run", "_metric_key", "_parse_prometheus_metrics", "_scrape_metrics", "_cell_seed", "_guidellm_command", "_run_profile", "_preflight_metrics", "main"],
+      "notes": "Primary canonical identity, manifest, resume, command, cell execution, result, and failure source. Completion is exact integer return_code zero; a report is not required."
+    },
+    {
+      "path": "benchmarks/matrix_tiered.sh",
+      "role": "harness",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["say", "mem_gib", "stop_server", "start_server", "cells"],
+      "notes": "Restarts by context but reuses one identity directory while context belongs to identity. Runner failures and low-memory observations do not prevent the final done banner."
+    },
+    {
+      "path": "benchmarks/offload_benchmark.py",
+      "role": "behavior",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["StreamTiming", "_pct", "_latency_summary", "ADAPTER_VARS", "apply_config_env", "build_engine", "stream_one", "stream_many", "adapter_source_sha", "stream_each", "run_correctness", "run_single_stream", "run_batched", "run_prefill", "_context_prompt", "run_context_sweep", "run_capacity_frontier", "worker_stats", "reset_stats", "run", "main"],
+      "notes": "Models construction-time all-CUDA, hybrid, and all-out modes plus measured versus derived evidence. Source digest path and environment sanitation omissions are retained as provenance limits."
+    },
+    {
+      "path": "benchmarks/offload_summarize.py",
+      "role": "functional",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["_load", "main"],
+      "notes": "Informational reducer. Baseline is inferred from zero B70 share, identity is unchecked, and CPU route/service attribution is absent."
+    },
+    {
+      "path": "benchmarks/pipeline_identity_gate.py",
+      "role": "functional",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["capture", "compare", "main"],
+      "notes": "Pairwise deterministic provider-output byte gate. The header's A1/A2 nondeterminism envelope is not implemented or modeled as fact."
+    },
+    {
+      "path": "benchmarks/r15_cold_warm_matrix.py",
+      "role": "behavior",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["pct", "summarise", "host_mem", "nvidia_mem", "card_freq_mhz", "Metrics", "ExactPromptMint", "Res", "one_request", "trace_paths", "analyse_window", "run_pass", "main"],
+      "notes": "Models prefix-cache cold/repeat passes, evidence collection, warnings, and weak resume identity. Cold does not denote the CPU expert tier."
+    },
+    {
+      "path": "benchmarks/run6_decode.sh",
+      "role": "harness",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": [],
+      "notes": "Historical top-level shell orchestration has no named functions. Warm/PSI handling and skip-existing evidence are described; config equivalence is not hashed."
+    },
+    {
+      "path": "benchmarks/run6_finish.sh",
+      "role": "harness",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": [],
+      "notes": "Historical top-level shell orchestration has no named functions. Selected-cell deletion, nonfatal spot checks, and presence-based completion are inventory contracts, not measured claims."
+    },
+    {
+      "path": "benchmarks/run_matrix.sh",
+      "role": "harness",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": [],
+      "notes": "Top-level shell entry has no named functions. Its per-cell invocations conflict with whole-run identity because contexts/profiles change at one model directory."
+    },
+    {
+      "path": "benchmarks/run_offload_sweep.sh",
+      "role": "harness",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["run_one"],
+      "notes": "Fresh subprocess per arm; CPU all-out and streaming placements are opt-in. Existing pathname alone is treated as reusable evidence."
+    },
+    {
+      "path": "benchmarks/sb_agent.py",
+      "role": "behavior",
+      "models": ["models/clients.ryu"],
+      "symbols": ["_read", "_write", "_edit", "_glob", "_grep", "_bash", "TOOLS", "TOOL_FNS", "make_tool_schema", "render_system_prompt", "run_tool", "_coerce", "parse_tool_calls", "strip_tool_calls", "wait_for_server", "health_check", "TagFilter", "ChatRequestError", "Turn", "stream_turn", "trim_oversized_history", "main"],
+      "notes": "Models custom XML, sequential tool results, normal-result error channel, raw XML history, context retry, and the 20-generation bound. Tool payload bytes and filesystem side effects are abstract."
+    },
+    {
+      "path": "benchmarks/sb_chat.py",
+      "role": "behavior",
+      "models": ["models/clients.ryu"],
+      "symbols": ["Turn", "wait_for_server", "stream_turn", "main"],
+      "notes": "Models readiness, command/turn loop, permissive EOF, server-usage accounting, pending-user rollback, and exclusion of reasoning from history."
+    },
+    {
+      "path": "benchmarks/slo_split_matrix.py",
+      "role": "behavior",
+      "models": ["models/clients.ryu"],
+      "symbols": ["build_prompt", "one_request", "run_cell", "summarize", "main_async", "main"],
+      "notes": "Primary continuous-usage request validity and aggregation contract. It measures SLO-relevant metrics but contains no numeric SLO pass/fail policy."
+    },
+    {
+      "path": "benchmarks/stream_matrix.py",
+      "role": "behavior",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["MODES", "percentile", "cell", "run_mode", "run", "main"],
+      "notes": "Models serial fresh engines and dispatch/stream/all-out branches at the benchmark lifecycle level. Appended suffixes do not establish prefix-cache invalidation."
+    },
+    {
+      "path": "benchmarks/stream_matrix.sh",
+      "role": "harness",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": [],
+      "notes": "Top-level shell launcher has no named functions. One Python process constructs several engines; explicit-empty MODES is an argparse error, not an empty sweep."
+    },
+    {
+      "path": "benchmarks/watch_and_chain.sh",
+      "role": "harness",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["log", "spawn_agent", "b70_mib"],
+      "notes": "Watcher/audit/teardown/Track-B composition. External chain_audit owns the gate; watched-process status is unavailable and persistent/unreadable B70 residency can still proceed."
+    },
+    {
+      "path": "benchmarks/weight_digest.py",
+      "role": "functional",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["_load_only", "_read", "compare", "main"],
+      "notes": "Post-hoc/preemptive addressing comparison with explicitly accepted activation/fold differences. Output wording is narrower than literal all-field identity and capture provenance is incomplete."
+    },
+    {
+      "path": "tests/test_matrix_runner_identity.py",
+      "role": "harness",
+      "models": ["models/benchmarks.ryu"],
+      "symbols": ["_config", "_write_json", "_evidence", "_cell", "_assert_rejected_unchanged", "test_fresh_identity_and_matching_resume_preserve_evidence", "test_identity_ignores_operational_paths_and_manifest_serialization", "test_changed_workload_rejects_without_overwriting", "test_changed_server_contents_rejects_without_overwriting", "test_changed_runner_source_rejects_without_overwriting", "test_stored_older_client_identity_rejects_without_overwriting", "test_invalid_server_manifest_rejects_before_creating_run", "test_legacy_run_without_identity_rejects_without_overwriting", "test_missing_required_cell_field_rejects_without_overwriting", "test_incompatible_cell_metadata_rejects_without_overwriting", "test_malformed_cell_json_rejects_without_overwriting", "test_orphan_cell_artifacts_reject_without_overwriting", "test_resume_only_returns_successful_cells_as_completed", "test_cli_rejects_legacy_output_before_unreachable_network_target", "test_duration_policy_preserves_requested_window", "test_seed_policies_are_explicit_and_reproducible"],
+      "notes": "Executable source contract for matrix identity/resume, read but not run here. It does not integration-test the shell wrappers' fragmented invocations."
+    }
+  ],
+  "assumptions": [
+    "Positive bounded integers abstract canonical JSON SHA-256 identities; collision resistance and filesystem bytes are outside the model.",
+    "One subprocess, cold/warm pass, engine arm, SSE delivery, or agent model-plus-tool round is atomic at its stated boundary.",
+    "Measured evidence is distinct from source-derived summaries and inferred/manual classifications; no latency or speed claim is introduced.",
+    "Matrix return_code zero means resumable completion exactly as implemented, not result-file validity or SLO success.",
+    "Cold/warm denotes prefix-cache state; AllOut denotes the optional CPU/DRAM expert tier.",
+    "Interactive EOF acceptance is preserved even though DONE and finish_reason are not validated.",
+    "GuideLLM, vLLM, model/tokenizer checkpoints, plugin/provider libraries, hardware runtimes, Prometheus, native traces, and external result trees remain dependency boundaries."
+  ],
+  "implementation_checks": [
+    {
+      "source": "benchmarks/matrix_runner.py",
+      "symbol": "_run_identity",
+      "description": "CPU-only differential: construct two RunConfig values and canonical server-manifest objects to show excluded operational paths preserve identity while workload/server-content changes alter it."
+    },
+    {
+      "source": "benchmarks/matrix_runner.py",
+      "symbol": "_resume_cells",
+      "description": "CPU-only temporary-directory differential: exercise rc 0, nonzero, null, malformed, mismatched, and orphan manifests and compare returned completed-cell sets or rejection without overwrite."
+    },
+    {
+      "source": "benchmarks/slo_split_matrix.py",
+      "symbol": "summarize",
+      "description": "CPU-only pure-data comparison: feed successful, failed, and bundled-delivery result dictionaries and verify measurement availability and missing ITL remain distinct from numeric SLO judgment."
+    },
+    {
+      "source": "benchmarks/compare.py",
+      "symbol": "_common_prefix",
+      "description": "CPU-only differential over token lists for exact, partial-prefix, and empty outputs; separately inspect that compare_correctness reports rather than rejects divergence."
+    },
+    {
+      "source": "benchmarks/pipeline_identity_gate.py",
+      "symbol": "compare",
+      "description": "CPU-only NPZ differential: compare identical arrays, differing cell sets, and one-element byte changes to establish the implemented pairwise gate without asserting the unimplemented envelope."
+    },
+    {
+      "source": "benchmarks/weight_digest.py",
+      "symbol": "compare",
+      "description": "CPU-only JSONL differential: vary addressing digests, activation/fold fields, alpha ratios, missing vectors, and duplicate layers to characterize the actual accepted classification."
+    },
+    {
+      "source": "benchmarks/sb_agent.py",
+      "symbol": "parse_tool_calls",
+      "description": "CPU-only parser comparison for multiple calls, repeated parameters, coercible and non-coercible scalars, unknown parameters, and incomplete XML."
+    },
+    {
+      "source": "benchmarks/offload_benchmark.py",
+      "symbol": "apply_config_env",
+      "description": "Source inspection comparison of effective environment for AllCuda, Hybrid, and AllOut, including inherited PREEMPTIVE_SURGERY; a real CPU-tier performance comparison still requires the configured server hardware and must bind full identity."
+    }
+  ]
+}

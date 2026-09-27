@@ -1,0 +1,281 @@
+/// Breadth-first executable abstraction of the numerical, latency, transport,
+/// serving, and orchestration probes under benchmarks/.
+/// Sources: every file mapped in ../maps/performance_probes.json; representative
+/// symbols include b12x_bank_poc.py::main, marlin_prefill_poc.py::cpu_reference,
+/// b70_matrix_probe.py::run_cell, cuda_decode_profile.py::completion_request,
+/// compare_preemptive.py::main, and dummy_b70_provider.cpp::DummyPoller::loop.
+///
+/// Atomicity: selecting an arm, admitting identity/shape, taking one timing
+/// sample, summarising a bounded sample window, and applying a verdict are
+/// separate steps. Device execution, HTTP transport, subprocess execution and
+/// floating-point tensors are external. Times are non-negative integer ticks;
+/// cosine is represented in ten-thousandths and relative L2 in thousandths.
+/// Three samples stand for a finite window: median and mean are exact for that
+/// window, P90 uses its maximum, and union/sum uses the accumulated total.
+module performance_probes {
+  type Phase = Idle | Selected | Admitted | Sampling | Aggregated | Observed | Accepted | Failed
+  type ProbeClass = Numerical | LiveServing | DeviceKernel | NativeTrace | Transport | Harness | Control | DummyProvider
+  type TimingIdentity = NoTiming | HttpWall | TextChunkGap | EngineYield | DeviceEvent | NativeService | HostWall
+  type Aggregation = NoAggregation | Single | Mean3 | Median3 | P90Of3 | Sum3
+  type Gate = Advisory | B12xBankGate | MarlinGate | W4A16Gate | LogprobGate | LagunaGate | ExactCountGate | ManifestGate | PreemptiveGate
+  type State = {
+    phase: Phase,
+    probeClass: ProbeClass,
+    timing: TimingIdentity,
+    aggregation: Aggregation,
+    gate: Gate,
+    armCode: int,
+    identityOk: bool,
+    shapeOk: bool,
+    sampleCount: int,
+    sample0: int,
+    sample1: int,
+    sample2: int,
+    sampleTotal: int,
+    sampleMin: int,
+    sampleMax: int,
+    reported: int,
+    qualityChecked: bool,
+    qualityOk: bool,
+    outputValid: bool,
+    childFailed: bool,
+    errorObserved: bool,
+    experimentOnly: bool,
+  }
+
+  var s: State
+
+  pure def min2(a: int, b: int): int = if (a < b) a else b
+  pure def max2(a: int, b: int): int = if (a > b) a else b
+  pure def min3(a: int, b: int, c: int): int = min2(min2(a, b), c)
+  pure def max3(a: int, b: int, c: int): int = max2(max2(a, b), c)
+  pure def median3(a: int, b: int, c: int): int = a + b + c - min3(a, b, c) - max3(a, b, c)
+
+  /// Encodes only enforced source verdicts. Advisory prose/kill strings never
+  /// become acceptance gates. p/q/r meanings are gate-specific and exercised
+  /// with concrete fixtures below.
+  pure def gatePass(g: Gate, p: int, q: int, r: int): bool =
+    if (g == B12xBankGate) (p >= 9900 and q <= 150)
+    else if (g == MarlinGate) (p >= 9990 and q <= 20)
+    else if (g == W4A16Gate) (p > 9990)
+    else if (g == LogprobGate) (p <= q)
+    else if (g == LagunaGate) (p > 1500 and q == 0)
+    else if (g == ExactCountGate) (p == q and q > 0)
+    else if (g == ManifestGate) (p == 0)
+    else if (g == PreemptiveGate) (r > 0 and p * 2 <= q * 3)
+    else true
+
+  action init = s' = {
+    phase: Idle,
+    probeClass: Numerical,
+    timing: NoTiming,
+    aggregation: NoAggregation,
+    gate: Advisory,
+    armCode: 0,
+    identityOk: false,
+    shapeOk: false,
+    sampleCount: 0,
+    sample0: 0,
+    sample1: 0,
+    sample2: 0,
+    sampleTotal: 0,
+    sampleMin: 0,
+    sampleMax: 0,
+    reported: 0,
+    qualityChecked: false,
+    qualityOk: false,
+    outputValid: false,
+    childFailed: false,
+    errorObserved: false,
+    experimentOnly: true,
+  }
+
+  /// armCode is a bounded identity for a concrete CLI/mode branch. The chapter
+  /// and source map name the real arms; the model never treats it as production.
+  action selectArm(c: ProbeClass, t: TimingIdentity, a: Aggregation, g: Gate, arm: int): bool = all {
+    s.phase == Idle,
+    arm >= 1,
+    arm <= 40,
+    s' = { ...s, phase: Selected, probeClass: c, timing: t, aggregation: a, gate: g, armCode: arm },
+  }
+
+  /// Models the shape/provenance checks that precede measurement. Some real
+  /// probes admit only assumed constants; callers expose that choice explicitly.
+  action admit(identity: bool, shape: bool): bool = all {
+    s.phase == Selected,
+    s' = { ...s,
+      phase: if (identity and shape) Admitted else Failed,
+      identityOk: identity,
+      shapeOk: shape,
+      errorObserved: not(identity and shape),
+    },
+  }
+
+  action recordSample(value: int): bool = all {
+    or { s.phase == Admitted, s.phase == Sampling },
+    s.aggregation != NoAggregation,
+    value >= 0,
+    value <= 100000,
+    s.sampleCount < 3,
+    s' = { ...s,
+      phase: Sampling,
+      sampleCount: s.sampleCount + 1,
+      sample0: if (s.sampleCount == 0) value else s.sample0,
+      sample1: if (s.sampleCount == 1) value else s.sample1,
+      sample2: if (s.sampleCount == 2) value else s.sample2,
+      sampleTotal: s.sampleTotal + value,
+      sampleMin: if (s.sampleCount == 0) value else min2(s.sampleMin, value),
+      sampleMax: if (s.sampleCount == 0) value else max2(s.sampleMax, value),
+    },
+  }
+
+  action aggregate = all {
+    s.phase == Sampling,
+    or {
+      s.aggregation == Single and s.sampleCount == 1,
+      s.aggregation != Single and s.sampleCount == 3,
+    },
+    s' = { ...s,
+      phase: Aggregated,
+      reported:
+        if (s.aggregation == Single) s.sample0
+        else if (s.aggregation == Mean3) s.sampleTotal / 3
+        else if (s.aggregation == Median3) median3(s.sample0, s.sample1, s.sample2)
+        else if (s.aggregation == P90Of3) s.sampleMax
+        else s.sampleTotal,
+    },
+  }
+
+  /// p/q/r are bounded observations, not precomputed outcomes: cosine/rel-L2,
+  /// max delta/tolerance, speedup/failed-check count, count pairs, failed cells,
+  /// or worst delta/noise floor/positive peak saving according to gatePass.
+  action assess(p: int, q: int, r: int): bool = all {
+    or { s.phase == Admitted, s.phase == Aggregated },
+    p >= 0, p <= 10000,
+    q >= 0, q <= 10000,
+    r >= 0, r <= 10000,
+    s.gate != Advisory,
+    s' = { ...s,
+      phase: if (gatePass(s.gate, p, q, r)) Accepted else Failed,
+      qualityChecked: true,
+      qualityOk: gatePass(s.gate, p, q, r),
+      outputValid: gatePass(s.gate, p, q, r),
+      errorObserved: not(gatePass(s.gate, p, q, r)),
+    },
+  }
+
+  /// Diagnostics such as FP8 regime labels, layout bisections, throughput
+  /// ceilings, and Laguna-L rows are recorded but do not accept a candidate.
+  action recordAdvisory(finite: bool): bool = all {
+    or { s.phase == Admitted, s.phase == Aggregated },
+    s.gate == Advisory,
+    s' = { ...s,
+      phase: Observed,
+      qualityChecked: false,
+      qualityOk: false,
+      outputValid: finite,
+      errorObserved: not(finite),
+    },
+  }
+
+  /// Shell harnesses differ in failure propagation. strict=false models
+  /// run_prefill_probe.sh reaching its final message after a failed child.
+  action finishHarness(childOk: bool, strict: bool): bool = all {
+    s.phase == Admitted,
+    s.probeClass == Harness,
+    s' = { ...s,
+      phase: if (childOk or not(strict)) Observed else Failed,
+      childFailed: not(childOk),
+      outputValid: childOk,
+      errorObserved: not(childOk),
+    },
+  }
+
+  /// compare_preemptive requires both null controls; its shipped runner passes
+  /// neither, so this is a prerequisite failure rather than a metric verdict.
+  action missingRequiredControl = all {
+    s.phase == Admitted,
+    s.gate == PreemptiveGate,
+    s' = { ...s, phase: Failed, qualityChecked: false, errorObserved: true },
+  }
+
+  /// The immediate-zero dummy preserves release/timing protocol but never a
+  /// numerically valid remote partial.
+  action dummyRelease = all {
+    s.phase == Admitted,
+    s.probeClass == DummyProvider,
+    s' = { ...s, phase: Observed, outputValid: false, errorObserved: true },
+  }
+
+  action stay = s' = s
+  action step = any {
+    selectArm(Numerical, DeviceEvent, Median3, B12xBankGate, 1),
+    selectArm(Numerical, NoTiming, NoAggregation, Advisory, 2),
+    selectArm(LiveServing, TextChunkGap, Mean3, ExactCountGate, 3),
+    selectArm(DeviceKernel, DeviceEvent, Median3, W4A16Gate, 4),
+    selectArm(NativeTrace, NativeService, P90Of3, Advisory, 5),
+    selectArm(Transport, HostWall, Median3, Advisory, 6),
+    selectArm(Harness, NoTiming, NoAggregation, ManifestGate, 7),
+    selectArm(Control, NoTiming, NoAggregation, Advisory, 8),
+    selectArm(DummyProvider, HostWall, Single, Advisory, 9),
+    admit(true, true), admit(true, false), admit(false, true),
+    recordSample(10), recordSample(20), recordSample(30), aggregate,
+    assess(9950, 120, 0), assess(8, 8, 0), assess(0, 0, 0),
+    recordAdvisory(true), recordAdvisory(false),
+    finishHarness(true, true), finishHarness(false, true), finishHarness(false, false),
+    missingRequiredControl, dummyRelease, stay,
+  }
+
+  val inv = and {
+    s.sampleCount >= 0,
+    s.sampleCount <= 3,
+    s.sampleMin >= 0,
+    s.sampleMax >= s.sampleMin,
+    s.sampleTotal >= 0,
+    s.qualityOk implies s.qualityChecked,
+    s.phase == Accepted implies (s.qualityChecked and s.qualityOk and s.outputValid),
+    s.phase == Aggregated implies s.sampleCount > 0,
+    s.experimentOnly,
+  }
+  val acceptedNumerical = s.phase == Accepted and s.qualityOk
+  val recordedWithoutAcceptance = s.phase == Observed and not(s.qualityChecked)
+  val releasedInvalidDummy = s.phase == Observed and s.probeClass == DummyProvider and not(s.outputValid)
+  val maskedChildFailure = s.phase == Observed and s.childFailed and s.errorObserved
+  val rejected = s.phase == Failed and s.errorObserved
+
+  run b12xBankSuccessTest = init
+    .then(selectArm(Numerical, DeviceEvent, Median3, B12xBankGate, 1))
+    .then(admit(true, true)).then(recordSample(12)).then(recordSample(10)).then(recordSample(11))
+    .then(aggregate).expect(s.reported == 11)
+    .then(assess(9950, 120, 0)).expect(acceptedNumerical and inv)
+  run marlinQualityFailureTest = init
+    .then(selectArm(Numerical, DeviceEvent, Median3, MarlinGate, 10))
+    .then(admit(true, true)).then(recordSample(6)).then(recordSample(8)).then(recordSample(7))
+    .then(aggregate).then(assess(9989, 19, 0)).expect(rejected and inv)
+  run advisoryFp8ScreenTest = init
+    .then(selectArm(Numerical, NoTiming, NoAggregation, Advisory, 2))
+    .then(admit(true, true)).then(recordAdvisory(true)).expect(recordedWithoutAcceptance and inv)
+  run exactSseCountFailureTest = init
+    .then(selectArm(LiveServing, TextChunkGap, Mean3, ExactCountGate, 3))
+    .then(admit(true, true)).then(recordSample(20)).then(recordSample(25)).then(recordSample(30))
+    .then(aggregate).expect(s.reported == 25)
+    .then(assess(7, 8, 0)).expect(rejected and inv)
+  run chainAuditSuccessTest = init
+    .then(selectArm(Harness, NoTiming, NoAggregation, ManifestGate, 7))
+    .then(admit(true, true)).then(assess(0, 0, 0)).expect(acceptedNumerical and inv)
+  run preemptiveRunnerMissingNullTest = init
+    .then(selectArm(Harness, NoTiming, NoAggregation, PreemptiveGate, 11))
+    .then(admit(true, true)).then(missingRequiredControl).expect(rejected and inv)
+  run prefillHarnessMasksChildFailureTest = init
+    .then(selectArm(Harness, NoTiming, NoAggregation, Advisory, 12))
+    .then(admit(true, true)).then(finishHarness(false, false)).expect(maskedChildFailure and inv)
+  run strictHarnessPropagatesFailureTest = init
+    .then(selectArm(Harness, NoTiming, NoAggregation, Advisory, 13))
+    .then(admit(true, true)).then(finishHarness(false, true)).expect(rejected and inv)
+  run dummyCompletionIsNotCorrectnessTest = init
+    .then(selectArm(DummyProvider, HostWall, Single, Advisory, 9))
+    .then(admit(true, true)).then(dummyRelease).expect(releasedInvalidDummy and inv)
+  run shapeAdmissionFailureTest = init
+    .then(selectArm(Transport, HostWall, Median3, Advisory, 6))
+    .then(admit(true, false)).expect(rejected and inv)
+}

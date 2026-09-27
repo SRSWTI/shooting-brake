@@ -1,0 +1,266 @@
+/// Profiling campaign lifecycle and evidence semantics.
+/// Source: experiments/profile_workloads.py::run, rpc; campaign_worker.py::
+/// CampaignWorkerExtension.campaign_start, campaign_stop; analyze_campaign_profile.py::
+/// merge_intervals, duration, intersection_duration, analyse; and
+/// benchmarks/slo_split_matrix.py::one_request, summarize (measurement dependency).
+/// Abstraction: HTTP, CUDA, native traces, samplers and files are atomic observations.
+/// Control-window state and profiler state remain distinct because profiling is optional.
+module campaign {
+  type Phase = Unconfigured | Ready | WindowOpen | RequestsDone | Stopped | Accepted | Failed
+  type Suite = Core | Capacity | Cache
+  type Workload = NoWork | Warmup | ColdPrefill | ConcurrentDecode | MixedTraffic | CapacityPressure | CachePrime | CacheContinue
+  type Measurement = Missing | ObservedZero | ObservedPositive
+  type CampaignState = {
+    phase: Phase,
+    suite: Suite,
+    workload: Workload,
+    controlActive: bool,
+    profilerRequested: bool,
+    profilerActive: bool,
+    expectedRequests: int,
+    expectedOutputTokens: int,
+    completedRequests: int,
+    requestsValid: bool,
+    fixedOutputLength: bool,
+    firstTokenDelivered: bool,
+    prefillInjected: bool,
+    traceCoverage: bool,
+    clockBounded: bool,
+    nativeErrors: int,
+    tokenCount: Measurement,
+    clientLatency: Measurement,
+    interTokenLatency: Measurement,
+    nativeService: Measurement,
+    workerEvidenceWritten: bool,
+    clientEvidenceWritten: bool,
+  }
+
+  var s: CampaignState
+
+  pure def configurationAllowed(
+    endpointLocal: bool, productionPort: bool, outputFresh: bool, cachePolicyMatches: bool,
+  ): bool = endpointLocal and not(productionPort) and outputFresh and cachePolicyMatches
+  pure def validInterval(start: int, end: int): bool = end >= start
+  pure def nonnegativeLength(start: int, end: int): int =
+    if (end >= start) end - start else 0
+  pure def smaller(a: int, b: int): int = if (a <= b) a else b
+  pure def larger(a: int, b: int): int = if (a >= b) a else b
+  /// Exact half-open interval overlap used by intersection_duration for one pair.
+  pure def overlapLength(a0: int, a1: int, b0: int, b1: int): int =
+    larger(0, smaller(a1, b1) - larger(a0, b0))
+  /// For two intervals, union duration is sum minus overlap; concurrent engines are not double counted.
+  pure def unionLength(a0: int, a1: int, b0: int, b1: int): int =
+    nonnegativeLength(a0, a1) + nonnegativeLength(b0, b1) - overlapLength(a0, a1, b0, b1)
+  pure def uncoveredLength(span: int, observedUnion: int): int =
+    larger(0, span - observedUnion)
+  pure def measured(value: int): Measurement =
+    if (value == 0) ObservedZero else ObservedPositive
+
+  action init = s' = {
+    phase: Unconfigured, suite: Core, workload: NoWork,
+    controlActive: false, profilerRequested: false, profilerActive: false,
+    expectedRequests: 0, expectedOutputTokens: 0, completedRequests: 0,
+    requestsValid: true, fixedOutputLength: true,
+    firstTokenDelivered: false, prefillInjected: false,
+    traceCoverage: false, clockBounded: false, nativeErrors: 0,
+    tokenCount: Missing, clientLatency: Missing, interTokenLatency: Missing,
+    nativeService: Missing, workerEvidenceWritten: false, clientEvidenceWritten: false,
+  }
+
+  /// run() admits only a fresh output directory, an isolated loopback endpoint,
+  /// a non-production port, and a prefix-cache policy matching the selected suite.
+  action configure(
+    suite: Suite, endpointLocal: bool, productionPort: bool,
+    outputFresh: bool, cachePolicyMatches: bool,
+  ): bool = all {
+    s.phase == Unconfigured,
+    configurationAllowed(endpointLocal, productionPort, outputFresh, cachePolicyMatches),
+    s' = { ...s, phase: Ready, suite: suite },
+  }
+  action rejectConfiguration(
+    endpointLocal: bool, productionPort: bool, outputFresh: bool, cachePolicyMatches: bool,
+  ): bool = all {
+    s.phase == Unconfigured,
+    not(configurationAllowed(endpointLocal, productionPort, outputFresh, cachePolicyMatches)),
+    s' = { ...s, phase: Failed },
+  }
+
+  /// campaign_start always opens the control window; the vLLM profiler is separate.
+  action startWindow(workload: Workload, expected: int, outputTokens: int, tracing: bool): bool = all {
+    s.phase == Ready, workload != NoWork, expected > 0, expected <= 4,
+    outputTokens > 0, outputTokens <= 256,
+    s' = { ...s,
+      phase: WindowOpen, workload: workload, controlActive: true,
+      profilerRequested: tracing, profilerActive: tracing,
+      expectedRequests: expected, expectedOutputTokens: outputTokens,
+      completedRequests: 0, requestsValid: true,
+      fixedOutputLength: true, firstTokenDelivered: false, prefillInjected: false,
+      traceCoverage: false, clockBounded: false, nativeErrors: 0,
+      tokenCount: Missing, clientLatency: Missing, interTokenLatency: Missing,
+      nativeService: Missing, workerEvidenceWritten: false, clientEvidenceWritten: false,
+    },
+  }
+
+  /// In a mixed case, the decode leader must deliver a token and remain live
+  /// before the long prefill is injected.
+  action observeLeaderToken = all {
+    s.phase == WindowOpen, s.workload == MixedTraffic, not(s.firstTokenDelivered),
+    s' = { ...s, firstTokenDelivered: true },
+  }
+  action injectMixedPrefill = all {
+    s.phase == WindowOpen, s.workload == MixedTraffic,
+    s.firstTokenDelivered, not(s.prefillInjected),
+    s' = { ...s, prefillInjected: true },
+  }
+
+  /// Concrete request observations: every request in this bounded case returned
+  /// the same deliveredTokens count, and largestDelivery is its largest usage delta.
+  action collectRequests(count: int, deliveredTokens: int, largestDelivery: int): bool = all {
+    s.phase == WindowOpen, count > 0, count <= 4,
+    deliveredTokens > 0, deliveredTokens <= 256,
+    largestDelivery > 0, largestDelivery <= deliveredTokens,
+    (s.workload != MixedTraffic or s.prefillInjected),
+    s' = { ...s,
+      phase: RequestsDone, completedRequests: count,
+      requestsValid: count == s.expectedRequests,
+      fixedOutputLength: deliveredTokens == s.expectedOutputTokens,
+      firstTokenDelivered: true,
+      tokenCount: ObservedPositive, clientLatency: ObservedPositive,
+      interTokenLatency: if (largestDelivery > 1) Missing else ObservedPositive,
+      clientEvidenceWritten: true,
+    },
+  }
+
+  /// HTTP/stream/usage failure is retained as an error record. It contributes no
+  /// successful latency sample: missing and observed zero stay distinguishable.
+  action collectFailedRequest = all {
+    s.phase == WindowOpen,
+    s' = { ...s,
+      phase: RequestsDone, completedRequests: 0, requestsValid: false,
+      fixedOutputLength: false, tokenCount: Missing, clientLatency: Missing,
+      interTokenLatency: Missing, clientEvidenceWritten: true,
+    },
+  }
+
+  /// campaign_stop is attempted in finally. Worker evidence is written even when
+  /// coverage fails; stopping tracing also clears the profiler object.
+  action stopWindow(
+    traceEntries: int, dispatches: int, traceRows: int, counterRows: int,
+    nativeErrors: int, clockViolations: int, serviceNs: int,
+  ): bool = all {
+    s.phase == RequestsDone,
+    traceEntries >= 0, dispatches >= 0, traceRows >= 0, counterRows >= 0,
+    nativeErrors >= 0, clockViolations >= 0, serviceNs >= 0,
+    s' = { ...s,
+      phase: Stopped, controlActive: false, profilerActive: false,
+      traceCoverage: traceEntries == dispatches and traceRows == counterRows and
+        nativeErrors == 0 and clockViolations == 0,
+      clockBounded: clockViolations == 0, nativeErrors: nativeErrors,
+      nativeService: measured(serviceNs), workerEvidenceWritten: true,
+    },
+  }
+
+  action acceptEvidence = all {
+    s.phase == Stopped, s.requestsValid, s.fixedOutputLength,
+    s.completedRequests == s.expectedRequests, s.traceCoverage,
+    s.workerEvidenceWritten, s.clientEvidenceWritten,
+    s' = { ...s, phase: Accepted },
+  }
+  action rejectEvidence = all {
+    s.phase == Stopped,
+    not(s.requestsValid and s.fixedOutputLength and
+      s.completedRequests == s.expectedRequests and s.traceCoverage),
+    s' = { ...s, phase: Failed },
+  }
+  action stay = s' = s
+
+  action step = any {
+    configure(Core, true, false, true, true),
+    configure(Capacity, true, false, true, true),
+    configure(Cache, true, false, true, true),
+    rejectConfiguration(false, false, true, true),
+    rejectConfiguration(true, true, true, true),
+    rejectConfiguration(true, false, false, true),
+    rejectConfiguration(true, false, true, false),
+    startWindow(Warmup, 1, 32, false), startWindow(ColdPrefill, 1, 64, true),
+    startWindow(ConcurrentDecode, 2, 64, false), startWindow(MixedTraffic, 2, 64, true),
+    startWindow(CapacityPressure, 4, 32, false), startWindow(CachePrime, 1, 32, false),
+    startWindow(CacheContinue, 1, 64, false), observeLeaderToken, injectMixedPrefill,
+    collectRequests(1, 64, 1), collectRequests(2, 64, 1),
+    collectRequests(2, 64, 2), collectRequests(1, 32, 1), collectFailedRequest,
+    stopWindow(4, 4, 16, 16, 0, 0, 0), stopWindow(4, 4, 16, 16, 0, 0, 9),
+    stopWindow(3, 4, 16, 16, 0, 0, 4), stopWindow(4, 4, 16, 16, 1, 0, 4),
+    acceptEvidence, rejectEvidence, stay,
+  }
+
+  val inv = and {
+    s.expectedRequests >= 0, s.expectedOutputTokens >= 0,
+    s.completedRequests >= 0, s.nativeErrors >= 0,
+    s.completedRequests <= 4,
+    s.profilerActive implies (s.controlActive and s.profilerRequested),
+    s.controlActive implies s.phase == WindowOpen or s.phase == RequestsDone,
+    s.traceCoverage implies (s.clockBounded and s.nativeErrors == 0),
+    s.phase == Accepted implies and {
+      s.requestsValid, s.fixedOutputLength,
+      s.completedRequests == s.expectedRequests,
+      s.traceCoverage, s.workerEvidenceWritten, s.clientEvidenceWritten,
+    },
+    s.tokenCount == Missing implies s.clientLatency == Missing,
+  }
+  val acceptedCampaign = s.phase == Accepted
+  val missingLatencyWitness = s.phase == Failed and s.clientLatency == Missing
+  val zeroNativeServiceWitness = s.phase == Accepted and s.nativeService == ObservedZero
+  val profilerSeparatedWitness = s.phase == WindowOpen and s.controlActive and not(s.profilerActive)
+  val bundledDeliveryWitness = s.phase == Accepted and s.interTokenLatency == Missing
+
+  run coldProfileSuccessTest = init.then(configure(Core, true, false, true, true))
+    .then(startWindow(ColdPrefill, 1, 64, true))
+    .then(collectRequests(1, 64, 1))
+    .then(stopWindow(4, 4, 16, 16, 0, 0, 9)).then(acceptEvidence)
+    .expect(acceptedCampaign and inv)
+  run mixedBundledDeliveryTest = init.then(configure(Core, true, false, true, true))
+    .then(startWindow(MixedTraffic, 2, 64, true)).then(observeLeaderToken)
+    .then(injectMixedPrefill).then(collectRequests(2, 64, 2))
+    .then(stopWindow(4, 4, 16, 16, 0, 0, 8)).then(acceptEvidence)
+    .expect(bundledDeliveryWitness and inv)
+  run unprofiledControlWindowTest = init.then(configure(Cache, true, false, true, true))
+    .then(startWindow(CachePrime, 1, 32, false)).expect(profilerSeparatedWitness and inv)
+  run unprofiledZeroActivityTest = init.then(configure(Cache, true, false, true, true))
+    .then(startWindow(CachePrime, 1, 32, false)).then(collectRequests(1, 32, 1))
+    .then(stopWindow(0, 0, 0, 0, 0, 0, 0)).then(acceptEvidence)
+    .expect(zeroNativeServiceWitness and inv)
+  run failedHttpIsMissingTest = init.then(configure(Core, true, false, true, true))
+    .then(startWindow(ColdPrefill, 1, 64, false)).then(collectFailedRequest)
+    .then(stopWindow(0, 0, 0, 0, 0, 0, 0)).then(rejectEvidence)
+    .expect(missingLatencyWitness and inv)
+  run shortOutputCannotAcceptTest = init.then(configure(Core, true, false, true, true))
+    .then(startWindow(ColdPrefill, 1, 64, false)).then(collectRequests(1, 32, 1))
+    .then(stopWindow(4, 4, 16, 16, 0, 0, 3)).then(acceptEvidence.fail())
+  run shortOutputRejectedTest = init.then(configure(Core, true, false, true, true))
+    .then(startWindow(ColdPrefill, 1, 64, false)).then(collectRequests(1, 32, 1))
+    .then(stopWindow(4, 4, 16, 16, 0, 0, 3)).then(rejectEvidence)
+    .expect(s.phase == Failed and inv)
+  run incompleteTraceCannotAcceptTest = init.then(configure(Capacity, true, false, true, true))
+    .then(startWindow(CapacityPressure, 4, 32, false))
+    .then(collectRequests(4, 32, 1))
+    .then(stopWindow(3, 4, 16, 16, 0, 0, 3)).then(acceptEvidence.fail())
+  run incompleteTraceRejectedTest = init.then(configure(Capacity, true, false, true, true))
+    .then(startWindow(CapacityPressure, 4, 32, false))
+    .then(collectRequests(4, 32, 1))
+    .then(stopWindow(3, 4, 16, 16, 0, 0, 3)).then(rejectEvidence)
+    .expect(s.phase == Failed and inv)
+  run mixedCannotInjectEarlyTest = init.then(configure(Core, true, false, true, true))
+    .then(startWindow(MixedTraffic, 2, 64, false)).then(injectMixedPrefill.fail())
+  run mixedInjectionOrderTest = init.then(configure(Core, true, false, true, true))
+    .then(startWindow(MixedTraffic, 2, 64, false)).then(observeLeaderToken)
+    .then(injectMixedPrefill).expect(inv)
+  run invalidConfigurationTest = init.then(
+    rejectConfiguration(true, true, true, true)
+  ).then(startWindow(Warmup, 1, 32, false).fail())
+  run intervalAccountingTest = init.expect(and {
+    validInterval(0, 10), not(validInterval(4, 3)),
+    unionLength(0, 10, 4, 12) == 12,
+    overlapLength(0, 10, 5, 15) == 5,
+    uncoveredLength(20, 12) == 8, inv,
+  })
+}

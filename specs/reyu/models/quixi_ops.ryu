@@ -1,0 +1,284 @@
+/// Breadth-first model of the embedded QuixiCore-XPU operation surface.
+/// Sources: include/quixicore/xpu/ops.hpp; src/dispatch/*.cpp;
+/// .quixicore/kernels.yaml; assigned kernels/** implementations.
+///
+/// Abstraction: one bounded scalar/vector-row fixture stands for a submitted
+/// tensor operation. Integer fixtures model exact indexing, accumulation,
+/// quantization and recurrence structure; floating transcendental functions,
+/// storage rounding and device scheduling remain implementation obligations.
+/// A dispatch submission and its kernel completion are separate actions. The
+/// implementation's in-order SYCL queue is an external runtime assumption.
+module quixi_ops {
+  type Phase = Idle | Queued | Finished
+  type Family = Activations | Attention | Norms | Matmul | Quantization | Moe |
+    Sampling | Serving | Utils | Optimizers | LinearAttention | Ssm | Collectives
+  type Operation = ReGLU | Dense2 | Int4Quant | Int4Gemv2 | RouteTop1 |
+    CacheScatter | ScanCell | GdnCell | Fp8Gemm | W4A16 | GroupedChoice | TurboQuant
+  type DType = F32 | F16 | BF16 | Other
+  type Variant = Sycl | Vendor | Best
+  type Outcome = Pending | Success | Skipped | Error
+  type State = {
+    phase: Phase,
+    family: Family,
+    op: Operation,
+    dtype: DType,
+    requested: Variant,
+    resolved: Variant,
+    vendorBuilt: bool,
+    blocking: bool,
+    a: int,
+    b: int,
+    c: int,
+    d: int,
+    slot: int,
+    value: int,
+    aux: int,
+    cache0: int,
+    cache1: int,
+    recurrent: int,
+    outcome: Outcome,
+  }
+
+  var s: State
+
+  pure def supportedFloat(dt: DType): bool =
+    dt == F32 or dt == F16 or dt == BF16
+
+  pure def max0(x: int): int = if (x > 0) x else 0
+  pure def clampInt4(x: int): int = if (x < -8) -8 else if (x > 7) 7 else x
+
+  /// Exact ReGLU mode: relu(gate) * value for one element.
+  pure def reglu(gate: int, value: int): int = max0(gate) * value
+
+  /// One output cell of C[1,1] = A[1,2] * B[2,1].
+  pure def dense2(a0: int, a1: int, b0: int, b1: int): int =
+    a0 * b0 + a1 * b1
+
+  /// Bounded producer contract for symmetric int4 with caller-supplied scale.
+  pure def quantInt4(x: int, scale: int): int = clampInt4(x / scale)
+
+  /// Two-element qgemv dot after signed-int4 dequantization.
+  pure def int4Gemv2(q0: int, q1: int, scale: int, x0: int, x1: int): int =
+    (q0 * scale * x0) + (q1 * scale * x1)
+
+  /// Native top-k uses descending values and ascending expert IDs on ties.
+  pure def routeTop1(e0: int, e1: int, e2: int): int =
+    if (e0 >= e1 and e0 >= e2) 0 else if (e1 >= e2) 1 else 2
+
+  /// One selective-scan cell after abstracting exp(delta*A) as decay.
+  pure def scanNext(h: int, decay: int, delta: int, b: int, u: int): int =
+    decay * h + delta * b * u
+  pure def scanOutput(hNext: int, c: int, d: int, u: int): int =
+    c * hNext + d * u
+
+  pure val baseState: State = {
+    phase: Idle, family: Activations, op: ReGLU, dtype: F32,
+    requested: Sycl, resolved: Sycl, vendorBuilt: false, blocking: true,
+    a: 0, b: 0, c: 0, d: 0, slot: 0, value: 0, aux: 0,
+    cache0: 10, cache1: 20, recurrent: 0, outcome: Pending,
+  }
+
+  action init = s' = baseState
+
+  /// The parameter tuple is a bounded stand-in for raw USM buffers and shapes.
+  action submit(family: Family, op: Operation, dt: DType, requested: Variant,
+                vendorBuilt: bool, blocking: bool, a: int, b: int,
+                c: int, d: int, slot: int): bool = all {
+    s.phase == Idle,
+    a >= -32 and a <= 32, b >= -32 and b <= 32,
+    c >= -32 and c <= 32, d >= -32 and d <= 32,
+    slot >= -1 and slot <= 2,
+    s' = { ...s, phase: Queued, family: family, op: op, dtype: dt,
+      requested: requested, vendorBuilt: vendorBuilt, blocking: blocking,
+      a: a, b: b, c: c, d: d, slot: slot, value: 0, aux: 0,
+      outcome: Pending },
+  }
+
+  /// Source: glu.sycl.cpp::glu_impl, mode 2 (ReGLU).
+  action completeReglu = all {
+    s.phase == Queued, s.op == ReGLU, supportedFloat(s.dtype),
+    s' = { ...s, phase: Finished, resolved: Sycl,
+      value: reglu(s.a, s.b), outcome: Success },
+  }
+
+  /// Source: dense_gemm dispatch and dense_gemm_sycl/onednn.
+  action completeDense = all {
+    s.phase == Queued, s.op == Dense2, supportedFloat(s.dtype),
+    s' = { ...s, phase: Finished,
+      resolved: if (s.requested == Vendor and s.vendorBuilt) Vendor else
+        if (s.requested == Best and s.vendorBuilt) Vendor else Sycl,
+      value: dense2(s.a, s.b, s.c, s.d), outcome: Success },
+  }
+
+  /// Source: quantize.sycl.cpp; scale is b and must be positive in this model.
+  action completeInt4Quant = all {
+    s.phase == Queued, s.op == Int4Quant, supportedFloat(s.dtype), s.b > 0,
+    s' = { ...s, phase: Finished, resolved: Sycl,
+      value: quantInt4(s.a, s.b), aux: s.b, outcome: Success },
+  }
+
+  /// Source: qgemv.sycl.cpp; q0/q1 are already decoded signed nibbles.
+  action completeInt4Gemv = all {
+    s.phase == Queued, s.op == Int4Gemv2, supportedFloat(s.dtype),
+    s.a >= -8 and s.a <= 7, s.b >= -8 and s.b <= 7, s.c > 0,
+    s' = { ...s, phase: Finished, resolved: Sycl,
+      value: int4Gemv2(s.a, s.b, s.c, s.d, 1), outcome: Success },
+  }
+
+  /// Source: moe_route.sycl.cpp; top-1 weight is exactly one.
+  action completeRouteTop1 = all {
+    s.phase == Queued, s.op == RouteTop1, supportedFloat(s.dtype),
+    s' = { ...s, phase: Finished, resolved: Sycl,
+      value: routeTop1(s.a, s.b, s.c), aux: 1, outcome: Success },
+  }
+
+  /// Source: serving.sycl.cpp::indexed_copy. Negative slot skips the row.
+  action completeCacheScatter = all {
+    s.phase == Queued, s.op == CacheScatter, supportedFloat(s.dtype),
+    s.slot >= -1 and s.slot <= 1,
+    s' = { ...s, phase: Finished, resolved: Sycl,
+      cache0: if (s.slot == 0) s.a else s.cache0,
+      cache1: if (s.slot == 1) s.a else s.cache1,
+      value: if (s.slot < 0) 0 else s.a,
+      outcome: if (s.slot < 0) Skipped else Success },
+  }
+
+  /// Source: selective_scan.sycl.cpp. Fixture fields are u=a, decay=b,
+  /// delta=c, B=d; C and D are fixed to one to retain the recurrence and skip.
+  action completeScanCell = all {
+    s.phase == Queued, s.op == ScanCell, supportedFloat(s.dtype),
+    s' = { ...s, phase: Finished, resolved: Sycl,
+      recurrent: scanNext(s.recurrent, s.b, s.c, s.d, s.a),
+      value: scanOutput(scanNext(s.recurrent, s.b, s.c, s.d, s.a), 1, 1, s.a),
+      outcome: Success },
+  }
+
+  /// Source: qwen_gdn.sycl.cpp. Invalid state index preserves projected z=a,
+  /// writes zero core and leaves recurrent state untouched.
+  action completeGdnCell = all {
+    s.phase == Queued, s.op == GdnCell, supportedFloat(s.dtype),
+    s' = { ...s, phase: Finished, resolved: Sycl,
+      recurrent: if (s.slot < 0 or s.slot > 1) s.recurrent else s.recurrent + s.b,
+      value: if (s.slot < 0 or s.slot > 1) 0 else s.recurrent + s.b,
+      aux: s.a, outcome: if (s.slot < 0 or s.slot > 1) Skipped else Success },
+  }
+
+  /// Source: quantization.cpp::fp8_gemm. M=a. Native is only M==1 when the
+  /// explicit request is not vendor; every other route requires oneDNN.
+  action completeFp8Gemm = all {
+    s.phase == Queued, s.op == Fp8Gemm, supportedFloat(s.dtype), s.a > 0,
+    s' = { ...s, phase: Finished,
+      resolved: if (s.a == 1 and s.requested != Vendor) Sycl else Vendor,
+      value: if (s.a == 1 and s.requested != Vendor) s.b * s.c else
+        if (s.vendorBuilt) s.b * s.c else 0,
+      outcome: if (s.a == 1 and s.requested != Vendor) Success else
+        if (s.vendorBuilt) Success else Error },
+  }
+
+  /// Source: w4a16_gemm.sycl.cpp. f32 returns an empty event: no work/error.
+  action completeW4A16 = all {
+    s.phase == Queued, s.op == W4A16,
+    s' = { ...s, phase: Finished, resolved: Sycl,
+      value: if (s.dtype == F16 or s.dtype == BF16) s.a * s.b else 0,
+      outcome: if (s.dtype == F16 or s.dtype == BF16) Success else Skipped },
+  }
+
+  /// Source: moe.cpp::nvfp4_moe_grouped_profitable always returns false.
+  action completeGroupedChoice = all {
+    s.phase == Queued, s.op == GroupedChoice,
+    s' = { ...s, phase: Finished, resolved: Sycl,
+      value: 0, outcome: Skipped },
+  }
+
+  /// Source: turboquant_kernel.hpp has declarations but no definition/ABI route.
+  action rejectTurboQuant = all {
+    s.phase == Queued, s.op == TurboQuant,
+    s' = { ...s, phase: Finished, resolved: Sycl,
+      value: 0, outcome: Error },
+  }
+
+  action reset = all { s.phase == Finished, s' = baseState }
+  action stay = s' = s
+
+  action step = any {
+    submit(Activations, ReGLU, F32, Sycl, false, true, 2, 3, 0, 0, 0),
+    submit(Matmul, Dense2, F16, Best, true, true, 1, 2, 3, 4, 0),
+    submit(Quantization, Int4Quant, F32, Sycl, false, true, 14, 2, 0, 0, 0),
+    submit(Quantization, Int4Gemv2, F16, Sycl, false, true, 7, -8, 2, 3, 0),
+    submit(Moe, RouteTop1, BF16, Sycl, false, true, 5, 5, 1, 0, 0),
+    submit(Serving, CacheScatter, F16, Sycl, false, false, 7, 0, 0, 0, -1),
+    submit(Ssm, ScanCell, F32, Sycl, false, true, 2, 3, 1, 4, 0),
+    submit(LinearAttention, GdnCell, BF16, Sycl, false, true, 9, 3, 0, 0, 2),
+    submit(Quantization, Fp8Gemm, F16, Sycl, false, true, 2, 4, 5, 0, 0),
+    submit(Quantization, W4A16, F32, Sycl, false, true, 2, 3, 0, 0, 0),
+    submit(Moe, GroupedChoice, F16, Best, true, true, 8, 4, 2, 0, 0),
+    submit(Serving, TurboQuant, F16, Sycl, false, true, 0, 0, 0, 0, 0),
+    completeReglu, completeDense, completeInt4Quant, completeInt4Gemv,
+    completeRouteTop1, completeCacheScatter, completeScanCell, completeGdnCell,
+    completeFp8Gemm, completeW4A16, completeGroupedChoice, rejectTurboQuant,
+    reset, stay,
+  }
+
+  val inv = and {
+    s.phase == Queued implies s.outcome == Pending,
+    s.outcome == Success implies s.phase == Finished,
+    s.op == Int4Quant and s.outcome == Success implies
+      (s.value >= -8 and s.value <= 7),
+    s.op == RouteTop1 and s.outcome == Success implies
+      (s.value >= 0 and s.value <= 2 and s.aux == 1),
+    s.op == GroupedChoice and s.phase == Finished implies s.outcome == Skipped,
+    s.op == TurboQuant and s.phase == Finished implies s.outcome == Error,
+  }
+
+  val successWitness = s.phase == Finished and s.outcome == Success
+  val tieBreakWitness = s.op == RouteTop1 and s.value == 0 and s.aux == 1
+  val skippedIndexWitness = s.op == CacheScatter and s.outcome == Skipped and
+    s.cache0 == 10 and s.cache1 == 20
+  val unsupportedDtypeWitness = s.op == W4A16 and s.outcome == Skipped
+  val missingVendorWitness = s.op == Fp8Gemm and s.outcome == Error
+  val invalidStateWitness = s.op == GdnCell and s.outcome == Skipped and
+    s.value == 0 and s.aux == 9
+  val unavailableExportWitness = s.op == TurboQuant and s.outcome == Error
+
+  run regluSuccessTest = init
+    .then(submit(Activations, ReGLU, F32, Vendor, true, false, 3, 4, 0, 0, 0))
+    .then(completeReglu).expect(successWitness and s.value == 12 and s.resolved == Sycl and inv)
+  run denseBestVendorTest = init
+    .then(submit(Matmul, Dense2, F16, Best, true, true, 1, 2, 3, 4, 0))
+    .then(completeDense).expect(s.value == 11 and s.resolved == Vendor and inv)
+  run int4ClampTest = init
+    .then(submit(Quantization, Int4Quant, F32, Sycl, false, true, 32, 2, 0, 0, 0))
+    .then(completeInt4Quant).expect(s.value == 7 and inv)
+  run int4GemvTest = init
+    .then(submit(Quantization, Int4Gemv2, F16, Sycl, false, true, 7, -8, 2, 3, 0))
+    .then(completeInt4Gemv).expect(s.value == 26 and inv)
+  run routeTieUsesLowerExpertTest = init
+    .then(submit(Moe, RouteTop1, BF16, Vendor, true, true, 5, 5, 1, 0, 0))
+    .then(completeRouteTop1).expect(tieBreakWitness and s.resolved == Sycl and inv)
+  run negativeScatterSkipsTest = init
+    .then(submit(Serving, CacheScatter, F16, Sycl, false, false, 99, 0, 0, 0, -1).fail())
+  run boundedNegativeScatterTest = init
+    .then(submit(Serving, CacheScatter, F16, Sycl, false, false, 7, 0, 0, 0, -1))
+    .then(completeCacheScatter).expect(skippedIndexWitness and inv)
+  run selectiveScanCellTest = init
+    .then(submit(Ssm, ScanCell, F32, Sycl, false, true, 2, 3, 1, 4, 0))
+    .then(completeScanCell).expect(s.recurrent == 8 and s.value == 10 and inv)
+  run invalidGdnSlotPreservesStateTest = init
+    .then(submit(LinearAttention, GdnCell, BF16, Sycl, false, true, 9, 3, 0, 0, 2))
+    .then(completeGdnCell).expect(invalidStateWitness and s.recurrent == 0 and inv)
+  run fp8BatchNeedsVendorTest = init
+    .then(submit(Quantization, Fp8Gemm, F16, Sycl, false, true, 2, 4, 5, 0, 0))
+    .then(completeFp8Gemm).expect(missingVendorWitness and inv)
+  run fp8DecodeNativeTest = init
+    .then(submit(Quantization, Fp8Gemm, F16, Best, false, false, 1, 4, 5, 0, 0))
+    .then(completeFp8Gemm).expect(s.value == 20 and s.resolved == Sycl and inv)
+  run w4a16F32NoWorkTest = init
+    .then(submit(Quantization, W4A16, F32, Sycl, false, true, 2, 3, 0, 0, 0))
+    .then(completeW4A16).expect(unsupportedDtypeWitness and inv)
+  run groupedNotAutoSelectedTest = init
+    .then(submit(Moe, GroupedChoice, F16, Best, true, true, 8, 4, 2, 0, 0))
+    .then(completeGroupedChoice).expect(s.outcome == Skipped and inv)
+  run generatedTurboQuantIsNotImplementedTest = init
+    .then(submit(Serving, TurboQuant, F16, Sycl, false, true, 0, 0, 0, 0, 0))
+    .then(rejectTurboQuant).expect(unavailableExportWitness and inv)
+}

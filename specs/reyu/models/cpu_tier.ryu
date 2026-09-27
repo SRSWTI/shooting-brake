@@ -1,0 +1,306 @@
+/// CPU cold-expert tier: packed arena residency, routed host compute,
+/// CUDA weight streaming, graph-compatible polling, and caller-owned lifetime.
+/// Sources: src/phase7/cpu_expert_capi.{h,cpp}::HugeArena, ThreadPool,
+/// CpuExpertHost, CpuPoller and sb_cpu_*; plugin cpu_expert_host.py::CpuExpertHost,
+/// CpuExpertPoller; cpu_stream.py::ExpertStreamer; sb_stream.cu::sb_*.
+///
+/// Abstraction: expert identities and batch/route counts are finite. Tensor bytes and
+/// floating-point arithmetic collapse to validity/zero observations. Direct host work
+/// exposes bucket/gather/FFN/scatter stages; CpuPoller::loop calls moe_forward atomically,
+/// so its service actions collapse those stages exactly at that native call boundary.
+module cpu_tier {
+  type TierPhase = Absent | Loading | Ready | Closed
+  type WorkPhase = Idle | Routed | Bucketed | Gathered | HostComputed | Copying | CudaComputed | Released
+  type PollerPhase = NoPoller | PollerStopped | PollerRunning | PollerDestroyed
+  type ComputePath = NoPath | HostPath | CudaStreamPath
+  type SignalMechanism = DriverStreamMemoryOps | ObsoleteKernelHelper
+
+  type State = {
+    tier: TierPhase,
+    work: WorkPhase,
+    poller: PollerPhase,
+    path: ComputePath,
+    resident: Set[int],
+    arenaUsed: int,
+    offeredRoutes: int,
+    activeRoutes: int,
+    skippedRoutes: int,
+    outputZero: bool,
+    resultValid: bool,
+    signalValue: int,
+    completion: bool,
+    pollErrors: int,
+    registeredLayers: int,
+    registeredLayerValid: bool,
+    buffersLive: bool,
+    borrowedBlock: bool,
+    borrowValid: bool,
+    arenaPinned: bool,
+    slotReusable: bool,
+    lifetimeViolation: bool,
+    signalMechanism: SignalMechanism,
+  }
+
+  pure val EXPERTS = Set(0, 1)
+  var s: State
+
+  action init = s' = {
+    tier: Absent, work: Idle, poller: NoPoller, path: NoPath,
+    resident: Set(), arenaUsed: 0, offeredRoutes: 0, activeRoutes: 0,
+    skippedRoutes: 0, outputZero: true, resultValid: false,
+    signalValue: 0, completion: false, pollErrors: 0, registeredLayers: 0,
+    registeredLayerValid: false, buffersLive: false,
+    borrowedBlock: false, borrowValid: false, arenaPinned: false,
+    slotReusable: true, lifetimeViolation: false,
+    signalMechanism: DriverStreamMemoryOps,
+  }
+
+  /// sb_cpu_create reserves the THP-advised virtual arena; no expert is resident yet.
+  action createHost = all {
+    s.tier == Absent,
+    s' = { ...s, tier: Loading },
+  }
+
+  /// CpuExpertHost::load_expert / CpuExpertHost::load_expert first residency.
+  action loadExpert(expert: int): bool = all {
+    s.tier == Loading, EXPERTS.contains(expert), not(s.resident.contains(expert)),
+    s.arenaUsed < 2,
+    s' = { ...s,
+      resident: s.resident.union(Set(expert)), arenaUsed: s.arenaUsed + 1,
+    },
+  }
+
+  /// Reload overwrites the existing contiguous slot and does not grow the bump arena.
+  action reloadExpert(expert: int): bool = all {
+    s.tier == Loading, s.resident.contains(expert),
+    s' = s,
+  }
+
+  action finishLoading = all {
+    s.tier == Loading,
+    s' = { ...s, tier: Ready },
+  }
+
+  /// Route staging is bounded here to two abstract routes. residentRoutes is
+  /// the result of the caller's placement mask and native residency lookup.
+  action routeBatch(routes: int, residentRoutes: int): bool = all {
+    s.tier == Ready, s.work == Idle,
+    routes >= 0, routes <= 2,
+    residentRoutes >= 0, residentRoutes <= routes,
+    residentRoutes <= s.resident.size(),
+    s' = { ...s, work: Routed, path: HostPath, offeredRoutes: routes,
+      activeRoutes: residentRoutes, outputZero: residentRoutes == 0,
+      resultValid: false },
+  }
+
+  /// Histogram/prefix stage. Nonresident routes are omitted but counted.
+  /// With no active resident route, native moe_forward releases exact zeros.
+  action bucketRoutes = all {
+    s.work == Routed, s.path == HostPath,
+    s' = { ...s,
+      work: if (s.activeRoutes == 0) Released else Bucketed,
+      skippedRoutes: s.skippedRoutes + (s.offeredRoutes - s.activeRoutes),
+      resultValid: s.activeRoutes == 0,
+    },
+  }
+
+  /// Token rows are gathered into an expert-major dense batch.
+  action gatherExpertRows = all {
+    s.work == Bucketed, s.activeRoutes > 0,
+    s' = { ...s, work: Gathered },
+  }
+
+  /// Persistent workers perform gate, up, in-place SiLU multiply, and down projections.
+  action computeHostFfn = all {
+    s.work == Gathered, s.path == HostPath,
+    s' = { ...s, work: HostComputed },
+  }
+
+  /// Weighted rows scatter-add to the zero-initialized fp32 partial.
+  action scatterWeightedRows = all {
+    s.work == HostComputed,
+    s' = { ...s, work: Released, resultValid: true },
+  }
+
+  action resetWork = all {
+    s.work == Released, s.completion == false,
+    s' = { ...s, work: Idle, path: NoPath, offeredRoutes: 0, activeRoutes: 0,
+      outputZero: true, resultValid: false },
+  }
+
+  /// expert_block returns an alias into the arena, not owned storage.
+  action borrowPackedBlock(expert: int): bool = all {
+    s.tier == Ready, s.resident.contains(expert), not(s.borrowedBlock),
+    s' = { ...s, borrowedBlock: true, borrowValid: true },
+  }
+
+  /// cudaHostRegister failure is fail-soft: copies remain staged/pageable.
+  action pinArena(ok: bool): bool = all {
+    s.tier == Ready, s.arenaUsed > 0,
+    s' = { ...s, arenaPinned: if (ok) true else s.arenaPinned },
+  }
+
+  /// ExpertStreamer copy-stream issue requires a ring slot whose previous compute event fired.
+  action issuePackedCopy(routes: int): bool = all {
+    s.tier == Ready, s.work == Idle, s.borrowValid, s.slotReusable,
+    routes > 0, routes <= 2,
+    s' = { ...s, work: Copying, path: CudaStreamPath,
+      offeredRoutes: routes, activeRoutes: routes,
+      slotReusable: false, outputZero: false, resultValid: false },
+  }
+
+  /// Copy completion orders packed dequant + CUDA SwiGLU before reading the slot.
+  action computeStreamedExpert = all {
+    s.work == Copying, s.path == CudaStreamPath,
+    s' = { ...s, work: CudaComputed },
+  }
+
+  /// index_add completes before the recorded compute event makes the slot reusable.
+  action scatterStreamedRows = all {
+    s.work == CudaComputed,
+    s' = { ...s, work: Released, resultValid: true, slotReusable: true },
+  }
+
+  action createPoller = all {
+    s.tier == Ready, s.poller == NoPoller,
+    s' = { ...s, poller: PollerStopped },
+  }
+
+  /// Raw registered pointers are caller-owned and must remain alive through destroy.
+  action registerLayer(layer: int): bool = all {
+    s.poller == PollerStopped, s.registeredLayers == 0,
+    layer >= 0, layer <= 1,
+    s' = { ...s, registeredLayers: 1, registeredLayerValid: layer == 0,
+      buffersLive: true },
+  }
+
+  action startPoller = all {
+    s.poller == PollerStopped, s.registeredLayers > 0,
+    s' = { ...s, poller: PollerRunning },
+  }
+
+  /// Active stream_signal.py uses cuStreamWriteValue32/WaitValue32; signal value is M.
+  action signalBatch(M: int): bool = all {
+    s.poller == PollerRunning, s.work == Idle, s.signalValue == 0,
+    s.signalMechanism == DriverStreamMemoryOps, M > 0, M <= 2,
+    s' = { ...s, work: Routed, path: HostPath, offeredRoutes: M,
+      activeRoutes: M, signalValue: M, completion: false,
+      resultValid: false, outputZero: false },
+  }
+
+  /// CpuPoller clears signal before its atomic moe_forward. An out-of-range
+  /// registered layer fails, increments telemetry, but still raises completion.
+  action pollDispatch = all {
+    s.poller == PollerRunning, s.work == Routed, s.signalValue > 0,
+    s.buffersLive, s.tier == Ready,
+    s' = { ...s, work: Released, signalValue: 0, completion: true,
+      resultValid: s.registeredLayerValid,
+      pollErrors: s.pollErrors + (if (s.registeredLayerValid) 0 else 1) },
+  }
+
+  action consumeCompletion = all {
+    s.work == Released, s.completion,
+    s' = { ...s, work: Idle, path: NoPath, offeredRoutes: 0, activeRoutes: 0,
+      completion: false, outputZero: true, resultValid: false },
+  }
+
+  action stopPoller = all {
+    s.poller == PollerRunning, s.signalValue == 0,
+    s' = { ...s, poller: PollerStopped },
+  }
+
+  action destroyPoller = all {
+    s.poller == PollerStopped,
+    s' = { ...s, poller: PollerDestroyed, buffersLive: false,
+      registeredLayers: 0, registeredLayerValid: false },
+  }
+
+  /// Safe caller ordering: stop/destroy poller, stop streaming aliases, then destroy host.
+  action closeHostSafely = all {
+    s.tier == Ready, s.poller == PollerDestroyed, not(s.borrowedBlock), s.work == Idle,
+    s' = { ...s, tier: Closed, borrowValid: false },
+  }
+
+  action releaseBorrow = all {
+    s.borrowedBlock, s.tier == Ready, s.work == Idle,
+    s' = { ...s, borrowedBlock: false, borrowValid: false },
+  }
+
+  /// The ABI cannot enforce ordering: destroying the host while raw poller/borrow pointers
+  /// exist is possible and invalidates them. The model exposes, rather than forbids, misuse.
+  action closeHostUnsafely = all {
+    s.tier == Ready, (s.poller == PollerRunning or s.borrowedBlock),
+    s' = { ...s, tier: Closed, borrowValid: false, lifetimeViolation: true },
+  }
+
+  /// sb_stream.cu has no phase4 build rule/caller. It is not the active signaling path.
+  action selectObsoleteKernelHelper = all {
+    s.signalMechanism == ObsoleteKernelHelper,
+    s' = s,
+  }
+
+  action stay = s' = s
+  action step = any {
+    createHost, loadExpert(0), loadExpert(1), reloadExpert(0), finishLoading,
+    routeBatch(0, 0), routeBatch(1, 1), routeBatch(2, 1), routeBatch(2, 2),
+    bucketRoutes, gatherExpertRows, computeHostFfn, scatterWeightedRows, resetWork,
+    borrowPackedBlock(0), borrowPackedBlock(1), pinArena(true), pinArena(false),
+    issuePackedCopy(1), issuePackedCopy(2), computeStreamedExpert,
+    scatterStreamedRows, createPoller, registerLayer(0), registerLayer(1),
+    startPoller, signalBatch(1), signalBatch(2), pollDispatch,
+    consumeCompletion, stopPoller, destroyPoller, releaseBorrow,
+    closeHostSafely, closeHostUnsafely, selectObsoleteKernelHelper, stay,
+  }
+
+  val inv = and {
+    s.resident.subseteq(EXPERTS),
+    s.arenaUsed == s.resident.size(),
+    s.arenaUsed >= 0 and s.arenaUsed <= 2,
+    s.offeredRoutes >= 0 and s.offeredRoutes <= 2,
+    s.activeRoutes >= 0 and s.activeRoutes <= s.offeredRoutes,
+    s.skippedRoutes >= 0, s.pollErrors >= 0,
+    s.signalValue >= 0 and s.signalValue <= 2,
+    s.resultValid implies s.work == Released,
+    s.completion implies s.work == Released,
+    s.borrowValid implies (s.borrowedBlock and s.tier == Ready),
+    s.poller == PollerRunning implies s.buffersLive,
+    s.signalMechanism == DriverStreamMemoryOps,
+  }
+
+  val witnessPackedResident = s.tier == Ready and s.resident == EXPERTS and s.arenaUsed == 2
+  val witnessEmptyRouteZero = s.work == Released and s.activeRoutes == 0 and s.outputZero and s.resultValid
+  val witnessSkippedNonresident = s.skippedRoutes > 0 and s.resultValid
+  val witnessStreamedResult = s.work == Released and s.path == CudaStreamPath and s.resultValid and s.slotReusable
+  val witnessPollerSuccess = s.completion and s.resultValid and s.pollErrors == 0
+  val witnessReleasedFailure = s.completion and not(s.resultValid) and s.pollErrors > 0
+  val witnessLifetimeViolation = s.tier == Closed and s.lifetimeViolation
+  val witnessObsoleteHelperInactive = s.signalMechanism == DriverStreamMemoryOps
+
+  run packedArenaReloadTest = init.then(createHost).then(loadExpert(0)).then(loadExpert(1))
+    .then(reloadExpert(0)).then(finishLoading).expect(witnessPackedResident and inv)
+  run routedGatherComputeScatterTest = packedArenaReloadTest.then(routeBatch(2, 2))
+    .then(bucketRoutes).then(gatherExpertRows).then(computeHostFfn)
+    .then(scatterWeightedRows).expect(s.resultValid and not(s.outputZero) and inv)
+  run emptyRoutesReturnZeroTest = packedArenaReloadTest.then(routeBatch(0, 0))
+    .then(bucketRoutes).expect(witnessEmptyRouteZero and inv)
+  run nonresidentRouteIsCountedTest = init.then(createHost).then(loadExpert(0))
+    .then(finishLoading).then(routeBatch(2, 1)).then(bucketRoutes)
+    .then(gatherExpertRows).then(computeHostFfn).then(scatterWeightedRows)
+    .expect(witnessSkippedNonresident and inv)
+  run cudaStreamingRingLifetimeTest = packedArenaReloadTest.then(borrowPackedBlock(0))
+    .then(pinArena(false)).then(issuePackedCopy(2)).then(computeStreamedExpert)
+    .then(scatterStreamedRows).expect(witnessStreamedResult and not(s.arenaPinned) and inv)
+  run pollerCompletionSuccessTest = packedArenaReloadTest.then(createPoller)
+    .then(registerLayer(0)).then(startPoller).then(signalBatch(1)).then(pollDispatch)
+    .expect(witnessPollerSuccess and inv)
+  run pollerFailureStillReleasesTest = packedArenaReloadTest.then(createPoller)
+    .then(registerLayer(1)).then(startPoller).then(signalBatch(1)).then(pollDispatch)
+    .expect(witnessReleasedFailure and inv)
+  run safeShutdownOwnershipTest = pollerCompletionSuccessTest.then(consumeCompletion)
+    .then(stopPoller).then(destroyPoller).then(closeHostSafely)
+    .expect(s.tier == Closed and not(s.lifetimeViolation) and inv)
+  run unsafeBorrowShutdownWitnessTest = packedArenaReloadTest.then(borrowPackedBlock(0))
+    .then(closeHostUnsafely).expect(witnessLifetimeViolation and not(s.borrowValid) and inv)
+  run obsoleteCudaHelperInactiveTest = init.then(selectObsoleteKernelHelper.fail())
+    .then(init).expect(witnessObsoleteHelperInactive and inv)
+}

@@ -1,0 +1,198 @@
+/// Admission and plugin-registration model.
+/// Sources: src/phase4/src/shooting_brake_vllm/config.py::{phase4_enabled,
+/// supported_model, read_bank_header, require_qualified_config,
+/// validate_int4_hybrid_contract}; shooting_brake_vllm/__init__.py::register.
+/// Abstraction: registry entries and concrete geometry fields are finite.
+/// Bank parsing and per-device ownership collapse to BankStatus. Each action
+/// is one Python admission/registration decision.
+module admission {
+  type Phase = Unconfigured | Configured | GatePassed | OverridesLoaded | Qualified | Patched | Registered | Skipped | Rejected
+  type Profile = Qwen35 | Split88 | LagunaR15 | Unknown
+  type Architecture = ConditionalGeneration | CausalLM | Laguna | OtherArchitecture
+  type BankStatus = Missing | Nvfp4Exact | Int4Exact | WrongFormat | WrongGeometry | WrongOwnership
+  type Replacement = Empty | ShootingBrake | Foreign
+  type Error = NoError | UnsupportedModel | BadModelConfig | BadBank | BadMode | ReplacementConflict
+  type State = {
+    phase: Phase,
+    profile: Profile,
+    phase4Selected: bool,
+    hybrid: bool,
+    bank: BankStatus,
+    architecture: Architecture,
+    hiddenSize: int,
+    layers: int,
+    experts: int,
+    topK: int,
+    intermediate: int,
+    textOnly: bool,
+    singleRank: bool,
+    eplbOff: bool,
+    int4OptIn: bool,
+    fileOverridePresent: bool,
+    overridesApplied: bool,
+    replacement: Replacement,
+    error: Error,
+  }
+  var s: State
+
+  pure def registryMember(profile: Profile): bool = profile != Unknown
+  pure def bankContract(profile: Profile, hybrid: bool, bank: BankStatus): bool =
+    if (not(hybrid)) (bank == Missing or bank == Nvfp4Exact or bank == Int4Exact)
+    else if (profile == Split88) bank == Int4Exact
+    else bank == Nvfp4Exact
+  pure def modelContract(profile: Profile, architecture: Architecture,
+    hiddenSize: int, layers: int, experts: int, topK: int,
+    intermediate: int, textOnly: bool): bool =
+    registryMember(profile) and
+      (if (profile == Qwen35)
+        (architecture == ConditionalGeneration and hiddenSize == 2048 and
+          layers == 40 and experts == 256 and topK == 8 and intermediate == 512)
+      else if (profile == Split88)
+        (architecture == ConditionalGeneration and hiddenSize == 3072 and
+          layers == 48 and experts == 180 and topK == 8 and intermediate == 1024 and textOnly)
+      else if (profile == LagunaR15)
+        (architecture == Laguna and hiddenSize == 3072 and layers == 48 and
+          experts == 218 and topK == 10 and intermediate == 1024 and textOnly)
+      else false)
+  pure def modeContract(profile: Profile, hybrid: bool, singleRank: bool, eplbOff: bool, int4OptIn: bool): bool =
+    singleRank and eplbOff and
+      (if (hybrid and profile == Split88) int4OptIn else true)
+
+  action init = s' = {
+    phase: Unconfigured, profile: Unknown, phase4Selected: false,
+    hybrid: false, bank: Missing, architecture: OtherArchitecture,
+    hiddenSize: 0, layers: 0, experts: 0, topK: 0, intermediate: 0,
+    textOnly: false, singleRank: false,
+    eplbOff: false, int4OptIn: false, fileOverridePresent: false,
+    overridesApplied: false, replacement: Empty, error: NoError,
+  }
+
+  action configure(profile: Profile, selected: bool, hybrid: bool,
+    bank: BankStatus, architecture: Architecture, hiddenSize: int,
+    layers: int, experts: int, topK: int, intermediate: int,
+    textOnly: bool, singleRank: bool, eplbOff: bool, int4OptIn: bool,
+    fileOverridePresent: bool, replacement: Replacement): bool = all {
+    s.phase == Unconfigured,
+    s' = { ...s, phase: Configured, profile: profile,
+      phase4Selected: selected, hybrid: hybrid, bank: bank,
+      architecture: architecture, hiddenSize: hiddenSize, layers: layers,
+      experts: experts, topK: topK, intermediate: intermediate,
+      textOnly: textOnly, singleRank: singleRank, eplbOff: eplbOff,
+      int4OptIn: int4OptIn, fileOverridePresent: fileOverridePresent,
+      replacement: replacement },
+  }
+
+  /// phase4_enabled runs before /tmp/sb_env_overrides.json is read.
+  action passPluginGate = all {
+    s.phase == Configured, s.phase4Selected, registryMember(s.profile),
+    s' = { ...s, phase: GatePassed },
+  }
+  action skipPlugin = all {
+    s.phase == Configured,
+    not(s.phase4Selected and registryMember(s.profile)),
+    s' = { ...s, phase: Skipped,
+      error: if (s.phase4Selected) UnsupportedModel else NoError },
+  }
+
+  /// A malformed override file is logged by the implementation; registration
+  /// continues with the inherited environment. This model records only whether
+  /// a supplied file successfully contributes values.
+  action loadOverrides = all {
+    s.phase == GatePassed,
+    s' = { ...s, phase: OverridesLoaded,
+      overridesApplied: s.fileOverridePresent },
+  }
+
+  action qualify = all {
+    s.phase == OverridesLoaded,
+    modelContract(s.profile, s.architecture, s.hiddenSize, s.layers,
+      s.experts, s.topK, s.intermediate, s.textOnly),
+    bankContract(s.profile, s.hybrid, s.bank),
+    modeContract(s.profile, s.hybrid, s.singleRank, s.eplbOff, s.int4OptIn),
+    s' = { ...s, phase: Qualified },
+  }
+  action rejectModel = all {
+    s.phase == OverridesLoaded,
+    not(modelContract(s.profile, s.architecture, s.hiddenSize, s.layers,
+      s.experts, s.topK, s.intermediate, s.textOnly)),
+    s' = { ...s, phase: Rejected, error: BadModelConfig },
+  }
+  action rejectBank = all {
+    s.phase == OverridesLoaded,
+    modelContract(s.profile, s.architecture, s.hiddenSize, s.layers,
+      s.experts, s.topK, s.intermediate, s.textOnly),
+    not(bankContract(s.profile, s.hybrid, s.bank)),
+    s' = { ...s, phase: Rejected, error: BadBank },
+  }
+  action rejectMode = all {
+    s.phase == OverridesLoaded,
+    modelContract(s.profile, s.architecture, s.hiddenSize, s.layers,
+      s.experts, s.topK, s.intermediate, s.textOnly),
+    bankContract(s.profile, s.hybrid, s.bank),
+    not(modeContract(s.profile, s.hybrid, s.singleRank, s.eplbOff, s.int4OptIn)),
+    s' = { ...s, phase: Rejected, error: BadMode },
+  }
+
+  /// Patch installation is ordered before layer construction and OOT registration.
+  action installPatches = all {
+    s.phase == Qualified,
+    s' = { ...s, phase: Patched },
+  }
+  action registerReplacements = all {
+    s.phase == Patched,
+    (s.replacement == Empty or s.replacement == ShootingBrake),
+    s' = { ...s, phase: Registered, replacement: ShootingBrake },
+  }
+  action rejectForeignReplacement = all {
+    s.phase == Patched, s.replacement == Foreign,
+    s' = { ...s, phase: Rejected, error: ReplacementConflict },
+  }
+  action stay = s' = s
+  action step = any {
+    configure(LagunaR15, true, true, Nvfp4Exact, Laguna, 3072, 48, 218, 10, 1024, true, true, true, false, false, Empty),
+    configure(Split88, true, true, Int4Exact, ConditionalGeneration, 3072, 48, 180, 8, 1024, true, true, true, false, false, Empty),
+    configure(Unknown, true, true, Nvfp4Exact, OtherArchitecture, 1, 1, 1, 1, 1, true, true, true, false, true, Empty),
+    passPluginGate, skipPlugin, loadOverrides, qualify, rejectModel,
+    rejectBank, rejectMode, installPatches, registerReplacements,
+    rejectForeignReplacement, stay,
+  }
+
+  val inv = and {
+    s.phase == Registered implies (s.replacement == ShootingBrake and s.error == NoError),
+    s.overridesApplied implies s.fileOverridePresent,
+    s.phase == Qualified implies registryMember(s.profile),
+    s.phase == Skipped implies not(s.phase4Selected and registryMember(s.profile)),
+    s.phase == Rejected implies s.error != NoError,
+  }
+  val registeredWitness = s.phase == Registered and s.replacement == ShootingBrake
+  val disabledWitness = s.phase == Skipped and s.error == NoError
+  val failClosedBankWitness = s.phase == Rejected and s.error == BadBank
+  val conflictWitness = s.phase == Rejected and s.error == ReplacementConflict
+
+  run nvfp4HybridAdmissionTest = init
+    .then(configure(LagunaR15, true, true, Nvfp4Exact, Laguna, 3072, 48, 218, 10, 1024, true, true, true, false, false, Empty))
+    .then(passPluginGate).then(loadOverrides).then(qualify).then(installPatches)
+    .then(registerReplacements).expect(registeredWitness and inv)
+  run allCudaMissingBankTest = init
+    .then(configure(Qwen35, true, false, Missing, ConditionalGeneration, 2048, 40, 256, 8, 512, false, true, true, false, false, Empty))
+    .then(passPluginGate).then(loadOverrides).then(qualify).then(installPatches)
+    .then(registerReplacements).expect(registeredWitness and inv)
+  run pluginDisabledNoopTest = init
+    .then(configure(Qwen35, false, false, Missing, ConditionalGeneration, 2048, 40, 256, 8, 512, false, true, true, false, false, Empty))
+    .then(skipPlugin).expect(disabledWitness and inv)
+  run fileOverrideCannotEnableSkippedPluginTest = init
+    .then(configure(Unknown, true, true, Nvfp4Exact, OtherArchitecture, 1, 1, 1, 1, 1, true, true, true, false, true, Empty))
+    .then(skipPlugin).expect(s.phase == Skipped and not(s.overridesApplied) and inv)
+  run wrongBankGeometryRejectedTest = init
+    .then(configure(LagunaR15, true, true, WrongGeometry, Laguna, 3072, 48, 218, 10, 1024, true, true, true, false, false, Empty))
+    .then(passPluginGate).then(loadOverrides).then(rejectBank)
+    .expect(failClosedBankWitness and inv)
+  run int4RequiresExplicitOptInTest = init
+    .then(configure(Split88, true, true, Int4Exact, ConditionalGeneration, 3072, 48, 180, 8, 1024, true, true, true, false, false, Empty))
+    .then(passPluginGate).then(loadOverrides).then(rejectMode)
+    .expect(s.error == BadMode and inv)
+  run foreignReplacementRejectedTest = init
+    .then(configure(Qwen35, true, false, Missing, ConditionalGeneration, 2048, 40, 256, 8, 512, false, true, true, false, false, Foreign))
+    .then(passPluginGate).then(loadOverrides).then(qualify).then(installPatches)
+    .then(rejectForeignReplacement).expect(conflictWitness and inv)
+}

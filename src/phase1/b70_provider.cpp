@@ -1271,6 +1271,10 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     }
     impl_->capability.num_resident_experts =
         static_cast<std::uint32_t>(resident_experts_total);
+    {
+      const char* v = std::getenv("SHOOTING_BRAKE_B70_OUT_FP16");
+      impl_->out_fp16 = v != nullptr && v[0] == '1' && v[1] == '\0';
+    }
     impl_->capability.output_fp16 = impl_->out_fp16;
     impl_->capability.max_batch_remote =
         static_cast<std::uint32_t>(config.max_batch);
@@ -1348,10 +1352,6 @@ ProviderStatus B70Provider::load(const std::string& bank_path,
     // the GEMM accumulators upstream, where an unscaled dot product over
     // K=3072 reaches ~1e6 and saturating it to Inf was the NaN that cost a
     // boot to find. Those stay fp32.
-    {
-      const char* v = std::getenv("SHOOTING_BRAKE_B70_OUT_FP16");
-      impl_->out_fp16 = v != nullptr && v[0] == '1' && v[1] == '\0';
-    }
     if (impl_->out_fp16) {
       impl_->out16 =
           impl_->allocate_device<sycl::half>(config.max_batch * g_hidden);

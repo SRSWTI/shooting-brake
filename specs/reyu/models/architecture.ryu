@@ -1,0 +1,18 @@
+/// HLD observations shared by the overview and detailed execution models.
+/// These are observation functions, not additional implementation mechanisms.
+/// Source: routed_experts.py::_hybrid_forward_modular, _b70_take_graph;
+///         src/phase7/b70_capi.cpp::B70Poller::loop.
+module architecture {
+  type ResultObservation = Waiting | ValidResult | ReleasedWithoutValidResult
+
+  /// CUDA may join only after local work and each selected remote lane release.
+  pure def allPartsReleased(localDone: bool, released: Set[int], required: Set[int]): bool =
+    localDone and required.subseteq(released)
+
+  /// Completion and output validity are deliberately separate observations.
+  pure def observeResult(released: bool, valid: bool): ResultObservation =
+    if (not(released)) Waiting else if (valid) ValidResult else ReleasedWithoutValidResult
+
+  /// Ownership groups cover the routed slots once, even though computation overlaps.
+  pure def disjointOwners(a: Set[int], b: Set[int]): bool = a.intersect(b).size() == 0
+}

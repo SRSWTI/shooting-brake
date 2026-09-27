@@ -1,0 +1,94 @@
+/// Level 0: one hybrid MoE invocation, not a reimplementation of vLLM.
+/// Source: serve_production.sh; plugin __init__.py::register;
+/// routed_experts.py::_hybrid_forward_modular, _b70_issue_graph, _b70_take_graph;
+/// src/phase7/b70_capi.cpp::B70Poller::loop.
+/// Atomic abstraction: startup and each local/provider computation collapse here;
+/// detailed models split staging, notification, issue/take and buffer reuse.
+/// Completion on provider error remains visible: joining is not success proof.
+module system {
+  import architecture.* from "./architecture"
+
+  type Phase = Booting | Ready | Routed | Running | Joined | Rejected
+  type State = {
+    phase: Phase,
+    localDone: bool,
+    released: Set[int],
+    valid: Set[int],
+    joined: bool,
+    errorObserved: bool,
+  }
+  pure val LANES = Set(0, 1)
+  var s: State
+
+  action init = s' = {
+    phase: Booting, localDone: false, released: Set(), valid: Set(),
+    joined: false, errorObserved: false,
+  }
+
+  /// Successful admission summarizes qualified model/banks/placement/providers.
+  action admit = all { s.phase == Booting, s' = { ...s, phase: Ready } }
+  action reject = all { s.phase == Booting, s' = { ...s, phase: Rejected } }
+  action route = all { s.phase == Ready, s' = { ...s, phase: Routed } }
+  action launch = all { s.phase == Routed, s' = { ...s, phase: Running } }
+  action finishLocal = all {
+    s.phase == Running, not(s.localDone), s' = { ...s, localDone: true },
+  }
+
+  /// A lane releases CUDA on both success and failure in the classic poller.
+  action releaseLane(lane: int, ok: bool): bool = all {
+    s.phase == Running, LANES.contains(lane), not(s.released.contains(lane)),
+    s' = { ...s,
+      released: s.released.union(Set(lane)),
+      valid: if (ok) s.valid.union(Set(lane)) else s.valid,
+    },
+  }
+
+  action join = all {
+    s.phase == Running,
+    allPartsReleased(s.localDone, s.released, LANES),
+    s' = { ...s, phase: Joined, joined: true },
+  }
+
+  /// Error counters are observed outside captured stream work, not by the flag.
+  action observeFailure = all {
+    s.phase == Joined, s.valid != LANES, not(s.errorObserved),
+    s' = { ...s, errorObserved: true },
+  }
+
+  /// Finite scenario reset denotes a subsequent invocation, not a GPU operation.
+  action nextInvocation = all {
+    s.phase == Joined, s.valid == LANES,
+    s' = { ...s, phase: Ready, localDone: false, released: Set(), valid: Set(), joined: false },
+  }
+  action stay = s' = s
+  action step = any {
+    admit, reject, route, launch, finishLocal,
+    releaseLane(0, true), releaseLane(1, true),
+    releaseLane(0, false), releaseLane(1, false),
+    join, observeFailure, nextInvocation, stay,
+  }
+
+  val outputObservation = observeResult(s.joined, s.valid == LANES)
+  val inv = and {
+    s.released.subseteq(LANES), s.valid.subseteq(s.released),
+    s.joined implies allPartsReleased(s.localDone, s.released, LANES),
+    s.errorObserved implies (s.joined and s.valid != LANES),
+  }
+  val successfulJoin = s.joined and s.valid == LANES
+  val releasedFailure = outputObservation == ReleasedWithoutValidResult
+  /// Checked only as syntax unless a temporal checker is explicitly invoked.
+  temporal joinProgress = join.weakFair(s) implies
+    ((s.phase == Running and allPartsReleased(s.localDone, s.released, LANES)) leadsTo s.joined)
+
+  run concurrentJoinTest = init.then(admit).then(route).then(launch)
+    .then(releaseLane(1, true)).then(finishLocal).then(releaseLane(0, true))
+    .then(join).expect(successfulJoin and inv)
+  run failedCompletionIsNotSuccessTest = init.then(admit).then(route).then(launch)
+    .then(releaseLane(0, false)).then(releaseLane(1, true)).then(finishLocal)
+    .then(join).expect(releasedFailure).then(observeFailure).expect(inv and s.errorObserved)
+  run cannotJoinEarlyTest = init.then(admit).then(route).then(launch)
+    .then(finishLocal).then(releaseLane(0, true)).then(join.fail())
+  run nextInvocationClearsObservationsTest = concurrentJoinTest.then(nextInvocation)
+    .expect(not(s.joined) and s.released.size() == 0 and inv)
+  run rejectedAdmissionTest = init.then(reject).then(route.fail())
+}

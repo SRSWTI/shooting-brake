@@ -1,0 +1,416 @@
+/// Shared-ring service and the independent memfd transport probe.
+/// Sources: src/phase2/ring_protocol.hpp::{SlotState,RequestDescriptor,
+/// CompletionDescriptor,RingHeader}; shared_ring.cpp::SharedRing::{host_begin,
+/// host_publish,host_cancel,host_timeout,provider_claim,provider_complete,
+/// host_consume,host_reclaim,teardown_generation};
+/// memfd_transport_{host.cu,provider.cpp} and memfd_transport_protocol.hpp.
+/// Abstraction: one representative SBRING02 slot stands for each of the eight
+/// deterministic lanes. Concrete bounded parameters are checked by pure
+/// validators; their boolean results summarize byte arrays and hashes after
+/// preserving generations, sequence ownership, closure and visibility.
+/// Atomicity: each C++ publication/CAS boundary is one action. Eventfds are
+/// deliberately absent because they are coalescible hints, never authority.
+module ring {
+  type Life = Live | Retired
+  type Auth = Unchecked | Authenticated | AuthRejected
+  type Lane = Free | HostWriting | RequestReady | ProviderRunning | ResponseReady | HostReading
+  type Closure = OpenRequest | CancelClosed | DeadlineClosed
+  type Terminal = NoCompletion | Success | Rejected | Cancelled | DeadlineExceeded | DeviceFailed | ProtocolFailed
+  type Observation = Pending | Committed | Quarantined | Failed | Stale
+  type ProbePhase = ProbeOff | ProbeIdle | ProbeReady | ProbeProcessing | ProbeComplete | ProbeFailed | ProbeShutdown
+
+  type State = {
+    life: Life,
+    auth: Auth,
+    lane: Lane,
+    closure: Closure,
+    terminal: Terminal,
+    observation: Observation,
+    nextHostSeq: int,
+    nextProviderSeq: int,
+    requestSeq: int,
+    requestGeneration: int,
+    outputVersion: int,
+    providerBusy: bool,
+    descriptorExact: bool,
+    payloadValid: bool,
+    completionIdentityExact: bool,
+    outputFinite: bool,
+    outputVisible: bool,
+    ringGeneration: int,
+    providerGeneration: int,
+    probe: ProbePhase,
+    probeExpectedSeq: int,
+    probeSeq: int,
+    probeExtentValid: bool,
+  }
+
+  var s: State
+  pure def bootstrapValid(pid: int, expectedPid: int, placementIdentity: int,
+    expectedPlacementIdentity: int, weightIdentity: int,
+    expectedWeightIdentity: int, fdCount: int, sealCount: int): bool = and {
+    pid == expectedPid, pid > 0,
+    placementIdentity == expectedPlacementIdentity, placementIdentity > 0,
+    weightIdentity == expectedWeightIdentity, weightIdentity > 0,
+    fdCount == 3, sealCount == 3,
+  }
+  pure def canonicalPayloadValid(mask: int, canonicalId: int, row: int,
+    batch: int, routePosition: int, weightFinite: bool): bool = and {
+    mask == 1, canonicalId >= 0, canonicalId < 256,
+    row >= 0, row < batch, routePosition == 0, weightFinite,
+  }
+  pure def requiredProbeExtent(bytes: int): bool =
+    bytes == 4096 or bytes == 8192 or bytes == 524288 or bytes == 1048576
+
+
+  action init = s' = {
+    life: Live, auth: Unchecked, lane: Free, closure: OpenRequest,
+    terminal: NoCompletion, observation: Pending,
+    nextHostSeq: 1, nextProviderSeq: 1, requestSeq: 0,
+    requestGeneration: 0, outputVersion: 0, providerBusy: false,
+    descriptorExact: true, payloadValid: true,
+    completionIdentityExact: true, outputFinite: true, outputVisible: false,
+    ringGeneration: 1, providerGeneration: 1,
+    probe: ProbeOff, probeExpectedSeq: 1, probeSeq: 0,
+    probeExtentValid: true,
+  }
+
+  /// b70_ring_provider.cpp::run authenticates packet shape, three distinct fd
+  /// kinds, PID, generations, nonces/fingerprints, placement and bank SHA-256.
+  action authenticate(pid: int, expectedPid: int, placementIdentity: int,
+    expectedPlacementIdentity: int, weightIdentity: int,
+    expectedWeightIdentity: int, fdCount: int, sealCount: int): bool = all {
+    s.life == Live, s.auth == Unchecked,
+    bootstrapValid(pid, expectedPid, placementIdentity,
+      expectedPlacementIdentity, weightIdentity, expectedWeightIdentity,
+      fdCount, sealCount),
+    s' = { ...s, auth: Authenticated },
+  }
+  action rejectAuthentication(pid: int, expectedPid: int,
+    placementIdentity: int, expectedPlacementIdentity: int,
+    weightIdentity: int, expectedWeightIdentity: int, fdCount: int,
+    sealCount: int): bool = all {
+    s.life == Live, s.auth == Unchecked,
+    not(bootstrapValid(pid, expectedPid, placementIdentity,
+      expectedPlacementIdentity, weightIdentity, expectedWeightIdentity,
+      fdCount, sealCount)),
+    s' = { ...s, auth: AuthRejected },
+  }
+
+  /// SharedRing::host_begin requires contiguous host sequence and FREE. The
+  /// real slot is (seq-1)%8; one lane represents the selected slot here.
+  action hostBegin(seq: int): bool = all {
+    s.life == Live, s.auth == Authenticated, s.lane == Free,
+    seq == s.nextHostSeq, seq > 0,
+    s' = { ...s,
+      lane: HostWriting, closure: OpenRequest, terminal: NoCompletion,
+      observation: Pending, requestSeq: seq,
+      requestGeneration: s.requestGeneration + 1,
+      outputVersion: s.outputVersion + 1,
+      nextHostSeq: s.nextHostSeq + 1,
+      descriptorExact: true, payloadValid: true,
+      completionIdentityExact: true, outputFinite: true,
+      outputVisible: false,
+    },
+  }
+
+  /// Source payload rules are evaluated from bounded request fields rather than
+  /// a fixture outcome. This representative row has one enabled route.
+  action configurePayload(mask: int, canonicalId: int, row: int, batch: int,
+    routePosition: int, weightFinite: bool): bool = all {
+    s.life == Live, s.lane == HostWriting,
+    s' = { ...s,
+      payloadValid: canonicalPayloadValid(mask, canonicalId, row, batch,
+        routePosition, weightFinite),
+    },
+  }
+  action hostPublish = all {
+    s.life == Live, s.lane == HostWriting,
+    s.descriptorExact, s.payloadValid,
+    s' = { ...s, lane: RequestReady },
+  }
+
+  /// Before publication, cancellation abandons the sole reservation and rolls
+  /// back next_host_seq_; after publication it leaves a tombstone for consumer
+  /// sequence continuity. The timeout branch has the same ownership shape.
+  action cancelUnpublished = all {
+    s.life == Live, s.lane == HostWriting,
+    s' = { ...s,
+      lane: Free, nextHostSeq: s.requestSeq, closure: CancelClosed,
+      observation: Quarantined,
+    },
+  }
+  action cancelReady = all {
+    s.life == Live, s.lane == RequestReady, s.closure == OpenRequest,
+    s' = { ...s, closure: CancelClosed },
+  }
+  action deadlineReady = all {
+    s.life == Live, s.lane == RequestReady, s.closure == OpenRequest,
+    s' = { ...s, closure: DeadlineClosed },
+  }
+
+  /// Raw peer corruption is modeled after release publication: claim acquires
+  /// ownership but exact descriptor/payload validation fails closed.
+  action setPublishedGenerationEcho(generation: int): bool = all {
+    s.life == Live, s.lane == RequestReady,
+    s' = { ...s, descriptorExact: generation == s.ringGeneration },
+  }
+  action providerClaim = all {
+    s.life == Live, s.auth == Authenticated, s.lane == RequestReady,
+    not(s.providerBusy), s.requestSeq == s.nextProviderSeq,
+    s' = { ...s, lane: ProviderRunning, providerBusy: true },
+  }
+  action timeoutRunning = all {
+    s.life == Live, s.lane == ProviderRunning, s.closure == OpenRequest,
+    s' = { ...s, closure: DeadlineClosed, observation: Quarantined },
+  }
+  action cancelRunning = all {
+    s.life == Live, s.lane == ProviderRunning, s.closure == OpenRequest,
+    s' = { ...s, closure: CancelClosed, observation: Quarantined },
+  }
+
+  /// provider_complete forbids OK_PARTIAL. Non-success completions publish no
+  /// output extent; a late success is still quarantined by host_consume.
+  action completeSuccess = all {
+    s.life == Live, s.lane == ProviderRunning, s.providerBusy,
+    s.descriptorExact, s.payloadValid, s.outputFinite,
+    s' = { ...s,
+      lane: ResponseReady, terminal: Success, providerBusy: false,
+      nextProviderSeq: s.nextProviderSeq + 1,
+    },
+  }
+  action completeRejected = all {
+    s.life == Live, s.lane == ProviderRunning, s.providerBusy,
+    s' = { ...s,
+      lane: ResponseReady, terminal: Rejected, providerBusy: false,
+      nextProviderSeq: s.nextProviderSeq + 1, outputVisible: false,
+    },
+  }
+  action completeTombstone = all {
+    s.life == Live, s.lane == ProviderRunning, s.providerBusy,
+    s.closure != OpenRequest,
+    s' = { ...s,
+      lane: ResponseReady,
+      terminal: if (s.closure == CancelClosed) Cancelled else DeadlineExceeded,
+      providerBusy: false, nextProviderSeq: s.nextProviderSeq + 1,
+      outputVisible: false,
+    },
+  }
+  action completeProtocolFailure = all {
+    s.life == Live, s.lane == ProviderRunning, s.providerBusy,
+    not(s.descriptorExact and s.payloadValid),
+    s' = { ...s,
+      lane: ResponseReady, terminal: ProtocolFailed, providerBusy: false,
+      nextProviderSeq: s.nextProviderSeq + 1, outputVisible: false,
+    },
+  }
+  action completeDeviceFailure = all {
+    s.life == Live, s.lane == ProviderRunning, s.providerBusy,
+    s' = { ...s,
+      lane: ResponseReady, terminal: DeviceFailed, providerBusy: false,
+      nextProviderSeq: s.nextProviderSeq + 1, outputVisible: false,
+    },
+  }
+
+  action setCompletionProviderEcho(generation: int): bool = all {
+    s.life == Live, s.lane == ResponseReady,
+    s' = { ...s, completionIdentityExact: generation == s.providerGeneration },
+  }
+  action hostConsume = all {
+    s.life == Live, s.lane == ResponseReady,
+    s' = { ...s,
+      lane: HostReading,
+      observation:
+        if (not(s.descriptorExact and s.completionIdentityExact)) Stale
+        else if (s.closure != OpenRequest) Quarantined
+        else if (s.terminal == Success and s.outputFinite) Committed
+        else Failed,
+      outputVisible: s.descriptorExact and s.completionIdentityExact and
+        s.closure == OpenRequest and s.terminal == Success and s.outputFinite,
+    },
+  }
+  action hostReclaim = all {
+    s.life == Live, s.lane == HostReading,
+    s' = { ...s, lane: Free, outputVisible: false },
+  }
+
+  /// Retirement is destructive for every peer; replacement denotes creation
+  /// of a new mapping/generation, never reuse of the claimed old slot.
+  action retireGeneration = all {
+    s.life == Live,
+    s' = { ...s,
+      life: Retired, outputVisible: false,
+      observation: Quarantined,
+    },
+  }
+  action replaceGeneration = all {
+    s.life == Retired,
+    s' = {
+      ...s, life: Live, auth: Unchecked, lane: Free,
+      closure: OpenRequest, terminal: NoCompletion, observation: Pending,
+      nextHostSeq: 1, nextProviderSeq: 1, requestSeq: 0,
+      requestGeneration: 0, outputVersion: 0, providerBusy: false,
+      descriptorExact: true, payloadValid: true,
+      completionIdentityExact: true, outputFinite: true, outputVisible: false,
+      ringGeneration: s.ringGeneration + 1,
+      providerGeneration: s.providerGeneration + 1,
+    },
+  }
+
+  /// The probe is SBP2MEMF v1, not SBRING02: one request arena, one response
+  /// arena, exact monotonically increasing sequence, extent checks and copies.
+  action startProbe = all {
+    s.probe == ProbeOff,
+    s' = { ...s, probe: ProbeIdle, probeExpectedSeq: 1, probeSeq: 0,
+      probeExtentValid: true },
+  }
+  action probePublish(seq: int, bytes: int): bool = all {
+    s.probe == ProbeIdle, seq == s.probeExpectedSeq,
+    s' = { ...s, probe: ProbeReady, probeSeq: seq,
+      probeExtentValid: requiredProbeExtent(bytes) },
+  }
+  action probeClaim = all {
+    s.probe == ProbeReady,
+    s' = { ...s,
+      probe: if (s.probeExtentValid) ProbeProcessing else ProbeFailed,
+    },
+  }
+  action probeCopyComplete = all {
+    s.probe == ProbeProcessing,
+    s' = { ...s, probe: ProbeComplete,
+      probeExpectedSeq: s.probeExpectedSeq + 1 },
+  }
+  action probeHostReset = all {
+    s.probe == ProbeComplete,
+    s' = { ...s, probe: ProbeIdle },
+  }
+  action probeCleanShutdown = all {
+    s.probe == ProbeIdle,
+    s' = { ...s, probe: ProbeShutdown,
+      probeSeq: s.probeExpectedSeq,
+      probeExpectedSeq: s.probeExpectedSeq + 1 },
+  }
+  /// Disabled-operation observations preserve the current state explicitly.
+  /// Their guards are the negations exercised by the corresponding source API.
+  action observePublishRejected = all {
+    s.life == Live, s.lane == HostWriting,
+    not(s.descriptorExact and s.payloadValid), s' = s,
+  }
+  action observeHostBeginUnauthenticated = all {
+    s.life == Live, s.auth != Authenticated, s' = s,
+  }
+  action observeConsumeRetired = all {
+    s.life == Retired, s' = s,
+  }
+
+
+  action stay = s' = s
+  action step = any {
+    authenticate(501, 501, 29, 29, 31, 31, 3, 3),
+    rejectAuthentication(502, 501, 29, 29, 31, 31, 3, 3),
+    hostBegin(1), hostBegin(2), hostBegin(3),
+    configurePayload(1, 0, 0, 1, 0, true),
+    configurePayload(2, 0, 0, 1, 0, true),
+    configurePayload(1, -1, 0, 1, 0, true),
+    hostPublish, cancelUnpublished, cancelReady, deadlineReady,
+    setPublishedGenerationEcho(1), setPublishedGenerationEcho(2),
+    providerClaim, timeoutRunning, cancelRunning,
+    completeSuccess, completeRejected, completeTombstone,
+    completeProtocolFailure, completeDeviceFailure,
+    setCompletionProviderEcho(1), setCompletionProviderEcho(2),
+    hostConsume, hostReclaim, retireGeneration, replaceGeneration,
+    startProbe, probePublish(1, 4096), probePublish(1, 0),
+    probePublish(2, 1048576), probeClaim, probeCopyComplete,
+    probeHostReset, probeCleanShutdown,
+    observePublishRejected, observeHostBeginUnauthenticated,
+    observeConsumeRetired, stay,
+  }
+
+  val inv = and {
+    s.nextHostSeq > 0, s.nextProviderSeq > 0,
+    s.requestGeneration >= 0, s.outputVersion >= 0,
+    s.providerBusy == (s.lane == ProviderRunning),
+    s.outputVisible implies (s.lane == HostReading and
+      s.observation == Committed and s.terminal == Success and
+      s.closure == OpenRequest and s.completionIdentityExact),
+    s.life == Retired implies not(s.outputVisible),
+    s.nextProviderSeq <= s.nextHostSeq,
+    s.lane == Free implies not(s.providerBusy),
+    s.probeExpectedSeq > 0,
+  }
+
+  val witnessPublished = s.lane == RequestReady and s.requestSeq == 1
+  val witnessCommitted = s.observation == Committed and s.outputVisible
+  val witnessQuarantined = s.observation == Quarantined and not(s.outputVisible)
+  val witnessRetired = s.life == Retired and not(s.outputVisible)
+  val witnessProbeComplete = s.probe == ProbeComplete and s.probeSeq == 1
+
+  run publishedRequestWitnessTest =
+    init.then(authenticate(501, 501, 29, 29, 31, 31, 3, 3))
+    .then(hostBegin(1)).then(configurePayload(1, 0, 0, 1, 0, true))
+    .then(hostPublish).expect(witnessPublished and inv)
+  run committedOutputWitnessTest =
+    init.then(authenticate(501, 501, 29, 29, 31, 31, 3, 3))
+    .then(hostBegin(1)).then(configurePayload(1, 0, 0, 1, 0, true))
+    .then(hostPublish).then(providerClaim).then(completeSuccess)
+    .then(hostConsume).expect(witnessCommitted and inv)
+  run successAndSafeReuseTest =
+    init.then(authenticate(501, 501, 29, 29, 31, 31, 3, 3))
+    .then(hostBegin(1)).then(configurePayload(1, 0, 0, 1, 0, true))
+    .then(hostPublish).then(providerClaim).then(completeSuccess)
+    .then(hostConsume).then(hostReclaim).then(hostBegin(2))
+    .expect(s.requestGeneration == 2 and s.outputVersion == 2 and inv)
+  run malformedPayloadStaysPrivateTest =
+    init.then(authenticate(501, 501, 29, 29, 31, 31, 3, 3)).then(hostBegin(1))
+    .then(configurePayload(2, 0, 0, 1, 0, true))
+    .then(observePublishRejected)
+    .then(configurePayload(1, 0, 0, 1, 0, true)).then(hostPublish)
+    .expect(witnessPublished and inv)
+  run preclaimCancellationTombstoneTest =
+    init.then(authenticate(501, 501, 29, 29, 31, 31, 3, 3)).then(hostBegin(1))
+    .then(configurePayload(1, 7, 0, 1, 0, true)).then(hostPublish)
+    .then(cancelReady).then(providerClaim).then(completeTombstone)
+    .then(hostConsume).expect(witnessQuarantined and
+      s.terminal == Cancelled and inv)
+  run postclaimDeadlineQuarantineTest =
+    init.then(authenticate(501, 501, 29, 29, 31, 31, 3, 3)).then(hostBegin(1))
+    .then(configurePayload(1, 255, 0, 1, 0, true)).then(hostPublish)
+    .then(providerClaim).then(timeoutRunning).then(completeSuccess)
+    .then(hostConsume).expect(witnessQuarantined and inv)
+  run staleCompletionNeverExposesOutputTest =
+    init.then(authenticate(501, 501, 29, 29, 31, 31, 3, 3)).then(hostBegin(1))
+    .then(configurePayload(1, 0, 0, 1, 0, true)).then(hostPublish)
+    .then(providerClaim).then(completeSuccess)
+    .then(setCompletionProviderEcho(2)).then(hostConsume)
+    .expect(s.observation == Stale and not(s.outputVisible) and inv)
+  run malformedDescriptorClosesInOrderTest =
+    init.then(authenticate(501, 501, 29, 29, 31, 31, 3, 3)).then(hostBegin(1))
+    .then(configurePayload(1, 0, 0, 1, 0, true)).then(hostPublish)
+    .then(setPublishedGenerationEcho(2)).then(providerClaim)
+    .then(completeProtocolFailure).then(hostConsume)
+    .expect(s.observation == Stale and not(s.outputVisible) and inv)
+  run authenticationFailureBlocksTrafficTest =
+    init.then(rejectAuthentication(502, 501, 29, 29, 31, 31, 3, 3))
+    .then(observeHostBeginUnauthenticated).expect(inv)
+  run retirementRequiresFreshGenerationTest =
+    init.then(authenticate(501, 501, 29, 29, 31, 31, 3, 3)).then(hostBegin(1))
+    .then(configurePayload(1, 0, 0, 1, 0, true)).then(hostPublish)
+    .then(providerClaim).then(retireGeneration).then(observeConsumeRetired)
+    .then(replaceGeneration)
+    .expect(s.life == Live and s.auth == Unchecked and
+      s.ringGeneration == 2 and inv)
+  run retiredGenerationWitnessTest =
+    init.then(authenticate(501, 501, 29, 29, 31, 31, 3, 3)).then(hostBegin(1))
+    .then(configurePayload(1, 0, 0, 1, 0, true)).then(hostPublish)
+    .then(providerClaim).then(retireGeneration).expect(witnessRetired and inv)
+  run independentProbeRoundTripTest = init.then(startProbe)
+    .then(probePublish(1, 4096)).then(probeClaim).then(probeCopyComplete)
+    .then(probeHostReset).then(probeCleanShutdown)
+    .expect(s.probe == ProbeShutdown and inv)
+  run probeCompletedWitnessTest = init.then(startProbe)
+    .then(probePublish(1, 4096)).then(probeClaim).then(probeCopyComplete)
+    .expect(witnessProbeComplete and inv)
+  run probeRejectsBadExtentTest = init.then(startProbe)
+    .then(probePublish(1, 0)).then(probeClaim)
+    .expect(s.probe == ProbeFailed and inv)
+}

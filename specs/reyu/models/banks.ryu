@@ -1,0 +1,278 @@
+/// Bank construction and format-validation state machine.
+/// Sources: src/phase1/extract_experts.py::BankShape/main/write_layer;
+/// extract_experts_int4.py::BankShape/main/write_layer/assert_qzeros/assert_g_idx_trivial;
+/// build_marlin_bank.py::main/_repack_layer_into;
+/// build_b12x_bank.py::main/load_layer_planes; and the phase4 format modules.
+/// Abstraction: tensor contents and GPU transforms become guarded observations.
+/// Exact integer layout functions remain executable and comparable with Python.
+module banks {
+  type BankFormat = NVFP4 | SBINT401 | Marlin | B12x
+  type BuildPhase = Idle | Selected | GeometryAccepted | PayloadWritten | Validated | Published | Rejected
+  type BankState = {
+    phase: BuildPhase,
+    format: BankFormat,
+    layers: int,
+    experts: int,
+    hidden: int,
+    intermediate: int,
+    recordBytes: int,
+    totalBytes: int,
+    geometryOk: bool,
+    sourceIdentityOk: bool,
+    headerOk: bool,
+    payloadOk: bool,
+    packingOk: bool,
+    residentMapOk: bool,
+    scaleContractOk: bool,
+    bitComparisonOk: bool,
+    atomicReplacement: bool,
+    errorObserved: bool,
+  }
+
+  /// Exact mirror of extract_experts.py::BankShape.expert_bytes.
+  pure def nvfp4ExpertBytes(hidden: int, intermediate: int): int =
+    2 * intermediate * (hidden / 2) +
+    2 * intermediate * (hidden / 16) +
+    hidden * (intermediate / 2) +
+    hidden * (intermediate / 16) + 8
+
+  /// Exact mirror of extract_experts.py::BankShape.total_bytes; header is 60 B.
+  pure def nvfp4BankBytes(layers: int, experts: int, hidden: int, intermediate: int): int =
+    60 + layers * experts * nvfp4ExpertBytes(hidden, intermediate)
+
+  /// Mirrors int4_bank_format.py::_align_up and Int4BankHeader.data_offset.
+  pure def align4096(value: int): int = ((value + 4095) / 4096) * 4096
+  pure def int4DataOffset(experts: int): int = align4096(128 + 4 * experts)
+
+  /// Six SBINT401 planes per expert: gate/up qweight+fp16 scale, then down.
+  pure def int4ExpertBytes(hidden: int, intermediate: int): int =
+    2 * (((hidden / 8) * intermediate * 4) +
+      ((hidden / 128) * intermediate * 2)) +
+    ((intermediate / 8) * hidden * 4) +
+    ((intermediate / 128) * hidden * 2)
+  pure def int4BankBytes(layers: int, experts: int, hidden: int, intermediate: int): int =
+    int4DataOffset(experts) + layers * experts * int4ExpertBytes(hidden, intermediate)
+
+  var s: BankState
+
+  action init = s' = {
+    phase: Idle, format: NVFP4, layers: 0, experts: 0,
+    hidden: 0, intermediate: 0, recordBytes: 0, totalBytes: 0,
+    geometryOk: false, sourceIdentityOk: false, headerOk: false,
+    payloadOk: false, packingOk: false, residentMapOk: false,
+    scaleContractOk: false, bitComparisonOk: false,
+    atomicReplacement: false, errorObserved: false,
+  }
+
+  action selectFormat(
+    format: BankFormat, layers: int, experts: int,
+    hidden: int, intermediate: int,
+  ): bool = all {
+    s.phase == Idle,
+    layers > 0, layers <= 48, experts > 0, experts <= 256,
+    hidden > 0, hidden <= 3072, intermediate > 0, intermediate <= 1024,
+    s' = { ...s, phase: Selected, format: format, layers: layers,
+      experts: experts, hidden: hidden, intermediate: intermediate },
+  }
+
+  /// NVFP4 requires block-16 geometry and exact header-implied byte counts.
+  action acceptNVFP4Geometry(recordBytes: int, totalBytes: int): bool = all {
+    s.phase == Selected, s.format == NVFP4,
+    s.hidden % 16 == 0, s.intermediate % 16 == 0,
+    recordBytes == nvfp4ExpertBytes(s.hidden, s.intermediate),
+    totalBytes == nvfp4BankBytes(s.layers, s.experts, s.hidden, s.intermediate),
+    s' = { ...s, phase: GeometryAccepted, geometryOk: true,
+      recordBytes: recordBytes, totalBytes: totalBytes },
+  }
+
+  /// SBINT401 requires g128 geometry, 4096-aligned header/planes and exact size.
+  action acceptInt4Geometry(recordBytes: int, totalBytes: int): bool = all {
+    s.phase == Selected, s.format == SBINT401,
+    s.hidden % 128 == 0, s.intermediate % 128 == 0,
+    recordBytes == int4ExpertBytes(s.hidden, s.intermediate),
+    totalBytes == int4BankBytes(s.layers, s.experts, s.hidden, s.intermediate),
+    recordBytes % 4096 == 0,
+    s' = { ...s, phase: GeometryAccepted, geometryOk: true,
+      recordBytes: recordBytes, totalBytes: totalBytes },
+  }
+
+  /// Sidecar geometry is derived by its canonical format owner. `layerStride`
+  /// and `fileBytes` are guarded here against positivity, 4096 alignment and
+  /// the exact header-plus-layer extent; plane derivation stays in Python.
+  action acceptSidecarGeometry(layerStride: int, fileBytes: int): bool = all {
+    s.phase == Selected, (s.format == Marlin or s.format == B12x),
+    layerStride > 0, layerStride % 4096 == 0,
+    fileBytes == int4DataOffset(s.experts) + s.layers * layerStride,
+    s' = { ...s, phase: GeometryAccepted, geometryOk: true,
+      recordBytes: layerStride, totalBytes: fileBytes },
+  }
+
+  action rejectGeometry(recordBytes: int, totalBytes: int): bool = all {
+    s.phase == Selected,
+    or {
+      recordBytes <= 0, totalBytes <= 0,
+      (s.format == NVFP4 and totalBytes !=
+        nvfp4BankBytes(s.layers, s.experts, s.hidden, s.intermediate)),
+      (s.format == SBINT401 and totalBytes !=
+        int4BankBytes(s.layers, s.experts, s.hidden, s.intermediate)),
+      ((s.format == Marlin or s.format == B12x) and recordBytes % 4096 != 0),
+    },
+    s' = { ...s, phase: Rejected, errorObserved: true },
+  }
+
+  /// gate/up global-scale bit patterns must match for fused [gate;up].
+  action writeNVFP4(gateGlobalBits: int, upGlobalBits: int): bool = all {
+    s.phase == GeometryAccepted, s.format == NVFP4,
+    gateGlobalBits == upGlobalBits,
+    s' = { ...s, phase: PayloadWritten, packingOk: true,
+      residentMapOk: true, scaleContractOk: true, atomicReplacement: true },
+  }
+
+  /// Accepted qzero words are decimal encodings of uniform 0x77777777 and
+  /// 0x88888888; g_idx must be absent or the trivial ramp.
+  action writeInt4(qzeroWord: int, gIdxTrivial: bool): bool = all {
+    s.phase == GeometryAccepted, s.format == SBINT401,
+    (qzeroWord == 2004318071 or qzeroWord == 2290649224), gIdxTrivial,
+    s' = { ...s, phase: PayloadWritten, packingOk: true,
+      residentMapOk: true, scaleContractOk: true, atomicReplacement: true },
+  }
+
+  /// scaleDtype 0=fp16, 1=bf16. Anonymous RSS must not exceed 4 GiB.
+  action writeMarlin(scaleDtype: int, anonymousRssBytes: int): bool = all {
+    s.phase == GeometryAccepted, s.format == Marlin,
+    (scaleDtype == 0 or scaleDtype == 1),
+    anonymousRssBytes >= 0, anonymousRssBytes <= 4294967296,
+    s' = { ...s, phase: PayloadWritten, packingOk: true,
+      residentMapOk: true, scaleContractOk: true, atomicReplacement: false },
+  }
+
+  /// The builder rejects >0.5% nonzero sf1 values below E4M3's floor and
+  /// requires runtime input_global_scale=1. `underflowPermille` is bounded.
+  action writeB12x(underflowPermille: int, inputGlobalScaleOne: bool): bool = all {
+    s.phase == GeometryAccepted, s.format == B12x,
+    underflowPermille >= 0, underflowPermille <= 5, inputGlobalScaleOne,
+    s' = { ...s, phase: PayloadWritten, packingOk: true,
+      residentMapOk: true, scaleContractOk: true, atomicReplacement: true },
+  }
+
+  action validateExact(
+    sourceIdentityCode: int, expectedIdentityCode: int,
+    mismatchBytes: int, checkedLayers: int,
+  ): bool = all {
+    s.phase == PayloadWritten,
+    sourceIdentityCode == expectedIdentityCode,
+    mismatchBytes == 0, checkedLayers > 0, checkedLayers <= s.layers,
+    s' = { ...s, phase: Validated, sourceIdentityOk: true,
+      headerOk: true, payloadOk: true, bitComparisonOk: true },
+  }
+  action rejectHeader(actualVersion: int, expectedVersion: int): bool = all {
+    s.phase == PayloadWritten, actualVersion != expectedVersion,
+    s' = { ...s, phase: Rejected, errorObserved: true },
+  }
+  action rejectPayload(mismatchBytes: int): bool = all {
+    s.phase == PayloadWritten, mismatchBytes > 0,
+    s' = { ...s, phase: Rejected, headerOk: true, errorObserved: true },
+  }
+  action rejectSourceIdentity(actualIdentity: int, expectedIdentity: int): bool = all {
+    s.phase == PayloadWritten, actualIdentity != expectedIdentity,
+    s' = { ...s, phase: Rejected, headerOk: true, payloadOk: true,
+      errorObserved: true },
+  }
+
+  action publish = all { s.phase == Validated, s' = { ...s, phase: Published } }
+  action stay = s' = s
+
+  action step = any {
+    selectFormat(NVFP4, 32, 256, 2048, 512),
+    selectFormat(SBINT401, 2, 8, 3072, 1024),
+    selectFormat(Marlin, 2, 8, 3072, 1024),
+    selectFormat(B12x, 48, 126, 3072, 1024),
+    acceptNVFP4Geometry(1769480, 14495580220),
+    acceptInt4Geometry(4866048, 77860864),
+    acceptSidecarGeometry(38928384, 77860864),
+    acceptSidecarGeometry(668868608, 32105697280), rejectGeometry(1, 1),
+    writeNVFP4(17, 17), writeInt4(2004318071, true),
+    writeMarlin(1, 1073741824), writeB12x(4, true),
+    validateExact(73, 73, 0, 1), rejectHeader(1, 2),
+    rejectPayload(1), rejectSourceIdentity(72, 73), publish, stay,
+  }
+
+  val inv = and {
+    (s.phase == GeometryAccepted or s.phase == PayloadWritten or
+      s.phase == Validated or s.phase == Published) implies and {
+      s.geometryOk, s.recordBytes > 0, s.totalBytes > 0,
+    },
+    (s.phase == Validated or s.phase == Published) implies and {
+      s.sourceIdentityOk, s.headerOk, s.payloadOk, s.packingOk,
+      s.residentMapOk, s.scaleContractOk, s.bitComparisonOk,
+    },
+    s.phase == Published implies not(s.errorObserved),
+    s.phase == Rejected implies s.errorObserved,
+    (s.phase == Published and s.format == Marlin) implies not(s.atomicReplacement),
+    (s.phase == Published and s.format != Marlin) implies s.atomicReplacement,
+  }
+
+  val witnessNVFP4Published = s.phase == Published and s.format == NVFP4
+  val witnessInt4Published = s.phase == Published and s.format == SBINT401
+  val witnessMarlinDirectPublication =
+    s.phase == Published and s.format == Marlin and not(s.atomicReplacement)
+  val witnessB12xScaleFactorization =
+    s.phase == Published and s.format == B12x and s.scaleContractOk
+  val witnessRejectedArtifact = s.phase == Rejected and s.errorObserved
+  val witnessFrozenNVFP4Layout =
+    nvfp4ExpertBytes(2048, 512) == 1769480 and
+    nvfp4BankBytes(32, 256, 2048, 512) == 14495580220
+  val witnessTinyInt4Layout =
+    int4DataOffset(8) == 4096 and int4ExpertBytes(3072, 1024) == 4866048 and
+    int4BankBytes(2, 8, 3072, 1024) == 77860864
+
+  run nvfp4ExtractionTest = init
+    .then(selectFormat(NVFP4, 32, 256, 2048, 512))
+    .then(acceptNVFP4Geometry(1769480, 14495580220))
+    .then(writeNVFP4(1065353216, 1065353216))
+    .then(validateExact(73, 73, 0, 16)).then(publish)
+    .expect(witnessNVFP4Published and witnessFrozenNVFP4Layout and inv)
+  run int4ExplicitResidentMapTest = init
+    .then(selectFormat(SBINT401, 2, 8, 3072, 1024))
+    .then(acceptInt4Geometry(4866048, 77860864))
+    .then(writeInt4(2004318071, true))
+    .then(validateExact(88, 88, 0, 2)).then(publish)
+    .expect(witnessInt4Published and witnessTinyInt4Layout and inv)
+  run int4V2QzeroConventionTest = init
+    .then(selectFormat(SBINT401, 2, 8, 3072, 1024))
+    .then(acceptInt4Geometry(4866048, 77860864))
+    .then(writeInt4(2290649224, true))
+    .expect(s.phase == PayloadWritten and inv)
+  run marlinDirectDestinationEdgeTest = init
+    .then(selectFormat(Marlin, 2, 8, 3072, 1024))
+    .then(acceptSidecarGeometry(38928384, 77860864))
+    .then(writeMarlin(1, 1073741824))
+    .then(validateExact(88, 88, 0, 2)).then(publish)
+    .expect(witnessMarlinDirectPublication and inv)
+  run b12xUnderflowAvoidanceTest = init
+    .then(selectFormat(B12x, 48, 126, 3072, 1024))
+    .then(acceptSidecarGeometry(668868608, 32105697280))
+    .then(writeB12x(4, true)).then(validateExact(54, 54, 0, 2)).then(publish)
+    .expect(witnessB12xScaleFactorization and inv)
+  run invalidGeometryTest = init.then(selectFormat(NVFP4, 32, 256, 2048, 512))
+    .then(rejectGeometry(1769480, 14495580219))
+    .expect(witnessRejectedArtifact and inv)
+  run foreignInt4PayloadTest = init
+    .then(selectFormat(SBINT401, 2, 8, 3072, 1024))
+    .then(acceptInt4Geometry(4866048, 77860864))
+    .then(writeInt4(2004318071, true)).then(rejectPayload(1))
+    .expect(witnessRejectedArtifact and inv)
+  run rejectedPayloadCannotPublishTest = init
+    .then(selectFormat(SBINT401, 2, 8, 3072, 1024))
+    .then(acceptInt4Geometry(4866048, 77860864))
+    .then(writeInt4(2004318071, true)).then(rejectPayload(1))
+    .then(publish.fail())
+  run nontrivialGidxDisabledTest = init
+    .then(selectFormat(SBINT401, 2, 8, 3072, 1024))
+    .then(acceptInt4Geometry(4866048, 77860864))
+    .then(writeInt4(2004318071, false).fail())
+  run marlinRssGuardTest = init
+    .then(selectFormat(Marlin, 2, 8, 3072, 1024))
+    .then(acceptSidecarGeometry(38928384, 77860864))
+    .then(writeMarlin(1, 4294967297).fail())
+}

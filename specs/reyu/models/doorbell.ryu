@@ -1,0 +1,238 @@
+/// Per-lane CUDA-stream-to-native-poller doorbell protocol.
+/// Sources: stream_signal.py::{alloc_host_mapped_flag,write_flag,wait_flag};
+/// routed_experts.py::{_b70_issue_graph,_b70_take_graph,forward_modular};
+/// b70_capi.cpp::{PollLayer,B70Poller::loop}.
+/// Abstraction: tensor copies become ordered phase changes. A provider sequence is
+/// poller-owned call identity; the signal is only 0 or the batch size M and the
+/// completion flag is only 0 or 1. Neither flag contains a sequence number.
+module doorbell {
+  type LanePhase = Empty | Staged | Signaled | Claimed | Issued | Released | Copied
+  type Lane = {
+    phase: LanePhase,
+    batch: int,
+    signal: int,
+    completion: int,
+    providerSequence: int,
+    resultValid: bool,
+    staleCopied: bool,
+  }
+  type State = {
+    lanes: int -> Lane,
+    nextProviderSequence: int,
+    dispatches: int,
+    errors: int,
+    observedErrors: int,
+    eagerBoundary: bool,
+  }
+
+  pure val LANES = Set(0, 1)
+  pure val BATCHES = Set(1, 2, 32, 33)
+  var s: State
+
+  action init = s' = {
+    lanes: LANES.mapBy(_ => {
+      phase: Empty, batch: 0, signal: 0, completion: 0,
+      providerSequence: 0, resultValid: false, staleCopied: false,
+    }),
+    nextProviderSequence: 0,
+    dispatches: 0,
+    errors: 0,
+    observedErrors: 0,
+    eagerBoundary: true,
+  }
+
+  /// Current CUDA stream finishes casts and D2H copies into this lane's pinned
+  /// buffers before it may enqueue the signal write.
+  action stage(lane: int, batch: int): bool = all {
+    LANES.contains(lane), BATCHES.contains(batch),
+    s.lanes.get(lane).phase == Empty,
+    s.lanes.get(lane).signal == 0,
+    s.lanes.get(lane).completion == 0,
+    s' = { ...s,
+      lanes: s.lanes.set(lane, { ...s.lanes.get(lane),
+        phase: Staged, batch: batch, resultValid: false, staleCopied: false,
+      }),
+      eagerBoundary: false,
+    },
+  }
+
+  /// cuStreamWriteValue32 publishes M. Zero alone means idle.
+  action ring(lane: int): bool = all {
+    LANES.contains(lane), s.lanes.get(lane).phase == Staged,
+    s' = { ...s,
+      lanes: s.lanes.set(lane, { ...s.lanes.get(lane),
+        phase: Signaled, signal: s.lanes.get(lane).batch,
+      }),
+    },
+  }
+
+  /// Classic host polling reads M then clears signal before calling issue.
+  action claim(lane: int): bool = all {
+    LANES.contains(lane), s.lanes.get(lane).phase == Signaled,
+    s.lanes.get(lane).signal == s.lanes.get(lane).batch,
+    s' = { ...s,
+      lanes: s.lanes.set(lane, { ...s.lanes.get(lane),
+        phase: Claimed, signal: 0,
+      }),
+    },
+  }
+
+  /// Successful issue assigns the native provider's monotonic identity.
+  action issue(lane: int): bool = all {
+    LANES.contains(lane), s.lanes.get(lane).phase == Claimed,
+    s' = { ...s,
+      lanes: s.lanes.set(lane, { ...s.lanes.get(lane),
+        phase: Issued, providerSequence: s.nextProviderSequence + 1,
+      }),
+      nextProviderSequence: s.nextProviderSequence + 1,
+    },
+  }
+
+  /// take completed and wrote a valid lane result before release.
+  action takeAndRelease(lane: int): bool = all {
+    LANES.contains(lane), s.lanes.get(lane).phase == Issued,
+    s' = { ...s,
+      lanes: s.lanes.set(lane, { ...s.lanes.get(lane),
+        phase: Released, completion: 1, resultValid: true,
+      }),
+      dispatches: s.dispatches + 1,
+    },
+  }
+
+  /// issue failure still publishes completion=1: the CUDA wait has no timeout.
+  action failIssueAndRelease(lane: int): bool = all {
+    LANES.contains(lane), s.lanes.get(lane).phase == Claimed,
+    s' = { ...s,
+      lanes: s.lanes.set(lane, { ...s.lanes.get(lane),
+        phase: Released, completion: 1, resultValid: false,
+        providerSequence: s.nextProviderSequence + 1,
+      }),
+      nextProviderSequence: s.nextProviderSequence + 1,
+      errors: s.errors + 1,
+      dispatches: s.dispatches + 1,
+    },
+  }
+
+  /// take failure has the same release contract and leaves output stale.
+  action failTakeAndRelease(lane: int): bool = all {
+    LANES.contains(lane), s.lanes.get(lane).phase == Issued,
+    s' = { ...s,
+      lanes: s.lanes.set(lane, { ...s.lanes.get(lane),
+        phase: Released, completion: 1, resultValid: false,
+      }),
+      errors: s.errors + 1,
+      dispatches: s.dispatches + 1,
+    },
+  }
+
+  /// CUDA's exact-equality wait releases on 1 and copies the buffer regardless
+  /// of validity; failure is intentionally represented as a stale copy.
+  action waitAndCopy(lane: int): bool = all {
+    LANES.contains(lane), s.lanes.get(lane).phase == Released,
+    s.lanes.get(lane).completion == 1,
+    s' = { ...s,
+      lanes: s.lanes.set(lane, { ...s.lanes.get(lane),
+        phase: Copied, staleCopied: not(s.lanes.get(lane).resultValid),
+      }),
+    },
+  }
+
+  /// The same CUDA stream resets completion only after its H2D copy/cast.
+  action resetForReuse(lane: int): bool = all {
+    LANES.contains(lane), s.lanes.get(lane).phase == Copied,
+    s' = { ...s,
+      lanes: s.lanes.set(lane, {
+        phase: Empty, batch: 0, signal: 0, completion: 0,
+        providerSequence: 0, resultValid: false, staleCopied: false,
+      }),
+    },
+  }
+
+  /// Captured graph replay performs no Python error check. The counter is
+  /// surfaced only when execution next crosses an eager forward boundary.
+  action reachEagerBoundary = all {
+    not(s.eagerBoundary),
+    LANES.forall(lane => s.lanes.get(lane).phase == Empty),
+    s' = { ...s, eagerBoundary: true },
+  }
+  action observeErrors = all {
+    s.eagerBoundary, s.errors > s.observedErrors,
+    s' = { ...s, observedErrors: s.errors },
+  }
+  action continueAfterCleanBoundary = all {
+    s.eagerBoundary, s.errors == s.observedErrors,
+    s' = { ...s, eagerBoundary: false },
+  }
+  action stay = s' = s
+
+  action step = any {
+    stage(0, 1), stage(0, 33), stage(1, 1), stage(1, 32),
+    ring(0), ring(1), claim(0), claim(1), issue(0), issue(1),
+    takeAndRelease(0), takeAndRelease(1),
+    failIssueAndRelease(0), failIssueAndRelease(1),
+    failTakeAndRelease(0), failTakeAndRelease(1),
+    waitAndCopy(0), waitAndCopy(1), resetForReuse(0), resetForReuse(1),
+    reachEagerBoundary, observeErrors, continueAfterCleanBoundary, stay,
+  }
+
+  val inv = and {
+    s.observedErrors <= s.errors,
+    LANES.forall(lane => s.lanes.get(lane).signal >= 0),
+    LANES.forall(lane => s.lanes.get(lane).completion == 0 or
+      s.lanes.get(lane).completion == 1),
+    LANES.forall(lane => s.lanes.get(lane).completion == 1 implies
+      (s.lanes.get(lane).phase == Released or s.lanes.get(lane).phase == Copied)),
+    LANES.forall(lane => s.lanes.get(lane).resultValid implies
+      (s.lanes.get(lane).phase == Released or s.lanes.get(lane).phase == Copied)),
+    LANES.forall(lane => s.lanes.get(lane).staleCopied implies
+      (s.lanes.get(lane).phase == Copied and not(s.lanes.get(lane).resultValid))),
+  }
+
+  val witnessBothLanesInFlight =
+    s.lanes.get(0).phase == Issued and s.lanes.get(1).phase == Signaled
+  val witnessReleasedFailure =
+    s.lanes.get(0).completion == 1 and not(s.lanes.get(0).resultValid)
+  val witnessErrorNotYetObserved = s.errors > s.observedErrors and not(s.eagerBoundary)
+  val witnessReusable = LANES.forall(lane => s.lanes.get(lane).phase == Empty and
+    s.lanes.get(lane).completion == 0 and s.lanes.get(lane).signal == 0)
+
+  run twoLaneInFlightWitnessTest = init
+    .then(stage(0, 1)).then(stage(1, 32)).then(ring(0)).then(ring(1))
+    .then(claim(0)).then(issue(0))
+    .expect(witnessBothLanesInFlight and inv)
+
+  run twoLaneInterleavingTest = init
+    .then(stage(0, 1)).then(stage(1, 32)).then(ring(0)).then(ring(1))
+    .then(claim(0)).then(issue(0)).then(claim(1)).then(issue(1))
+    .then(takeAndRelease(1)).then(takeAndRelease(0))
+    .then(waitAndCopy(0)).then(waitAndCopy(1)).then(resetForReuse(0))
+    .then(resetForReuse(1)).then(reachEagerBoundary).expect(witnessReusable and inv)
+
+  run issueFailureReleaseWitnessTest = init.then(stage(0, 1))
+    .then(ring(0)).then(claim(0)).then(failIssueAndRelease(0))
+    .expect(witnessReleasedFailure and inv)
+
+  run issueFailureStaleCopyTest = init.then(stage(0, 1))
+    .then(ring(0)).then(claim(0)).then(failIssueAndRelease(0))
+    .then(waitAndCopy(0))
+    .expect(s.lanes.get(0).staleCopied and witnessErrorNotYetObserved and inv)
+
+  run issueFailureReleasesTest = init.then(stage(0, 1))
+    .then(ring(0)).then(claim(0)).then(failIssueAndRelease(0))
+    .then(waitAndCopy(0)).then(resetForReuse(0)).then(reachEagerBoundary)
+    .then(observeErrors).expect(s.observedErrors == 1 and inv)
+
+  run takeFailureReleasesTest = init.then(stage(1, 1)).then(ring(1)).then(claim(1))
+    .then(issue(1)).then(failTakeAndRelease(1)).then(waitAndCopy(1))
+    .expect(s.lanes.get(1).staleCopied and inv)
+
+  run noPrematureReuseTest = init.then(stage(0, 1)).then(ring(0))
+    .then(stage(0, 1).fail())
+
+  run noPrematureResetTest = init.then(stage(0, 1)).then(ring(0))
+    .then(resetForReuse(0).fail())
+
+  run exactCompletionValueTest = init.then(stage(0, 1)).then(ring(0)).then(claim(0))
+    .then(issue(0)).then(takeAndRelease(0)).then(waitAndCopy(0))
+    .then(resetForReuse(0)).expect(inv and witnessReusable)
+}

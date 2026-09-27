@@ -1,0 +1,2188 @@
+{
+  "schema_version": 1,
+  "scope": "First-party executable/build/config source in the inventoried repository branches, plus explicitly selected contract/evidence inputs; excludes external checkouts and generated build trees. Embedded QuixiCore native sources are included.",
+  "excluded_boundaries": [
+    {
+      "path": "vendor/",
+      "kind": "external-checkouts",
+      "reason": "Third-party implementations; interface contracts and imported local deltas are described in chapters."
+    },
+    {
+      "path": "experiments/misc/",
+      "kind": "external-checkouts",
+      "reason": "Separate Model-Optimizer, QuixiAI-Model-Optimizer, xpumanager and lucebox trees."
+    },
+    {
+      "path": "experiments/sparse-memory/benchmarks/",
+      "kind": "external-benchmark-checkouts",
+      "reason": "Evaluation datasets/frameworks, not first-party memory-layer implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/.reference/",
+      "kind": "external-research-checkouts",
+      "reason": "Upstream research/reference implementations."
+    },
+    {
+      "path": "src/QuixiCore-XPU/build-sycl/",
+      "kind": "generated-build",
+      "reason": "Compiled/generated build outputs, not source."
+    },
+    {
+      "path": "src/QuixiCore-XPU/build-sycl-int4/",
+      "kind": "generated-build",
+      "reason": "Compiled/generated build outputs, not source."
+    },
+    {
+      "path": "benchmarks/results/",
+      "kind": "measurement-artifacts",
+      "reason": "Recorded evidence, not executable contracts."
+    },
+    {
+      "path": "bench-matrix/",
+      "kind": "measurement-artifacts",
+      "reason": "Recorded evidence, not executable contracts."
+    },
+    {
+      "path": ".venv/; .venv-xpu/; __pycache__/; .ksl/",
+      "kind": "environment-cache-index",
+      "reason": "Tool/runtime state, not first-party behavior."
+    }
+  ],
+  "files": [
+    {
+      "path": "benchmarks/ab_register.sh",
+      "branch": "performance_probes",
+      "sha256": "e735e595768e5b10d5e02bdecd1c241547b07847fa71cf196c7b818c581d8d83"
+    },
+    {
+      "path": "benchmarks/ab_register_phase2.sh",
+      "branch": "performance_probes",
+      "sha256": "95ff47b93aa41b9de463d3dc2e19d54c0fbdb83790f145f16539cebaa263ccde"
+    },
+    {
+      "path": "benchmarks/b12x_bank_poc.py",
+      "branch": "performance_probes",
+      "sha256": "0ced6f6fc4f33c13eaf17ff569b45fa0328acd498af0e040753d17b22e2cd3dc"
+    },
+    {
+      "path": "benchmarks/b12x_encoding_probe.py",
+      "branch": "performance_probes",
+      "sha256": "2921f14c980c8672fc2edda4465d641820da4397a1340b1e8beaa4d872e1d689"
+    },
+    {
+      "path": "benchmarks/b12x_halfswap_probe.py",
+      "branch": "performance_probes",
+      "sha256": "c09bde974154861a6eda66514ee20407ef14d407bc539f0a51fc30a386ca661b"
+    },
+    {
+      "path": "benchmarks/b12x_w4a16_probe.py",
+      "branch": "performance_probes",
+      "sha256": "381fe74e098bf98527781e9ad931ba21e2e23582ced620807a1aef2b94d68a19"
+    },
+    {
+      "path": "benchmarks/b12x_w4a8_gate.py",
+      "branch": "performance_probes",
+      "sha256": "1401aea992a26ba37af6d4a1640e818d1cdc04abc25d485773227864dad87ae5"
+    },
+    {
+      "path": "benchmarks/b12x_zero_bisect.py",
+      "branch": "performance_probes",
+      "sha256": "b3d5558aa8aff7bbef5f8821ce1c49de60b4813ca4526c01e4fc40a2696da331"
+    },
+    {
+      "path": "benchmarks/b70_itl_probe.py",
+      "branch": "performance_probes",
+      "sha256": "0b81342caa78a2bc3b376a081195ff80785e6cf7a99a84c1cfed2f6c7ef17825"
+    },
+    {
+      "path": "benchmarks/b70_matrix_probe.py",
+      "branch": "performance_probes",
+      "sha256": "52a1417dd9fcce780432e5f44903db5a7154f35361b16f71dad26fbbad2860b9"
+    },
+    {
+      "path": "benchmarks/b70_prefill_cost.py",
+      "branch": "performance_probes",
+      "sha256": "744a5045b49f1406e1ff736aaed07f58aa7be426eb93fd7249f4b055f92143a1"
+    },
+    {
+      "path": "benchmarks/b70_sgl_w4a16_bench.py",
+      "branch": "performance_probes",
+      "sha256": "af47a986e2a914bc590de9669216cb367df5403fb450f34feb2ecdb956f5b7f5"
+    },
+    {
+      "path": "benchmarks/b70_ttft_smoke.py",
+      "branch": "performance_probes",
+      "sha256": "6df8a3945f4d2e5a788453e5fe635fdff05fc0d01fe612d9493d4899fbc8499a"
+    },
+    {
+      "path": "benchmarks/bench_88b.py",
+      "branch": "performance_probes",
+      "sha256": "c820e0a78b0131cbde6604bd5e1b93c361716f7924ef99a14da917da7d66bf11"
+    },
+    {
+      "path": "benchmarks/chain_audit.py",
+      "branch": "performance_probes",
+      "sha256": "d36b6bcc667838877277d37601353c31d8b1c6ff293c9ef3f045010bd2522aac"
+    },
+    {
+      "path": "benchmarks/compare.py",
+      "branch": "benchmarks",
+      "sha256": "aa357902c209e09fe90e40fb74cff886888918c4d32aac6806ded525a1a687a1"
+    },
+    {
+      "path": "benchmarks/compare_preemptive.py",
+      "branch": "performance_probes",
+      "sha256": "f530304ba857a932699b7d3aed14da303e8d6884251498c74bccad56ca0107dd"
+    },
+    {
+      "path": "benchmarks/compare_pro_matrix.py",
+      "branch": "benchmarks",
+      "sha256": "23ca4527b7f3ccaeb21d396195b355a6cd82d5f935ab71da9721522794a9f908"
+    },
+    {
+      "path": "benchmarks/cuda_decode_profile.py",
+      "branch": "performance_probes",
+      "sha256": "cab43667061ab3d053173e48a8a6dbaef4399cd7a810a7d813d57cd8c5ffb1c6"
+    },
+    {
+      "path": "benchmarks/decode_gap_probe.py",
+      "branch": "performance_probes",
+      "sha256": "918387153453f3dced03e803e308e95f69134c64f2232d9c807233a9d992738a"
+    },
+    {
+      "path": "benchmarks/decode_ladder_probe.py",
+      "branch": "performance_probes",
+      "sha256": "dea073dba159160fcd61fb6fffb55034ad577037031ee90c437ff959f79361c5"
+    },
+    {
+      "path": "benchmarks/dummy_b70_provider.cpp",
+      "branch": "performance_probes",
+      "sha256": "98ef4b45f090640e8e2eb7afdceaa0f401c3b9c2ccdafcc189ef7babf376a82f"
+    },
+    {
+      "path": "benchmarks/fp8_wire_numerics.py",
+      "branch": "performance_probes",
+      "sha256": "d33141d600f827dbb77f483239538fb8125ec35ef5e51731a3712005d6ff8adc"
+    },
+    {
+      "path": "benchmarks/gpu_power.sh",
+      "branch": "performance_probes",
+      "sha256": "5845cabe03ac4d832f2a89159fda4e709789c515b0b30a889282cecde5a2c7ba"
+    },
+    {
+      "path": "benchmarks/hostregister_probe.py",
+      "branch": "performance_probes",
+      "sha256": "4b4c77400e4f447876d17c2fa503e0a0ba33d4032ccd0c5d8eb734794c8bd56d"
+    },
+    {
+      "path": "benchmarks/laguna_gate.py",
+      "branch": "performance_probes",
+      "sha256": "e8bc6d8e7c92928513da11f46ebb079d1cec67d4a8b6604ea40638393d01d66c"
+    },
+    {
+      "path": "benchmarks/laguna_l_sweep.py",
+      "branch": "performance_probes",
+      "sha256": "9fec0c849371ad5fca8038dc814d25d650f7cc8d2ffe8977d3aab8b743eaa5de"
+    },
+    {
+      "path": "benchmarks/logprob_capture.py",
+      "branch": "performance_probes",
+      "sha256": "7d66260d1691a53aef67f8cd3cc47264288ce6d07fa2563c8cf507302974d92c"
+    },
+    {
+      "path": "benchmarks/marlin_prefill_poc.py",
+      "branch": "performance_probes",
+      "sha256": "d2792fdc08a841292aa48fdeb2beaac8d30f315dc2cf5174970852193c204cb0"
+    },
+    {
+      "path": "benchmarks/matrix_progress.sh",
+      "branch": "benchmarks",
+      "sha256": "409b4a772861331711b6eabe739d9771a4fc2025217685a0f56a5cf696bd9992"
+    },
+    {
+      "path": "benchmarks/matrix_runner.py",
+      "branch": "benchmarks",
+      "sha256": "5eed01fbd96a476b1f8efa7448af5bb9cd8d065db5a3c373e88763e890f4c60d"
+    },
+    {
+      "path": "benchmarks/matrix_tiered.sh",
+      "branch": "benchmarks",
+      "sha256": "ffc1dfa036a1bd1c97ac319ed2fa98e2d45d33f48055ba54a927f83b63d151ff"
+    },
+    {
+      "path": "benchmarks/offload_benchmark.py",
+      "branch": "benchmarks",
+      "sha256": "5437a597b217143d201feb2319dd52bcb5114001c8b81d315add08b373e39345"
+    },
+    {
+      "path": "benchmarks/offload_summarize.py",
+      "branch": "benchmarks",
+      "sha256": "4d0ebe7c005d55ea23b492cdefc1510a61807e60ed819ef891116edcda4173f6"
+    },
+    {
+      "path": "benchmarks/pipeline_identity_gate.py",
+      "branch": "benchmarks",
+      "sha256": "0c4385e251e49b588c1fda08b9f97080044a90fc47e7c6dcac0629a369d78ec5"
+    },
+    {
+      "path": "benchmarks/prefill_cliff_probe.py",
+      "branch": "performance_probes",
+      "sha256": "af82daf6bb876bb8b82cb7f49cf87446ef35213c7eab799b673b80cceb455dce"
+    },
+    {
+      "path": "benchmarks/prefill_floor_bench.py",
+      "branch": "performance_probes",
+      "sha256": "868e57f015bb88ab80783cc3fb048721763426c654d643df9f1d56298944714c"
+    },
+    {
+      "path": "benchmarks/r15_cold_warm_matrix.py",
+      "branch": "benchmarks",
+      "sha256": "72cd60fff7612453c5d19fb5a79299e50034c9d9b225344360ca8f6975d8f553"
+    },
+    {
+      "path": "benchmarks/results/rtx_pro_6000_r15_slo/run_guidellm_context_benchmarks.sh",
+      "branch": "performance_probes",
+      "sha256": "dce5366451f8723bbfcc4b9584eec72c1d91638fabbaca248ae09f92250aa09e"
+    },
+    {
+      "path": "benchmarks/results/rtx_pro_6000_r15_slo/serve_vllm_rtx_pro_6000.sh",
+      "branch": "admission",
+      "sha256": "32541a689005b9f2f2492c79e2fcc88407a3710c597a42a33f85eb3972115066"
+    },
+    {
+      "path": "benchmarks/route_locality.py",
+      "branch": "observability",
+      "sha256": "b678ef5a4dfc0667049c7cfede5fe4c33497cee0d788eb82b0c1ae6a6eb6ace6"
+    },
+    {
+      "path": "benchmarks/route_topology.py",
+      "branch": "observability",
+      "sha256": "d3c62ef7d6763a763c22364646036bc7836e689be189ae4a589aecfd69908512"
+    },
+    {
+      "path": "benchmarks/run6_decode.sh",
+      "branch": "benchmarks",
+      "sha256": "39d60f1ce428142d30d9678919bc9c250030e737998011a13a8b30116c5c8335"
+    },
+    {
+      "path": "benchmarks/run6_finish.sh",
+      "branch": "benchmarks",
+      "sha256": "d782eeca2d8fc4775a6d026e7415ae5f87c745755e2a50cc86c7328d5a66d51b"
+    },
+    {
+      "path": "benchmarks/run_matrix.sh",
+      "branch": "benchmarks",
+      "sha256": "7278b7fe5c4647f23a5347c6ce6aa15cc86fa3a6e7a0527e3b6cfda720157d4e"
+    },
+    {
+      "path": "benchmarks/run_offload_sweep.sh",
+      "branch": "benchmarks",
+      "sha256": "8617d12d68ef85cd7eaa0cff71a46e35bbe6a005d469670dd440d0a372f1889a"
+    },
+    {
+      "path": "benchmarks/run_preemptive_parity.sh",
+      "branch": "performance_probes",
+      "sha256": "b7328fc1b0e1347e59f9c85d64c227750ae068047430292f08c4cb634eecece4"
+    },
+    {
+      "path": "benchmarks/run_prefill_probe.sh",
+      "branch": "performance_probes",
+      "sha256": "4c4d7f6b343f36800420be4dd55c448151114dc7138ffda9b79b3158828966a3"
+    },
+    {
+      "path": "benchmarks/sb_agent.py",
+      "branch": "benchmarks",
+      "sha256": "a34782618a98a49a279e69a3e7d7756080e9c5d8de2f01b3ff6f83f0f49b56ee"
+    },
+    {
+      "path": "benchmarks/sb_chat.py",
+      "branch": "benchmarks",
+      "sha256": "824e804a393acf141f5fc9e2e15f0ac6da78805c83df856a9bfc6f0388585fff"
+    },
+    {
+      "path": "benchmarks/serve_88b.sh",
+      "branch": "admission",
+      "sha256": "e4d7189fbe3c6bf2fecb61c69717f7b003bb7789befd6445bc8d24777d682e0f"
+    },
+    {
+      "path": "benchmarks/serve_88b_128k.sh",
+      "branch": "admission",
+      "sha256": "84531383156397a5dea535996b293b3ada6302434801a5282ad79b7b5ae16e30"
+    },
+    {
+      "path": "benchmarks/serve_88b_128k_profile.sh",
+      "branch": "admission",
+      "sha256": "e743771ef31c80024e0420b55577f8ffeefc48c27ecb4b7421790835869dba2d"
+    },
+    {
+      "path": "benchmarks/serve_99b_dual.sh",
+      "branch": "admission",
+      "sha256": "e330970723a7c0d2f609b8a49daa88544ead6d7ada6e314ca0f27ae83e02d669"
+    },
+    {
+      "path": "benchmarks/serve_hybrid.sh",
+      "branch": "admission",
+      "sha256": "4edbedd0a2c0fdaf3e99846f7a9d9db70c321c6d076b084b8dac331d859dd442"
+    },
+    {
+      "path": "benchmarks/serve_jota_r15_dual.sh",
+      "branch": "admission",
+      "sha256": "851af8d6396a8600b5a8d316dfadffdc6c26b86e53db9a76c057e73d3ee48f85"
+    },
+    {
+      "path": "benchmarks/serve_jota_r20_dual.sh",
+      "branch": "admission",
+      "sha256": "9fc6457bcf7f7ac19319fbcb098d4e9e784d034518c358d7be07ce581fe3ea03"
+    },
+    {
+      "path": "benchmarks/server_context_probe.py",
+      "branch": "performance_probes",
+      "sha256": "ad5f3101e97e4faa76187bc450cf1b8374ceab63deeb5fb323e1e57ca5fff0ac"
+    },
+    {
+      "path": "benchmarks/slab_h2d_bench.py",
+      "branch": "performance_probes",
+      "sha256": "f0623c87d6690e0e2553f18355b4ae7e6caeb0dac5c72228b3a148e78ebbe623"
+    },
+    {
+      "path": "benchmarks/slo_split_matrix.py",
+      "branch": "benchmarks",
+      "sha256": "61ceec5b9361eb4c8b34a455a793ec27a5d606699e54c58bba71a7507e519e10"
+    },
+    {
+      "path": "benchmarks/stream_matrix.py",
+      "branch": "benchmarks",
+      "sha256": "3e95a05074030e401c26d15b85b27fd63ec5678dd63e70daea922c27156677cf"
+    },
+    {
+      "path": "benchmarks/stream_matrix.sh",
+      "branch": "benchmarks",
+      "sha256": "ebb20921d52ca2eee183170dd4b89ebc4a44635f25d455ad834ba70809d478eb"
+    },
+    {
+      "path": "benchmarks/watch_and_chain.sh",
+      "branch": "benchmarks",
+      "sha256": "7d3575ce27253675cc5b6e810f606ffc198a263ab92d7404df6254e41e774cac"
+    },
+    {
+      "path": "benchmarks/weight_digest.py",
+      "branch": "benchmarks",
+      "sha256": "3568cf0d100c1b9910c4599d817d419980e8fe5647bd2ab0b363bbd0faa8480b"
+    },
+    {
+      "path": "experiments/analyze_campaign_profile.py",
+      "branch": "campaign",
+      "sha256": "0f06a873a3ee9b3278d6c6b4f90d9dadba1c71782abf582d3ee45efe74a4af9f"
+    },
+    {
+      "path": "experiments/attention_decode_probe.py",
+      "branch": "hardware_probes",
+      "sha256": "18d36ef7627b7911adf9f3164a16f3135bbea1ae2d9e4c96eba4bac8cdefe312"
+    },
+    {
+      "path": "experiments/b13_doorbell_flag_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "34c3002095294fef840a34a5798086848a9e8e782c222bffaa8f47331271d50c"
+    },
+    {
+      "path": "experiments/b13_sweep_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "9de8af6cd3ee94c6f45959f649f7c3e7771879dd5f5e25b8620e5f156cedb749"
+    },
+    {
+      "path": "experiments/b13_wait_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "82970d3393aa1e3b7d5fb6cfcb6c03634eb309b4ee8495297aa88d044e06bc96"
+    },
+    {
+      "path": "experiments/b5_fused_h2d_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "6b2caae53d59f582d5571888d6f071ab2889491a3374c80c0e09bb16f139b265"
+    },
+    {
+      "path": "experiments/b70_122b_pilot_smoke.py",
+      "branch": "hardware_probes",
+      "sha256": "661ede3358fbd7d7fc27b038b2429aff6d0f0acd032ba38afcfad081318f2399"
+    },
+    {
+      "path": "experiments/b70_b70_dmabuf_control.cpp",
+      "branch": "hardware_probes",
+      "sha256": "1204493ae4e55e5717b7d475b21aac1ea4514e70330e5d81e8b8a3f376c655f0"
+    },
+    {
+      "path": "experiments/b70_baked_chain_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "0d8a69e8c7fcce3d69aa5cbbb19f59fb7b9cc63cc8d2a92429c4e6707d9082a1"
+    },
+    {
+      "path": "experiments/b70_baked_kernel_ab.cpp",
+      "branch": "hardware_probes",
+      "sha256": "298a8543c22821eef8323c85c2377a8c6d4e3bd83a34a06764f69ab8cb2b6016"
+    },
+    {
+      "path": "experiments/b70_captured_replay.py",
+      "branch": "hardware_probes",
+      "sha256": "a2c90c4a277d27cc4f3171eaf7b64cfd6a46bf43d620f9b1db431013f36f601b"
+    },
+    {
+      "path": "experiments/b70_compute_sanity.py",
+      "branch": "hardware_probes",
+      "sha256": "b06a670c6bb8ddf0c52497148412bbc4d77bc9520d4a82925b70d7fc5e383a2b"
+    },
+    {
+      "path": "experiments/b70_cs_doorbell_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "0f79ef7f29d288bc06f4d5346bed3f45288220f3ea99306de2c909a4e077f463"
+    },
+    {
+      "path": "experiments/b70_cs_harness.py",
+      "branch": "hardware_probes",
+      "sha256": "754b42fe196e79afbfc74a43060e5f37ad9c6914f14f800ef2d77615914cb401"
+    },
+    {
+      "path": "experiments/b70_dispatch_latency.cpp",
+      "branch": "hardware_probes",
+      "sha256": "ed791185a83f3baef21b8370f2931bf58206f18f8513f42758b40665515defaa"
+    },
+    {
+      "path": "experiments/b70_dual_card_smoke.py",
+      "branch": "hardware_probes",
+      "sha256": "074a12e872246c87971ee296f03ba928736fdf9e2a7f8693e898c992b580fb19"
+    },
+    {
+      "path": "experiments/b70_dual_queue_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "962b0e86796ecdc28a90486f80a080b2d07bba97e4b51f64e0c75ee3818f44b3"
+    },
+    {
+      "path": "experiments/b70_esimd_worker.py",
+      "branch": "hardware_probes",
+      "sha256": "d5a7a0fb334b90cdfb318b2c9bbe13d9cdb9832e309c36bd8f06ee50f199a70b"
+    },
+    {
+      "path": "experiments/b70_expert_sycl.cpp",
+      "branch": "hardware_probes",
+      "sha256": "be10ae6952c82b51cff998f3e4cfe5133b1a62475d0eeffc9e609494778da834"
+    },
+    {
+      "path": "experiments/b70_hostflag_spin_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "b17d2677e2c8292691e9856c52b3b6ec4ce01864cd0e06a4759f55b086b3b3df"
+    },
+    {
+      "path": "experiments/b70_mem_topology_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "eaa791d8f2290979a30ff2acaba84de2804cb5c6b65ac3747b648a21b8b4e4bd"
+    },
+    {
+      "path": "experiments/b70_multi_topology.cpp",
+      "branch": "hardware_probes",
+      "sha256": "8811750a30fb03bc42bc93089963b41bacae9297f2a63bc8c2622a4d1dd99a37"
+    },
+    {
+      "path": "experiments/b70_onednn_nvfp4_bench.sh",
+      "branch": "hardware_probes",
+      "sha256": "963ecb3966570cd2c5800bbe8bc8c3ccd60e36e3d3b8144a8b4cf838d805734d"
+    },
+    {
+      "path": "experiments/b70_pcie_bw.cpp",
+      "branch": "hardware_probes",
+      "sha256": "6e06c30e64e71116a98a82a231d9ffb198d879feb948d7b71c1b50cfcb738aa6"
+    },
+    {
+      "path": "experiments/b70_profile.cpp",
+      "branch": "hardware_probes",
+      "sha256": "bdfca94119d45a86dd3816b92ebf9f94d51d4ca7dc343486478bc7a4c62c0b9c"
+    },
+    {
+      "path": "experiments/b70_sycl_zex_interop_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "af79ecd4bc44e6d5cba323863e8e0c0b77dc64e4dade580492e5a92650cbb5be"
+    },
+    {
+      "path": "experiments/b70_u32_abi_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "72429edf12e9f478a93edb41e57ceca3acb2ea161412ed2fdfdbf735cdb387ae"
+    },
+    {
+      "path": "experiments/b70_worker.py",
+      "branch": "hardware_probes",
+      "sha256": "cd4c36a37409c8cd56e9ba40506264f83e229e5d3494a1300de768f3e58af3fb"
+    },
+    {
+      "path": "experiments/b70_xpu_register_smoke.py",
+      "branch": "hardware_probes",
+      "sha256": "90fcbd517861937b526f5dcce469075dce97e8f78fe8bf09a55ee9d5b7aac378"
+    },
+    {
+      "path": "experiments/campaign_worker.py",
+      "branch": "campaign",
+      "sha256": "812a12c44489ac1590db6779ed9f245eeffdeb9b2f37e4f9ca12d25c5747c389"
+    },
+    {
+      "path": "experiments/drafter_capture.py",
+      "branch": "drafter",
+      "sha256": "288d866ab6e88fb0a5edd2636a5989d9b1c39f2e7cb04e86af7fd1fe6a477218"
+    },
+    {
+      "path": "experiments/drafter_datagen.py",
+      "branch": "drafter",
+      "sha256": "e32439e9d75fd33501833c5f3e29e1137b870adcdcdeeab48390f511f07dbef8"
+    },
+    {
+      "path": "experiments/drafter_overnight.sh",
+      "branch": "drafter",
+      "sha256": "1452c27dde88d6a8eb4ba61cd54ce7779b8d7140f472d8f23ffb7b15f8002e14"
+    },
+    {
+      "path": "experiments/drafter_train/acceptance.sh",
+      "branch": "drafter",
+      "sha256": "e5a164ea7c733079788ae0af65672d5d998e5968b6e5c3c206be5bd2bd373e2e"
+    },
+    {
+      "path": "experiments/drafter_train/adapter.py",
+      "branch": "drafter",
+      "sha256": "7657da06b5cb8eea36ceaf1c140af35726f1e220b3af3dd049177027a59a0cc1"
+    },
+    {
+      "path": "experiments/drafter_train/export_laguna.py",
+      "branch": "drafter",
+      "sha256": "66c14ad34fe3ae14c1114d739895747ec34794219c24b4cb852495f9605e8308"
+    },
+    {
+      "path": "experiments/drafter_train/gate.py",
+      "branch": "drafter",
+      "sha256": "9de3808f5f0c0b6044e9235561ead429fd1d32c0bc253ba9ab8ae3b2a9d145f4"
+    },
+    {
+      "path": "experiments/drafter_train/laguna_dflash_model.py",
+      "branch": "drafter",
+      "sha256": "050cc06be0958c067fb047d30ec0a8c6f8e9eb466d4bae56393618b2637477f9"
+    },
+    {
+      "path": "experiments/drafter_train/pilot.yaml",
+      "branch": "drafter",
+      "sha256": "115eb3da0feeb2aa3729e87123a486158a9a62ee9906b1e73f4fcf33cf7ea468"
+    },
+    {
+      "path": "experiments/drafter_train/prepare_warmstart.py",
+      "branch": "drafter",
+      "sha256": "09f6295ee17c645b83bdc83ba8f865e7334eb5612d66285406c7f78eb2986d3c"
+    },
+    {
+      "path": "experiments/drafter_train/tests/test_adapter.py",
+      "branch": "drafter",
+      "sha256": "5cd09b03fa297c9afa704b805377df4b8644494d6ef8b4dc13280708f17845cb"
+    },
+    {
+      "path": "experiments/drafter_train/tests/test_scaffold.py",
+      "branch": "drafter",
+      "sha256": "cda4ca91bb067511bd248a552a7b31d3eb6a4ab9c2dc6bf83f3d2bae9f40e75a"
+    },
+    {
+      "path": "experiments/drafter_train/train.sh",
+      "branch": "drafter",
+      "sha256": "7d47dcfd102f957e23ca2bd475849fc222e35b4feeea28db3dce8ef93fcbcf68"
+    },
+    {
+      "path": "experiments/drafter_train/train_runner.py",
+      "branch": "drafter",
+      "sha256": "0833f5d57d90d8a6bc7b5b7f6a42244897998fc20a07310f1ae4fc9d3540789a"
+    },
+    {
+      "path": "experiments/dual_gpu_test.py",
+      "branch": "hardware_probes",
+      "sha256": "72d5c799e20069e91df2f62267f9c04ec91ba8381a761d8adabbb36475217ec6"
+    },
+    {
+      "path": "experiments/interactive_scheduler.py",
+      "branch": "campaign",
+      "sha256": "53e4bd683722eee049cab3411ec623884b282301213185cb8851d114abce3d19"
+    },
+    {
+      "path": "experiments/profile_workloads.py",
+      "branch": "campaign",
+      "sha256": "9f9b0a4163c33bf4190965cf144ed446815a4244f43c5f045a65856d1cc904d7"
+    },
+    {
+      "path": "experiments/qualify_interactive_scheduler.py",
+      "branch": "campaign",
+      "sha256": "6a9ab0ee7f5ad8e4f8b68ab002b3f0206417dc541a527932fff6d0049265d735"
+    },
+    {
+      "path": "experiments/rbar_dmabuf_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "ccb5bb34122ae20803c4148043dbc72e38b62c3cfecf068dd390a5bbba85f363"
+    },
+    {
+      "path": "experiments/repro/bench_nvfp4_vs_mxfp4.py",
+      "branch": "hardware_probes",
+      "sha256": "2e350fa817f1e6afd596667583fe4f1d6ccdfcf181b0545120b109db106508b3"
+    },
+    {
+      "path": "experiments/repro/build_device_usm_host_shadow.sh",
+      "branch": "hardware_probes",
+      "sha256": "56e83f4ad746858ff717b15966ceb83377c5f6dc4b2aaad60a6d20b5bb184b41"
+    },
+    {
+      "path": "experiments/repro/device_usm_host_shadow.cpp",
+      "branch": "hardware_probes",
+      "sha256": "cb14a8e14d0f39a91dbd13542308db29684dc9334d0eb077a7aca4f5931fc057"
+    },
+    {
+      "path": "experiments/repro/l0v2_memset_crash.cpp",
+      "branch": "hardware_probes",
+      "sha256": "832c6be6c6e5d78b3d35718a7806378125404e86f30640b80085926d2d51741d"
+    },
+    {
+      "path": "experiments/sparse-memory/capability_eval.py",
+      "branch": "sparse_memory",
+      "sha256": "5b3248d7ed6cdc886d03b9c99a9457eb7bdf78841e0ee2c04f158930e42396d6"
+    },
+    {
+      "path": "experiments/sparse-memory/e0_query_staleness.py",
+      "branch": "sparse_memory",
+      "sha256": "688aab03e89017406576a2e38e392d481a7bd6c426e98fb5ec05eca48cc81321"
+    },
+    {
+      "path": "experiments/sparse-memory/e1_xpu_gather.py",
+      "branch": "sparse_memory",
+      "sha256": "f5b1aa1a140832d54434b921ae1aaf2639a0302387a7e9e357bbf9199c8c3cff"
+    },
+    {
+      "path": "experiments/sparse-memory/e1b_fused_gather.py",
+      "branch": "sparse_memory",
+      "sha256": "c0ead92bc80c9da3733b3a921b4639da2df5be76e6a40c7fa8ccb26d94133ab1"
+    },
+    {
+      "path": "experiments/sparse-memory/e1c_triton_gather.py",
+      "branch": "sparse_memory",
+      "sha256": "2b1a5a84142d335b36a670ee8a4a753b8c50c499f9325a0720ae5856bd446669"
+    },
+    {
+      "path": "experiments/sparse-memory/e1d_triton_tune.py",
+      "branch": "sparse_memory",
+      "sha256": "2d20e7c1b18adf0ba4b8101f367b7446e4973f7e5c727d0d904abf1d0a898444"
+    },
+    {
+      "path": "experiments/sparse-memory/e1e_triton_int4.py",
+      "branch": "sparse_memory",
+      "sha256": "a86fa9d45791b560e1103a9d775edfe613f92e8c2bcd5b3f52ef5d7f876f3533"
+    },
+    {
+      "path": "experiments/sparse-memory/e2_host_tier.py",
+      "branch": "sparse_memory",
+      "sha256": "1202c09b0c69f45f0c6b6698ec8393cd9db47c421eafd7361a3ef49fcb75d7cb"
+    },
+    {
+      "path": "experiments/sparse-memory/e4_baseline_slo.py",
+      "branch": "sparse_memory",
+      "sha256": "c7a78be37b4393ea3ff7f171f0f8b736fe5a01bda60c46fda7f6b7bc278b520c"
+    },
+    {
+      "path": "experiments/sparse-memory/e5_retrofit_ladder.py",
+      "branch": "sparse_memory",
+      "sha256": "0b2f98ff11819505e84fc257fee83e3f73d36bfe2be9222f8b81172fb90bd25a"
+    },
+    {
+      "path": "experiments/sparse-memory/e6_knowledge_injection.py",
+      "branch": "sparse_memory",
+      "sha256": "5230832fc1c74d6b9c81dac582a010819845e30cf2f44b7c19ec91aa6e7a022e"
+    },
+    {
+      "path": "experiments/sparse-memory/e7_teacher_distill.py",
+      "branch": "sparse_memory",
+      "sha256": "84d8757fc72b28a9de99292df5d75709d3f347d75fbaed2f69492c4c2c1880cc"
+    },
+    {
+      "path": "experiments/sparse-memory/memory_layer.py",
+      "branch": "sparse_memory",
+      "sha256": "1b599955dc4a2e35146f0ce295c36c613cefc0c33f439178fe8266ea1fb73aaa"
+    },
+    {
+      "path": "experiments/sparse-memory/pkm.py",
+      "branch": "sparse_memory",
+      "sha256": "7dfe231c09fd7a13f8523cea5b8f373e255218a91d15d6abb09f77007121f27d"
+    },
+    {
+      "path": "experiments/sparse-memory/run_e6_gate.sh",
+      "branch": "sparse_memory",
+      "sha256": "50830d743947fd7a4fdf5b8d6ab3baa51ab3890692d680670767ae45a227a80d"
+    },
+    {
+      "path": "experiments/sparse-memory/run_e6_ladder.sh",
+      "branch": "sparse_memory",
+      "sha256": "dfe320d631c07c2a5240d5b8ed109f5d075fdb1ed149e3da418bd8bbd79f5a8e"
+    },
+    {
+      "path": "experiments/sparse-memory/run_e6_scaled.sh",
+      "branch": "sparse_memory",
+      "sha256": "29ed4fff16a88c01ed6055aeba15e6cf7eaf5d995edbe447d0b8d2e9dc0e7a86"
+    },
+    {
+      "path": "experiments/sparse-memory/run_e6_seeds.sh",
+      "branch": "sparse_memory",
+      "sha256": "0fa4827a30d11edeb9e2ac46c0e817b5bc7dbdbef7d1492837305fcd5904efd7"
+    },
+    {
+      "path": "experiments/test_b70_int4_path.py",
+      "branch": "hardware_probes",
+      "sha256": "6b6c488f19e515aa9efe8538bbf272cd8881c0b9d6131ceb6117deda68c467c0"
+    },
+    {
+      "path": "experiments/transport_debug.c",
+      "branch": "hardware_probes",
+      "sha256": "d0b20ce0bf93d2eeb5880717ab53137cb8cc30f6fd67a7f7c3f93958fea37b8f"
+    },
+    {
+      "path": "experiments/transport_debug2.c",
+      "branch": "hardware_probes",
+      "sha256": "8b0200d4d44c7060746dab23c02fc918a49f1c57411b038da3e5503074990c1f"
+    },
+    {
+      "path": "experiments/transport_test.c",
+      "branch": "hardware_probes",
+      "sha256": "07acb2add9531fc2bbf2720c971d6a3760358c587e8f8bc50858ee17ac91576d"
+    },
+    {
+      "path": "experiments/transport_test_v2.c",
+      "branch": "hardware_probes",
+      "sha256": "d14ae03544384e8817f100f6774048cc66af05489b7fbf0e5b21d39367b43fb7"
+    },
+    {
+      "path": "experiments/xvendor_p2p_probe.cpp",
+      "branch": "hardware_probes",
+      "sha256": "bd2cbe5c717cf07faaf79a8a08fe8e7edb8846bcb834cef02a74cc2b15e6329f"
+    },
+    {
+      "path": "pyproject.toml",
+      "branch": "admission",
+      "sha256": "70d6931d85194167de81b6c9800d4b3cf065b8b79baadabf020e8276ccecedff"
+    },
+    {
+      "path": "scripts/b70_tune.sh",
+      "branch": "admission",
+      "sha256": "fa4f32989586dc92ccd7016cf0a5088aac65e643f11826dbfa0e8c963904d4c0"
+    },
+    {
+      "path": "serve_production.sh",
+      "branch": "admission",
+      "sha256": "4311a2837ce8071c933cf7338e7fde2f5b6cda8b4311b7408b368b095eabda40"
+    },
+    {
+      "path": "src/QuixiCore-XPU/.clang-format",
+      "branch": "quixi_runtime",
+      "sha256": "87617a53fb15f357b58b3350c6cdfeccb8123c870c9f3b492fef756aeeff3e12"
+    },
+    {
+      "path": "src/QuixiCore-XPU/.editorconfig",
+      "branch": "quixi_runtime",
+      "sha256": "958dd9b866153096bbc3d195591c659cb815ba8a66475a78b56ca33557adfca5"
+    },
+    {
+      "path": "src/QuixiCore-XPU/.gitignore",
+      "branch": "quixi_runtime",
+      "sha256": "ccbbb932d5699609b36445551c9c81d408c839eda5a0f1bfd78552316d4c1a22"
+    },
+    {
+      "path": "src/QuixiCore-XPU/.quixicore/backend.yaml",
+      "branch": "quixi_runtime",
+      "sha256": "e2ffbbf9d3fd667bcdcd4b179317c5b888eff3667cf7c7dfa173d49e45a0f921"
+    },
+    {
+      "path": "src/QuixiCore-XPU/.quixicore/kernel-stubs.yaml",
+      "branch": "quixi_runtime",
+      "sha256": "0f50822d717bdbb03deac6688730eb0cdbc067c13467e30cd7d32c165d621623"
+    },
+    {
+      "path": "src/QuixiCore-XPU/.quixicore/kernels.yaml",
+      "branch": "quixi_ops",
+      "sha256": "42c890930f77e17497bbb98247cb3540ff635406d9ac3dd3e8fc3f3c0d40b46d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/.quixicore/quant-formats.yaml",
+      "branch": "quixi_ops",
+      "sha256": "4642cbeb44a6e2718b12655255808c04f18537493b0949d11817c2dd6b51eed8"
+    },
+    {
+      "path": "src/QuixiCore-XPU/AGENTS.md",
+      "branch": "quixi_runtime",
+      "sha256": "5da8d5ca8b96417d9367be67a26cfa4567b8f9dc2ef619a473560818cbbb8678"
+    },
+    {
+      "path": "src/QuixiCore-XPU/CHANGELOG.md",
+      "branch": "quixi_runtime",
+      "sha256": "47915b75fa0d4839739e6f8464687a45dce48d2145cb324fd299df1192cc8932"
+    },
+    {
+      "path": "src/QuixiCore-XPU/CLAUDE.md",
+      "branch": "quixi_runtime",
+      "sha256": "aa419c918a85d9e21ae6726f96422425845481d31635ff450b7cd882fb8e4647"
+    },
+    {
+      "path": "src/QuixiCore-XPU/CMakeLists.txt",
+      "branch": "quixi_runtime",
+      "sha256": "dec71bf9a3b1366626c50212deb966a74659a4c07f4ed77a9dd14b67752dbb5d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/CMakePresets.json",
+      "branch": "quixi_runtime",
+      "sha256": "9ec830c4c03215f5356fc7d144bc87666d17b10bf8689aca6c6f29303798f5be"
+    },
+    {
+      "path": "src/QuixiCore-XPU/CONTRIBUTING.md",
+      "branch": "quixi_runtime",
+      "sha256": "15fbc75f7107e28bcad22a217b9b54251c18819785d4532993ad32a5db5fe469"
+    },
+    {
+      "path": "src/QuixiCore-XPU/LICENSE",
+      "branch": "quixi_runtime",
+      "sha256": "309de518498fb89a0eb503520cbc3e481a8b83b8390f2c435be02d737af78419"
+    },
+    {
+      "path": "src/QuixiCore-XPU/README.md",
+      "branch": "quixi_runtime",
+      "sha256": "88bd3018f168bdd18d3fd8631c7c5f79d9758f57c35ccef6ea96e35ca3e232c7"
+    },
+    {
+      "path": "src/QuixiCore-XPU/SECURITY.md",
+      "branch": "quixi_runtime",
+      "sha256": "dec4aaccac5ab19ee762046cfb24a45265da40bab1644b105278a9e055ec0e2c"
+    },
+    {
+      "path": "src/QuixiCore-XPU/bindings/pytorch/build.sh",
+      "branch": "quixi_runtime",
+      "sha256": "4be787080dfd2593aab99fa3ee1acdc424cae083e54aa8ea8d7962d1afc898e4"
+    },
+    {
+      "path": "src/QuixiCore-XPU/bindings/pytorch/setup.py",
+      "branch": "quixi_runtime",
+      "sha256": "8a4bddfba231494fc998e446f12be4589e9398f432d3e8221aacf73e8db30865"
+    },
+    {
+      "path": "src/QuixiCore-XPU/bindings/pytorch/test_parity.py",
+      "branch": "quixi_runtime",
+      "sha256": "1ac4bac474fc643025b8596ed1d1ecf74cef2067cd4463c3fa68c41d295f354b"
+    },
+    {
+      "path": "src/QuixiCore-XPU/bindings/pytorch/tk_xpu_ext.sycl",
+      "branch": "quixi_runtime",
+      "sha256": "6d6bb4836c6320284622a0ba32e540c0d5dc1abb61bdfc2f00b2e645a55b2008"
+    },
+    {
+      "path": "src/QuixiCore-XPU/cmake/QuixiCoreXPUConfig.cmake.in",
+      "branch": "quixi_runtime",
+      "sha256": "55da050c1e32b79b50ade15263c92700bb73599f73215b42f3f1a3263530dcc5"
+    },
+    {
+      "path": "src/QuixiCore-XPU/examples/backend_info.cpp",
+      "branch": "quixi_runtime",
+      "sha256": "015ac8ed89eca8f7f06cb4caef7cf7a0b9e4a7a9fbedce0acef603547ad4df37"
+    },
+    {
+      "path": "src/QuixiCore-XPU/examples/sycl_device_probe.cpp",
+      "branch": "quixi_runtime",
+      "sha256": "e98b1b165410aa37c3fc6886656726c6b6c86c7c8da74d567515a128585e7a93"
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/contract/kernel_abi.hpp",
+      "branch": "quixi_runtime",
+      "sha256": "1307798de533dc3c70a1a6c00349060606e8e0ae7542ddc73ef1b2ef1260013d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/contract/operations.hpp",
+      "branch": "quixi_ops",
+      "sha256": "132a3df3c7b85dff09af028724d3a1d5c29b7ab5ffea96debe7c5b0eb7d99ad1"
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/backend.hpp",
+      "branch": "quixi_runtime",
+      "sha256": "b7f3b1942a014be16db29b1d8873fbf77c9aae4bedd1251f86e70a446925fedf"
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/contract.hpp",
+      "branch": "quixi_runtime",
+      "sha256": "d1c8288791abe745be30e09df0cede888711a15deda96c0b5873966fa9146fbf"
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/contract_stubs.hpp",
+      "branch": "quixi_runtime",
+      "sha256": "7e1e30966ccd2aa4277a7e4204ad416e578e6a3819900af674d27cf63331fed7"
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/graph.hpp",
+      "branch": "quixi_runtime",
+      "sha256": "2702d2dc4f9bc07e2645f1f067000f6ae74fa01f24ac6f1f11b6669cdf849146"
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/ops.hpp",
+      "branch": "quixi_ops",
+      "sha256": "f65e62b23f03499886d1af2726c27f25b5918a05c8868d6736ad6e6f432f62fc"
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/runtime.hpp",
+      "branch": "quixi_runtime",
+      "sha256": "d1b468066f85215b996b1e3117cea8370a163ccd6d8e7ad7457ad3ed272681fa"
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/variants.hpp",
+      "branch": "quixi_ops",
+      "sha256": "ab70af603a2498c825ce02553a300ec4756c5bfba67aa8823317f13ded23577a"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/gelu/gelu_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "cb93861ffe2309e6ced243522c0834178bad0de6ea261b310eb0793ff80a227e"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/gelu/variants/xpu_onednn/gelu.onednn.cpp",
+      "branch": "quixi_ops",
+      "sha256": "1937fdcc59496b7bcf95a243610575c82f2fd34072ceba7881ab4c72e2782987"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/gelu/variants/xpu_sycl/gelu.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "83257413bd4361ffa5f381b76a9b88255c673a024af1c7ec74cc42ccdf10e138"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/gelu_backward/gelu_backward_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "27689f7945c4cfab3378b319e39004476257689bd57e67a7b97cea176c45b239"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/gelu_backward/variants/xpu_sycl/gelu_backward.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "a95bc475b9e783e62458cb9bb76b6f0325dde114b3167e834502bfff06741cc8"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/glu/glu_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "fdf9f71bde470d33ad71e2188f333c43fe8ecc7b11097b2bf584932ce21ef5be"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/glu/variants/xpu_sycl/glu.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "745cf246a5e972c826374f245f83e244f79ae4341b27fd7769b88db131149def"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/silu/silu_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "d3e6a3a2787ec6ba8c17c646a99302906ca2bcdd731d9a5fa6f0a1fb32effd5b"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/silu/variants/xpu_sycl/silu.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "e504dfb3301fa8b89a51c2b01a628c34dcae58862bfab4635012a77557491e04"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/softmax/softmax_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "3c96d4d44a5a93ffb0a8a493c17fc2a3720a15d1e5adf5831099be32d58aa667"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/softmax/variants/xpu_onednn/softmax.onednn.cpp",
+      "branch": "quixi_ops",
+      "sha256": "be202f8bdfafb5edddc3290c8173cfc19eefa26bdacc5e5bd37093c2a011e17d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/activations/softmax/variants/xpu_sycl/softmax.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "df1f93f58ddf800aee35036a3ce459d0690d27cc7ce643b19dbd337952946068"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/attention/attention_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "62470f3acf3b8cc7bcc2afb0689d8afa56d77a87f9d50fbd8810905db524c62c"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/attention/variants/xpu_sycl/attention.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "e64d78218cac5754548b94557626bb51ce89c6b1b03e1670b62fc099e1d13625"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/attention/variants/xpu_sycl/attention_f16ctx.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "4d9f106519c394fa4b3529f26f3bb49eba4618ff9239d6b21e44623ec6c058d8"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/attention/variants/xpu_sycl/attn_swa.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "61f31ef9fa87a3f06eaa71d23d55ced2b78cae1c5644d6a82fd0ea7f1fc644bc"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/qk_norm_rope/qk_norm_rope_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "51468980110a5ebd985cb34593370cef4c9bcb383ad74eaa8c0471e04a90344c"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/qk_norm_rope/variants/xpu_sycl/qk_norm_rope.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "7a9ac0856e9efe7245f20cff73670e985fd5db9c35036fb1bb17ede106e62296"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/rope/rope_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "de1885948081fe6bedf7878aa7bf84ec9169d6c87db461cfeb8cd74b0a9ec8f1"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/attention/rope/variants/xpu_sycl/rope.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "f3d8bd9908ea22d8bea11c3e62632c3ad37b3b7480c6e7d5eb0ad35bd58cc3d8"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/common/rng.hpp",
+      "branch": "quixi_ops",
+      "sha256": "df551a885e542bc92732e2aae19ff9737787159b663cb8573a0875e50dbe44e0"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/common/vec_map.hpp",
+      "branch": "quixi_ops",
+      "sha256": "d80863f75f28cb5a7bd3b3880ebdd4a410876562d92ab173fb34f616efe424f2"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/linear_attention/linear_attn/linear_attn_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "96eafd98c75b5ac2c88c5c184803ca58f34ef1ccf2ceb99380a09d7df139d613"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/linear_attention/linear_attn/variants/xpu_sycl/linear_attn.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "3f61f81357879e62a1bbc31a17eea62b0bbecf1e8607a20435864d09c018ac27"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/linear_attention/qwen_gdn_decode/qwen_gdn_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "132d22f4ef9f960fdf16d2b2dfa74e57e19c1584cfe930eb71fda08f785c9b92"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/linear_attention/qwen_gdn_decode/variants/xpu_sycl/qwen_gdn.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "2ee4e2e1dd1873d827fd029d9c9057279d175167fcf5dc73c9fde9532234f45d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/matmul/dense_gemm/dense_gemm_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "ae01ff62da58b01dd1793f8fb993f92b3ef9b747a223b7af04dcc9f9209666d9"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/matmul/dense_gemm/variants/xpu_onednn/dense_gemm.onednn.cpp",
+      "branch": "quixi_ops",
+      "sha256": "6942dc309f1687b5f592f3abd18cf75bce6a9d43d4c2249486f8b74b908da0ec"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/matmul/dense_gemm/variants/xpu_sycl/dense_gemm.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "0f72a390386ff6ec8d27a5a035483225c42e6b019660e8641fda48bad0a59166"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/int4_moe/int4_moe_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "13ca6e2f91cba0b537de042e7fec96babca07b3b42abdc97c1b04ae713a56661"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/int4_moe/variants/xpu_sycl/int4_moe.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "75c3118830df2fcabef6a69eb79494e8855c6bfbd03b4e418a5a01fdc584c50c"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/moe_route/moe_route_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "6926273a0e6675ac9470e589c2bb515d0ba05861b52ab9c8ffa92cacf3280922"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/moe_route/variants/xpu_sycl/moe_route.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "69706668d5d9e4211edc32a7db832fcd7a76ca643c9a7b906cbfbae3c2d55765"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/nvfp4_moe/nvfp4_moe_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "1ec77928b41d4d49803e631c25cbca97a37f64a107d47be7046d6d1a993743ad"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/nvfp4_moe/variants/xpu_sycl/nvfp4_dequant.hpp",
+      "branch": "quixi_ops",
+      "sha256": "2944e9317c5c0acf9512cd7723f858a871917de3bb0ec8920386853acd174317"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/nvfp4_moe/variants/xpu_sycl/nvfp4_moe.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "b2554f8f93757ee559755b14b5399dccd6c482fc2bef6e044e93c7a2a4b84833"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/moe/nvfp4_moe/variants/xpu_sycl/nvfp4_moe_grouped.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "88fcf66ae3d65e0cbd1bb2dd34dc289da9ef112556c8002615346733c0fb0eeb"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/norms/layernorm/variants/xpu_onednn/layernorm.onednn.cpp",
+      "branch": "quixi_ops",
+      "sha256": "4afd4eee3722e6d826521c41dadce96d6a83bada2f792166b105cc88818742aa"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/norms/layernorm/variants/xpu_sycl/layernorm.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "c13b9f9b706994df6cceade98afc4e57d01d04976591165ea0585af0ce3f11e0"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/norms/norms_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "a651c2854cb51a87f271a8bf3f0c9e61650548a03f91f6672bb3f1b3e35a4be0"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/norms/rms_norm/variants/xpu_sycl/rms_norm.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "488dd4ac9240f1d232cd42ca01f47729dbabbf1a756d5ee7a882a7d57e2ff478"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/optimizers/adamw/adamw_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "960a63ecdcc8365b2558ef7667341f81456ee864d67f572e71014671fc910313"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/optimizers/adamw/variants/xpu_sycl/adamw.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "9ec9202b86d709cf6e5c7de41b950c5157af534217cdfe9c1f3cae251873a9c4"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/act_quant/act_quant_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "f3a66d09216dabc942a2f5c0093d06fef6687a17c1f14cdea3aa93f0e6df867e"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/act_quant/variants/xpu_sycl/act_quant.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "0fc472f323add3c99a6d2fdeae73e464e97c7f94a74683e484fd53b371a12aeb"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/fp8_gemm/fp8_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "f089c36260466354f51564397d5d40d79271291838f8f2641a7938050b2fc16d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/fp8_gemm/variants/xpu_onednn/fp8_gemm.onednn.cpp",
+      "branch": "quixi_ops",
+      "sha256": "35a4580e44351b0825aaec1ef356cb56c658879d7d3385cb89c561a9274f3ca2"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/fp8_gemm/variants/xpu_sycl/fp8_gemv.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "c74df5e8aa1f704fcb319b1482c6ea6669f7c31afa5fa66aed2eb54ccfb32fef"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/fp8_gemm/variants/xpu_sycl/fp8_w8a16.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "916a58c8643516041046f92e53cfd7f2cdf23f9da5419d23accd475b624e84c8"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/gguf_gemv/gguf_iq_tables.hpp",
+      "branch": "quixi_ops",
+      "sha256": "a0b0d2c1d4e1c81f498d1deda6b6321b194c4bce51cd0a7f655d8475f41bf5a0"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/gguf_gemv/gguf_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "3d17b0607a318bfa24717c7ab28c69d702442ad54720d6ececb7c3dba61e0ee8"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/gguf_gemv/variants/xpu_sycl/gguf_gemv.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "6434953c6f9b4e430bbeae5fcdde5c865c0ab2c6d1d5f3ec374dfeec12c0ea7d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/mxfp4_gemv/mxfp4_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "85acdb16e7342bc29c3e486f59eb39a315c8504f80d371f873bc724b8325134e"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/mxfp4_gemv/variants/xpu_sycl/mxfp4_gemv.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "362563740f35b128d6675746acb21fdb2b30be27405055c9dcae855d5309ec0e"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/nvfp4_gemv/nvfp4_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "fa34c7873aa095093acace7abdc066e93ad56a08aee8dc6f95c51a41363d109d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/nvfp4_gemv/variants/xpu_sycl/nvfp4_gemv.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "cd9073bb50d8bb270db11abccb3cff6b7ef57289e8c758e3255160792369596f"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/qgemm/qgemm_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "812e6831c5b9679a214f5db3a00226e476b6cdc9f05329b528cab89d0f7953c9"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/qgemm/variants/xpu_onednn/qgemm.onednn.cpp",
+      "branch": "quixi_ops",
+      "sha256": "9db7b1c401ea216640b02003cfa97af75617190775689db3b751e40d24530734"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/qgemm/variants/xpu_sycl/qgemm.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "a3e9548ed9a0f93d0b34e1a98604d096bbdac9c6eafadda4dd1a774014c0a34e"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/qgemv/qgemv_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "af808351d15f0f95259026ece8e0a56ee22f3e26e3b9c53d07111bac0efd606f"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/qgemv/variants/xpu_sycl/qgemv.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "58b12954c29d364e3ef15527d5a8e5f3794f768d95cdc2f447f3c1f0c72855e1"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/quantize/quantize_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "3429f4f142b13b95a3d7e87c671d6f7f0811254065b0c1497082433627a0ae47"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/quantize/variants/xpu_sycl/quantize.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "073db23fbfa08e1ac91d01667df97932339d605304bf0a8fa3e81a566205ea9f"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/turboquant/turboquant_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "047459df8a18fbeb239f2bb66fc586b795703ced1f4386fc7912dcf782f99e0e"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/w4a16_gemm/variants/xpu_sycl/w4a16_gemm.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "ccfac09eadd194dabb8e2d9bf20764e60111f2f8651bc9d64060c5864b18b54e"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/quantization/w4a16_gemm/w4a16_gemm_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "06acec0fd7e9234208822cedeefb6812fe07f62a632c8e0221db953d8e5dc1c0"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/sampling/argmax/argmax_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "5ab42136d72e30cb895b40b749d7824812b704056cd22dc8cbdc8be8a33954a3"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/sampling/argmax/variants/xpu_sycl/argmax.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "175ecb99bea929888cc950d413252ab63e4da6e0dc4a62dc766bae804d8fe64d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/sampling/sample/sample_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "fe2faf0bf73edf5391b6f7a06fb6a0562fc47edc1f97f98b060701be83b65977"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/sampling/sample/variants/xpu_sycl/sample.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "79f74f4adb72f278725173bc535b08cbf7b05a194325e27138b3c994fce65dd6"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/serving/serving_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "00fb26a35c1ca1293b064b0876871d59cc77145c7a7ca99d1da45700695d705d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/serving/variants/xpu_sycl/serving.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "ccc99cd7cefa4faa633b3561afdaaca1392a1b781bb765b9906dfa835f35bfc0"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/ssm/selective_scan/selective_scan_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "d5ebdd0f2881ebd9a298ad37021fddd4b0658a8953bbc7dd6ec531b8ff48f807"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/ssm/selective_scan/variants/xpu_sycl/selective_scan.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "eeacfe7b832ac410edd15c84f4b0ec1d4e0cd86d6b787563cfee184a51a8e987"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/utils/cross_entropy/variants/xpu_sycl/cross_entropy.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "03c852f36440d333f2efce6a76093cb09e63c7b4dfabec8df29a698cc55c7caf"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/utils/dropout/variants/xpu_sycl/dropout.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "96fedd2b4cdc1a942efda6ecad7523366b9718484ea67dfb872fd60589bc9805"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/utils/hadamard/variants/xpu_sycl/hadamard.sycl.cpp",
+      "branch": "quixi_ops",
+      "sha256": "648c908e0b1a2995ec34a1592f17bf0bdfb80941a57ef8e956a5ace4a9a83861"
+    },
+    {
+      "path": "src/QuixiCore-XPU/kernels/utils/utils_kernel.hpp",
+      "branch": "quixi_ops",
+      "sha256": "81042e8f2e7057939997b9ec75cc770e458e12df52e07608aca0a81d86d4322c"
+    },
+    {
+      "path": "src/QuixiCore-XPU/perf/bench_kernels.py",
+      "branch": "quixi_runtime",
+      "sha256": "84a8ac4ab5bb6d2c4f99768d389b309625fbbb17331317e0132866aa4d388587"
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/bench",
+      "branch": "quixi_runtime",
+      "sha256": "7568d675f827cee425ca26dd1699916ffbf117ed9a6a2f3ac1269e7ec8f410de"
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/build",
+      "branch": "quixi_runtime",
+      "sha256": "92dfb3fa74122130ca4b4090942f4e5c7e2bcbab09fe9508bdd6637fdc1d9176"
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/clean",
+      "branch": "quixi_runtime",
+      "sha256": "1a9f840681badfb912064bb571584d671f8c02a8bfd5a334de6c0bdf72a75bbb"
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/configure",
+      "branch": "quixi_runtime",
+      "sha256": "c66000b0dfe44eb1147da978db01c34a43d48b7de09a013bdd0ddc397b9280f6"
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/coverage-report",
+      "branch": "quixi_runtime",
+      "sha256": "93b3825e5aa783d6cb344a6e4e0f708e60a0a83fbeee96f2dc8af5d6ae9688b9"
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/test",
+      "branch": "quixi_runtime",
+      "sha256": "7b9d1bf313df4892e7c3e7ed329fc55855e0e1ad78721285006dfd21ff956f72"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/backend.cpp",
+      "branch": "quixi_runtime",
+      "sha256": "82df30e895bbaf7169d71d1f1194d0f10a90cefc501d3b3394a000f48ae80289"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/activations.cpp",
+      "branch": "quixi_ops",
+      "sha256": "b99beeebb740f6b24c374e2168ab11ebac76a1e8d9e0d59285a617ad989bffd5"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/attention.cpp",
+      "branch": "quixi_ops",
+      "sha256": "73648650dcfa8e95b045a9b420558d0dc04e01e16f392f6643004afc3db2f558"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/collectives.cpp",
+      "branch": "quixi_ops",
+      "sha256": "e3639bb5043b7eadcba2c7439631c2ee6b576274d93b07a99e44a03df09a6b0f"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/linear_attention.cpp",
+      "branch": "quixi_ops",
+      "sha256": "4220f44c51356a8ede7d65c10805da0de0efdd8eb1f336f105bae6834afa3f46"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/matmul.cpp",
+      "branch": "quixi_ops",
+      "sha256": "c29bf45a86f5b6f27c40725ad301ae3192f1ff37e05940e72de038db63e6fa8c"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/moe.cpp",
+      "branch": "quixi_ops",
+      "sha256": "c8527f89ad13813742f1419ee4f2ae6d641a87d91edc8c5fadec81c7b5d80f89"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/norms.cpp",
+      "branch": "quixi_ops",
+      "sha256": "36473e3ba0a7c3e228d5904c7f7905cc9d8a0ed749a54dc64d9b931a19f6f895"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/optimizers.cpp",
+      "branch": "quixi_ops",
+      "sha256": "7e99db44862d69c4efe344548a9b126e9d73737c46be88125928e38b3c41e559"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/quantization.cpp",
+      "branch": "quixi_ops",
+      "sha256": "2fc6a5cd7abe5a2a6b8dd809e460721a3d3a59f85d34eeffecfa4afb4b79ccc6"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/sampling.cpp",
+      "branch": "quixi_ops",
+      "sha256": "07452419ab0c321bcad52ec1ed0ad37fadd4f924df9da90ebcbb7aaecc3197f7"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/serving.cpp",
+      "branch": "quixi_ops",
+      "sha256": "6fc44192426f997fa575ceb54de233c88c7ebb9a69a2f78d4ed6c22578cda206"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/ssm.cpp",
+      "branch": "quixi_ops",
+      "sha256": "5483c76099c994244f02cc4b657acdbb6069653017d8ba970657702a0c45e6e0"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/utils.cpp",
+      "branch": "quixi_ops",
+      "sha256": "f1dc7f74b467ee8a20985351d88ff75e779c3311fee35ab5d2738c91460d1cab"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/dispatch/variants.cpp",
+      "branch": "quixi_ops",
+      "sha256": "6d0a3186bb3c86e69957c25f471c800aa0221b22ff9ba00b11db5dbf745424ba"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/runtime/graph.cpp",
+      "branch": "quixi_runtime",
+      "sha256": "fe682330cebaafc936f38d3d50a445d691cf37c98d9df78bb3298eb1d88767c2"
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/runtime/runtime.cpp",
+      "branch": "quixi_runtime",
+      "sha256": "421add5961d9f0d3a998b77f12c55c0c691c63f0894b2b267f89b7ab8005bb41"
+    },
+    {
+      "path": "src/QuixiCore-XPU/tests/backend_smoke.cpp",
+      "branch": "quixi_runtime",
+      "sha256": "84f3fba31824f21828075239bbae2af4dbdb703a35a85823f2b701fd71d030dd"
+    },
+    {
+      "path": "src/QuixiCore-XPU/tests/int4_moe_smoke.cpp",
+      "branch": "quixi_runtime",
+      "sha256": "404b64fa586d6c834a5e7e732e4f0a02fbaeae6cd9c2bc8b0973cc1e9e9af92d"
+    },
+    {
+      "path": "src/QuixiCore-XPU/tests/xpu_graph_smoke.cpp",
+      "branch": "quixi_runtime",
+      "sha256": "14778790506eaac418a5043969f85c84e9b4c1ba059222b751b83e4be899234e"
+    },
+    {
+      "path": "src/QuixiCore-XPU/tests/xpu_ops_smoke.cpp",
+      "branch": "quixi_runtime",
+      "sha256": "b61957a5d9745f08fb4aa7740b13bf53887bb2774f2f687bd01051e1e658c254"
+    },
+    {
+      "path": "src/phase0/baseline_cuda_eager.json",
+      "branch": "banks",
+      "sha256": "f5dddfbcbf5c14bdb43722fb0468c9cb90cf1cd501f7442a15a063b48163b5d1"
+    },
+    {
+      "path": "src/phase0/baseline_cuda_graph.json",
+      "branch": "banks",
+      "sha256": "6a827de6511894a4560e302a87a1ef0d71605bb0efc775e90033deb87a3ce903"
+    },
+    {
+      "path": "src/phase0/benchmark_cuda.py",
+      "branch": "banks",
+      "sha256": "4c1d018b34ef52bf5673b532bf07e2f499cbd3af7519742ec7a78fa25211b2f4"
+    },
+    {
+      "path": "src/phase0/capability_manifest.yaml",
+      "branch": "banks",
+      "sha256": "e0a47a09bb15870efc94e8e938be20202c9c31f40049639dfb3a9adb7759702b"
+    },
+    {
+      "path": "src/phase0/correctness_prompts.jsonl",
+      "branch": "banks",
+      "sha256": "de8ba20b8f228b63e3fcdb98b294e64de45baf9eea2bef27622face3821dd52f"
+    },
+    {
+      "path": "src/phase0/env.sh",
+      "branch": "banks",
+      "sha256": "1e27ee6d09768d70b0c99223955524c0db3288d0329329e69b3f489eaea148a6"
+    },
+    {
+      "path": "src/phase0/freeze.yaml",
+      "branch": "banks",
+      "sha256": "48992a3e6429d9b4d8a3e05484f48ddf405a1518b44c36a7079b325751675e1b"
+    },
+    {
+      "path": "src/phase0/guidellm_config.yaml",
+      "branch": "banks",
+      "sha256": "623cd66833d37c9abbdb928228a96053f489293009a50a212d9607b299744a06"
+    },
+    {
+      "path": "src/phase0/provider_protocol.yaml",
+      "branch": "banks",
+      "sha256": "25d84bc1b0a42c99005a6f7f9855a658fb8bede6b210f5ed4d80b318de22290f"
+    },
+    {
+      "path": "src/phase0/workload.yaml",
+      "branch": "banks",
+      "sha256": "91eefa0ab5fb7797d10650c1e8d250ede11d25cf916ff85c6063bd8b06106d06"
+    },
+    {
+      "path": "src/phase1/Makefile",
+      "branch": "provider",
+      "sha256": "4e63e3d14b7df37b6035e5a959229ee48139e527c709017318ed0a93a3b6b13f"
+    },
+    {
+      "path": "src/phase1/b70_provider.cpp",
+      "branch": "provider",
+      "sha256": "ecab2449bb297d15a1b02171be1001597923effa8dead2bded9631cf36323cd0"
+    },
+    {
+      "path": "src/phase1/b70_provider.hpp",
+      "branch": "provider",
+      "sha256": "baba4a9c0a2c0811529e5eacc1111512f7fda64b993e2825ed92798063dac2b5"
+    },
+    {
+      "path": "src/phase1/b70_provider_int4_chain_test.cpp",
+      "branch": "provider",
+      "sha256": "497d57420e96e04bb2ad48ab55600bbb2567ed2085a7bbed8639a2c1028dd281"
+    },
+    {
+      "path": "src/phase1/b70_provider_main.cpp",
+      "branch": "provider",
+      "sha256": "2e9248eb04805661a72f85ec23c5f1ee9d1f705f5b6303c657a9ef957cdbbc7d"
+    },
+    {
+      "path": "src/phase1/b70_provider_test.cpp",
+      "branch": "provider",
+      "sha256": "515c3b892a3dac43eaa6cb8dfc6cd76c2f2fac1c0e1f08b2954a234d27c50324"
+    },
+    {
+      "path": "src/phase1/b70_provider_tests.cpp",
+      "branch": "provider",
+      "sha256": "51a372ec840cdb96dd9d2915f65eadfaae6905ebf67e97393c299ee02e7a4a0e"
+    },
+    {
+      "path": "src/phase1/build_b12x_bank.py",
+      "branch": "banks",
+      "sha256": "e8a793cd63f84a09be82d49c6a41251593fe97432519801203bf950a37b8b692"
+    },
+    {
+      "path": "src/phase1/build_marlin_bank.py",
+      "branch": "banks",
+      "sha256": "d45123a203a70dadb96009b22605db9bd7fd477a45bf54f4a8ae86d52a4a1f46"
+    },
+    {
+      "path": "src/phase1/extract_experts.py",
+      "branch": "banks",
+      "sha256": "e40dbec0e016c0e6083b8080d9ea1d6efb4c0f30e5accf1ab95cf1044e392c1c"
+    },
+    {
+      "path": "src/phase1/extract_experts_int4.py",
+      "branch": "banks",
+      "sha256": "bd730e42251b84487165c568589b8d2a2d7c75978c033c3b9c79635388765f56"
+    },
+    {
+      "path": "src/phase1/generate_golden.py",
+      "branch": "banks",
+      "sha256": "3da46e8e7f7adddc6b774e73558d34308805904ea84083e6fb7c617563b0c500"
+    },
+    {
+      "path": "src/phase1/validate_expert_bank.py",
+      "branch": "banks",
+      "sha256": "59eb7f428c718faef8a9d3d4b7328dbd2e081ee0d76772e20f277bf2edd92978"
+    },
+    {
+      "path": "src/phase1/validate_reference.py",
+      "branch": "banks",
+      "sha256": "0f99ae3d422e9266d2f9d215a48c7ee9ec105d4a9cc9033f18a19bf60e6197b5"
+    },
+    {
+      "path": "src/phase10/results/all-cuda.json",
+      "branch": "qualification",
+      "sha256": "fabb1057fc8cb7391d813a021db071ac1eb4e6440b7662cf65a25b2667962c94"
+    },
+    {
+      "path": "src/phase10/results/comparison.json",
+      "branch": "qualification",
+      "sha256": "74dc5ffe8d3ab94e78cc22e0440e852c2477ef7c2889a37f4585076fcd1c92b1"
+    },
+    {
+      "path": "src/phase10/results/hybrid.json",
+      "branch": "qualification",
+      "sha256": "7b3fc991f140caedddebaffe75f1ca8386a10d86b2ee3975229443e5687cc178"
+    },
+    {
+      "path": "src/phase2/Makefile",
+      "branch": "ring",
+      "sha256": "aab17bb4dab77a28c537d558d63e23a4862bd0766ec85a3e82e42d6f64c17189"
+    },
+    {
+      "path": "src/phase2/b70_ring_control.hpp",
+      "branch": "ring",
+      "sha256": "9fc32006b249680f1e3978a587437078f9fbf00e2b105b2761b5b8a2742a359b"
+    },
+    {
+      "path": "src/phase2/b70_ring_integration_test.cpp",
+      "branch": "ring",
+      "sha256": "50d56d4f5985b259030d730c89b14dd76b9460fe0dcd53096925d7f4bfcdc720"
+    },
+    {
+      "path": "src/phase2/b70_ring_provider.cpp",
+      "branch": "ring",
+      "sha256": "02e389a9059b28d15e8e51843fe60d6a86831d069afc75f67d8e67aa5683d9f0"
+    },
+    {
+      "path": "src/phase2/memfd_transport_host.cu",
+      "branch": "ring",
+      "sha256": "46c824a59d6d14a990ef0203d6ed46a77464d54c56fbe5e6f5173b27d101a0a9"
+    },
+    {
+      "path": "src/phase2/memfd_transport_protocol.hpp",
+      "branch": "ring",
+      "sha256": "d0dc2c2fd4190029df4285793f8c45446f28a2cf174633a705216014f7efc59e"
+    },
+    {
+      "path": "src/phase2/memfd_transport_provider.cpp",
+      "branch": "ring",
+      "sha256": "07edcd4fbc0353428379d32e4f5731e3a2feda49ee939647bcd68411bdfa0afe"
+    },
+    {
+      "path": "src/phase2/ring_protocol.hpp",
+      "branch": "ring",
+      "sha256": "ff33e8c2e169466fd28ba9d6137fc2a2402435d6fb96dca1c163954e63a7ac6e"
+    },
+    {
+      "path": "src/phase2/shared_ring.cpp",
+      "branch": "ring",
+      "sha256": "c4874b46e1a0fdf74b457b91310ca54ac73347a50704e814524179c6196728b2"
+    },
+    {
+      "path": "src/phase2/shared_ring.hpp",
+      "branch": "ring",
+      "sha256": "b3971acf81809f5a716f61aa7faa07da75d08fcb669a6612d30ab87045421e97"
+    },
+    {
+      "path": "src/phase2/shared_ring_tests.cpp",
+      "branch": "ring",
+      "sha256": "f3052c1d905fd0a3f3cd856341407eaddae136520a8da82dfcd68d49026fb529"
+    },
+    {
+      "path": "src/phase3/Makefile",
+      "branch": "banks",
+      "sha256": "b2bc1bbc4eb4159c08a2ab793ef2b810a9abb5cf081ba27fdaa9b2243f930a6f"
+    },
+    {
+      "path": "src/phase3/generate_reference.py",
+      "branch": "banks",
+      "sha256": "50954d11749f4f0863672542efe09b89783cbd99a13118fdc31ed26a4cf63302"
+    },
+    {
+      "path": "src/phase3/math_cases.cpp",
+      "branch": "banks",
+      "sha256": "65f5e1cc4f93a8d71c6b284bd6c3b37f8e22f524aa60a7c2a2ccf437b6a607dd"
+    },
+    {
+      "path": "src/phase3/math_cases.hpp",
+      "branch": "banks",
+      "sha256": "44e4bc31f0fbcd0dbd25e0efc14e460b9a6fee20f89a47ca752b2601538e5d86"
+    },
+    {
+      "path": "src/phase3/provider_math_test.cpp",
+      "branch": "banks",
+      "sha256": "2bd536e3b567a575f7f3cdf283a459616e5233d7ebbf31070a717021596ec49d"
+    },
+    {
+      "path": "src/phase3/reference_fixture.cpp",
+      "branch": "banks",
+      "sha256": "b51f9378aed238541621e0493ca98b323dfb77b605f54f62d5cb56899d6b5055"
+    },
+    {
+      "path": "src/phase3/reference_fixture.hpp",
+      "branch": "banks",
+      "sha256": "e5eb1e1e1138f6060f504275a27c3b9c8b8f76eca9444e2fc68184ef149a6681"
+    },
+    {
+      "path": "src/phase4/adapter_parity.py",
+      "branch": "integration",
+      "sha256": "82d91761c4559e28b3c5b5c3eb4977d46186eae840e008887211a3fc698db608"
+    },
+    {
+      "path": "src/phase4/adapter_smoke.py",
+      "branch": "integration",
+      "sha256": "3e9c1494d1ddc02575bc203946f4a2e8da716720f079153d2fafd0f1fa32460c"
+    },
+    {
+      "path": "src/phase4/graph_aggregation_oracle.py",
+      "branch": "integration",
+      "sha256": "81be1cfda0988c893cb5ac1f94d64b7fa927001faf0065c2f2a05131c3ab8f19"
+    },
+    {
+      "path": "src/phase4/int4_aggregation_oracle.py",
+      "branch": "integration",
+      "sha256": "7032915c7565e9fb71454af171e73874b257c033355a90e1765fb5abacf8dc2b"
+    },
+    {
+      "path": "src/phase4/int4_aggregation_oracle_test.py",
+      "branch": "integration",
+      "sha256": "1c375dd4cb3e956065b1e96d6d234584514c9701dc14cb316e1abacf5bd64fd6"
+    },
+    {
+      "path": "src/phase4/int4_bank_roundtrip_test.py",
+      "branch": "banks",
+      "sha256": "056d06a6ef89c3403e360e980a6b7268d64f368b61a0250f4d2a3aeb64f277d1"
+    },
+    {
+      "path": "src/phase4/int4_hybrid_enablement_test.py",
+      "branch": "integration",
+      "sha256": "e0a89ab0dfe800273d7bb3a6a7c41713959e95fac23c599091d7c590bdcca06f"
+    },
+    {
+      "path": "src/phase4/placement_unit_test.py",
+      "branch": "placement",
+      "sha256": "aabe34fe7cc6d64f1b00a57176053aa460515741bcee0bbcc995917517c4fbd2"
+    },
+    {
+      "path": "src/phase4/pyproject.toml",
+      "branch": "admission",
+      "sha256": "e0409e737c61a9c97464d9037f6f9b3b1be0445f7414cbf4779cef1405cf5a5c"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/__init__.py",
+      "branch": "admission",
+      "sha256": "75e0c65644087716b64ba34e008c6891d52d8dcbd1c2db46723d62e2a295b171"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/b12x_bank_format.py",
+      "branch": "banks",
+      "sha256": "6be0073ca7a5e4d8cea557d4ab8d4c0925a7fe017e479a894fe9d8b98c3b057a"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/b12x_prefill.py",
+      "branch": "prefill",
+      "sha256": "6137bc8f56d22d444a876a40f3fb0a52b3ee7c876c2163df1cd8af103afef3e6"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/b70_binding.py",
+      "branch": "doorbell",
+      "sha256": "64b2c06e52293b2743eaeb5a6a46f79fd658ec755660c6c01f406b54aa4bfc41"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/b70_poller.py",
+      "branch": "doorbell",
+      "sha256": "8d3976dc63ca57e6d74d63fe23257ee0e14e108aa52d9604dee7141045d72f26"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/bank_source.py",
+      "branch": "banks",
+      "sha256": "f55c8ff86b46eb7dc9c45f61dc67877c853bc071455faae8ee9c3cfe3c643458"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/config.py",
+      "branch": "admission",
+      "sha256": "f3856f31705545e8b751c3264663f62e30f284a0c352a84e2301dedf86a7d2d6"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/cpu_expert_host.py",
+      "branch": "cpu",
+      "sha256": "0522a016314231900c658541d1499844d88927a77db505d29c040fef2c9f2dad"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/cpu_stream.py",
+      "branch": "cpu",
+      "sha256": "307a7d418643f8669a6a828980633f08d86082e5e105af0a61f092131a06cb7a"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/expert_bank.py",
+      "branch": "integration",
+      "sha256": "47564c7aa408da8bd091b7b0039ea8ce9ce5563f02c53688ccbf7b2b60a4f390"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/fused_shared.py",
+      "branch": "integration",
+      "sha256": "4ca648c1dad66a730eae7996eb47215b9c30763d852ba72d23c6a6e55f677952"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/hidden_capture.py",
+      "branch": "integration",
+      "sha256": "880025d587b2a99a7af0fc00a3e9ad86b4564218edc3329bd263812a1db5b916"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/int4_bank_format.py",
+      "branch": "banks",
+      "sha256": "57ce941216159ecbee3fd3ee6b30b49764c54055b699484c299720edf7cbfd68"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/marlin_bank_format.py",
+      "branch": "banks",
+      "sha256": "4e87f4ac2fcd3526bce7406d4eb1e62591f970adb6196e3b7fcb81d785529d2a"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/marlin_prefill.py",
+      "branch": "prefill",
+      "sha256": "4b8dfee3a80589eb45a7a759708e1c4fb7e4f3b1d4e4bd7fd1e657657f342c43"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/partition.py",
+      "branch": "placement",
+      "sha256": "99f0854390401687a87696ff51f3cb338f2ff506881bdb5d5a02fce47700abaa"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/placement.py",
+      "branch": "placement",
+      "sha256": "edf43e229cb0a0595abd249d8f07b83fdfbb8c3e1790f59c993893255354b820"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/prefill_mirror.py",
+      "branch": "prefill",
+      "sha256": "2c0ff7dc1192b3cb3b5bc5ad7256eb14c6aec23f5b6981e75063e1f0ff2c9890"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/provider.py",
+      "branch": "integration",
+      "sha256": "69ea4f19c96048b82437615cd7b002d66ef7de7e908322dee0cdc9ed10b17179"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/route_stats.py",
+      "branch": "observability",
+      "sha256": "d391990e6e44c0876b6df7f1f0c993114c205c400db9fc6ae7e240374d14186a"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/routed_experts.py",
+      "branch": "integration",
+      "sha256": "5dd434d9a5e9efc3699b590a5396db76c9f2bcff75c557eddbcf79335d652302"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/runner.py",
+      "branch": "integration",
+      "sha256": "b1cb8f4c2d859bb9818566a9694ec7884e13ccbe61fe23dc34d316437d46c4e7"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/sb_stream.cu",
+      "branch": "cpu",
+      "sha256": "2d24cf389aca4d88bf3f3859988b6664fd584292f129dd449d1e5f5e2ef3e971"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/seam_trace.py",
+      "branch": "observability",
+      "sha256": "29b7a36a9d52479b1f83941661ad71e005acd39301eca515b3bfb4cc545142d2"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/stream_signal.py",
+      "branch": "doorbell",
+      "sha256": "f3b0806aef84c586fc293cc7517eb35c18515424027a23ff34f91c10e7e90ca2"
+    },
+    {
+      "path": "src/phase4/src/shooting_brake_vllm/telemetry.py",
+      "branch": "observability",
+      "sha256": "69ad6e4b63da349030b70d7504dd25cdf5bb0d5b307255ae802f741214b10b11"
+    },
+    {
+      "path": "src/phase4/tests/test_fused_shared.py",
+      "branch": "integration",
+      "sha256": "56a39a6edf36bd3fbc1ed73552207416e9ae0aa8c1c785d561b7b2e1bcff5e7a"
+    },
+    {
+      "path": "src/phase4/tests/test_hidden_capture.py",
+      "branch": "integration",
+      "sha256": "5e787e2e8e826ad04741a159e49d4eae6d284ebfa272951ef0a32e012744757e"
+    },
+    {
+      "path": "src/phase5/placement_test.py",
+      "branch": "placement",
+      "sha256": "23a77a9fddeee3b1c51d0df478832efcc951f6c852d3f8530b68e6abc8596270"
+    },
+    {
+      "path": "src/phase6/hybrid_execution_test.py",
+      "branch": "integration",
+      "sha256": "c866f6477551e5f4003a896e02499f615539f95e09edaf94244862ed149374ce"
+    },
+    {
+      "path": "src/phase6/layer_topology_unit_test.py",
+      "branch": "placement",
+      "sha256": "a4e2d34201a97444a3a230852b608c3cc5c36d79a483615493073207becf85fe"
+    },
+    {
+      "path": "src/phase6/partition_integration_test.py",
+      "branch": "placement",
+      "sha256": "d5381fe05426c453192116d9874ee03e8efbd8c98951bd502181f9ab9e4e5137"
+    },
+    {
+      "path": "src/phase6/partition_unit_test.py",
+      "branch": "placement",
+      "sha256": "cc6eb40a821f5d00a4c55b064fd2cf36dd0d7b1aa0da8ebd69474110656d3d98"
+    },
+    {
+      "path": "src/phase6/prefill_mirror_unit_test.py",
+      "branch": "prefill",
+      "sha256": "bb854933cd20a476aa13020f7ec2161fbc75b57eb331aafb2b4ccb9f50f88ceb"
+    },
+    {
+      "path": "src/phase6/shadow_validation_test.py",
+      "branch": "placement",
+      "sha256": "4071841235fc1f2b692f423de37db77d16627f0fb2dc1ba23e3913c1211acd89"
+    },
+    {
+      "path": "src/phase7/Makefile",
+      "branch": "qualification",
+      "sha256": "947c088cc7c94e27cc78a2430e1d7d978f79f9d66dd5fb386bd3f294a553b23b"
+    },
+    {
+      "path": "src/phase7/allout_correctness_test.py",
+      "branch": "qualification",
+      "sha256": "74690763c2674fe5eaa45cd72abc4bb1ebe4010c0023b635735eab5ccd1a3618"
+    },
+    {
+      "path": "src/phase7/b70_capi.cpp",
+      "branch": "doorbell",
+      "sha256": "742f6fa784170bc1a9b0b970e3c091531cf5665d9d11718e00c595c45a990af8"
+    },
+    {
+      "path": "src/phase7/b70_capi.h",
+      "branch": "doorbell",
+      "sha256": "aa3cf82af75afcc61fca109d4cd9420b3ad013da99e954fbf8f82603814fe0fd"
+    },
+    {
+      "path": "src/phase7/b70_stream_test.py",
+      "branch": "doorbell",
+      "sha256": "67cb6d242dc3af555f9ef80dff90550e867cc1a9a74165439612f25d8f9d3f61"
+    },
+    {
+      "path": "src/phase7/calibrate_routes.py",
+      "branch": "observability",
+      "sha256": "22dc7dd73cd173747c358f619a04683adf49192c5ac304c3f077879c6f7ddad2"
+    },
+    {
+      "path": "src/phase7/calibrate_routes.sh",
+      "branch": "observability",
+      "sha256": "6223e9a55e5e885ef21a778e2a8dc4aa9c8e00294b00e3ed3f5bc225024c60a8"
+    },
+    {
+      "path": "src/phase7/cpu_expert_bench.py",
+      "branch": "cpu",
+      "sha256": "ee8b0d17d2c36ac8bba82a2997a92544cf6763b750efa62c4c03f36ce8651334"
+    },
+    {
+      "path": "src/phase7/cpu_expert_capi.cpp",
+      "branch": "cpu",
+      "sha256": "de4652c49d9cb61ca178f86ee69c0bfe06e6a4d10f1df8543f2630db13bc343d"
+    },
+    {
+      "path": "src/phase7/cpu_expert_capi.h",
+      "branch": "cpu",
+      "sha256": "f50028e7036684a4983e919f8221dd59373a6a305d5c36de24dd1784f24d208a"
+    },
+    {
+      "path": "src/phase7/cpu_expert_test.py",
+      "branch": "cpu",
+      "sha256": "174c52e2e0dcce3ed829fc312bffa86b6d2dc7ebf4482fbeb5a4d57a3baaa543"
+    },
+    {
+      "path": "src/phase7/cpu_packed_test.py",
+      "branch": "cpu",
+      "sha256": "e15169dbe86ceb8bfb1d4c7b2c7850b022a8618885ff225cc870e5405649dd1f"
+    },
+    {
+      "path": "src/phase7/cpu_poller_test.py",
+      "branch": "cpu",
+      "sha256": "461965cd3d58c6ec2ed34b052bce6fe159da1c820107f2b297c272f3a65a4512"
+    },
+    {
+      "path": "src/phase7/cpu_stream_test.py",
+      "branch": "cpu",
+      "sha256": "804be7e5c19d1e987806163d6d5984eed5a5d1a1800816851b8232ce40537563"
+    },
+    {
+      "path": "src/phase7/hybrid_b70_test.py",
+      "branch": "qualification",
+      "sha256": "0a3438560e10f74b3e5e79155a655cab4c399fbf06de782597aa2379f173085a"
+    },
+    {
+      "path": "src/phase7/nvfp4_testutil.py",
+      "branch": "qualification",
+      "sha256": "6a7e0b3d65e950f113540039d92a6125385df40450ef6d35b2f1bcbfa4702a75"
+    },
+    {
+      "path": "src/phase7/preemptive_surgery_test.py",
+      "branch": "qualification",
+      "sha256": "4d69835f71414cdbeb40bab85507c0af98c192fb12b1ab8298f7a57269aa8799"
+    },
+    {
+      "path": "src/phase7/prefill_chunk_bench.py",
+      "branch": "qualification",
+      "sha256": "7e5ce718f49b7f9674431df62c0e79d386053da15856d09c13e7234e3ef1c1f6"
+    },
+    {
+      "path": "src/phase7/prefill_chunk_bench.sh",
+      "branch": "qualification",
+      "sha256": "299b9b101acba23a341984ec8649bd2f578a703eb3b9cf175c6f933b3bb7d97d"
+    },
+    {
+      "path": "src/phase7/prefill_probe.py",
+      "branch": "qualification",
+      "sha256": "517d6a7d0013511ee85e82d6b48d32309c63a2423ec3ada463c85b34740722c2"
+    },
+    {
+      "path": "src/phase7/prefill_probe.sh",
+      "branch": "qualification",
+      "sha256": "112b54d126eba12bee6efc365bf8cf74aeed3d25aa626981ee7ce106e8d0f4c3"
+    },
+    {
+      "path": "src/phase7/stream_crossover_bench.py",
+      "branch": "qualification",
+      "sha256": "8a5947041f052beea0d58ba163292317c7adfccda6948b453faf44a6eb8e01be"
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/.provenance",
+      "branch": "compute",
+      "sha256": "1d4ba5f1945ad0cf213f76a20c1e4716534180ee7808cb718313ef1cc55df118"
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/grouped_moe.cpp",
+      "branch": "compute",
+      "sha256": "fb273d5ba9751cc9e69d4439ac6404e06b4411fcc6117877ab12ce39d7f11b5d"
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/grouped_moe.hpp",
+      "branch": "compute",
+      "sha256": "2661b3a64f8ccc7e746cf28214c6ebc56552393b812bf7e427f57dde77e75d14"
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/grouped_moe_onednn.cpp",
+      "branch": "compute",
+      "sha256": "e09408c8d3ff90f85edfcd09dc371e2258a10f30fdd913a9eed21fdbda29c120"
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/grouped_moe_onednn.hpp",
+      "branch": "compute",
+      "sha256": "69a28c873dda81e3cddbe4373bbfc97d8c17bf606e81fd021ae18f977a30166b"
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/xe_2/gemm_xe2.hpp",
+      "branch": "compute",
+      "sha256": "7445161a954c823c480de1259543568a73dd0013f45198fc3a7c882b87a7172a"
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/xe_2/gemm_xe2_policy.hpp",
+      "branch": "compute",
+      "sha256": "d61640cdb15a035df079bb0f5772d0b0eda07d56937099cfca2d6731c85efff5"
+    },
+    {
+      "path": "src/phase7/xe2_nvfp4/xe_2/grouped_gemm_xe2.hpp",
+      "branch": "compute",
+      "sha256": "580bce550639673ac1f8056c07a81b9324e09b3eef3ce3bc71f28a85d57a5145"
+    },
+    {
+      "path": "src/phase7/xe2_probe/build.sh",
+      "branch": "compute",
+      "sha256": "cb3ac0722f8e1260d231a7262a9129e59d64638b46b8813a98d3a906547c3212"
+    },
+    {
+      "path": "src/phase7/xe2_probe/build_backend_verify.sh",
+      "branch": "compute",
+      "sha256": "72adedaf8c4ea5c0dc5a8f4c3a338e04077baca2834eed4ef10e796bd0b2b54e"
+    },
+    {
+      "path": "src/phase7/xe2_probe/build_nvfp4.sh",
+      "branch": "compute",
+      "sha256": "a4dbd94e1e96275f852ab0d22d4283f75f34d23f6665de8c32b3374f86b09134"
+    },
+    {
+      "path": "src/phase7/xe2_probe/build_onednn_probe.sh",
+      "branch": "compute",
+      "sha256": "87fe1494029f8aa823ff521018091bba0f8e36083e996e6699fc9611cc1d95bd"
+    },
+    {
+      "path": "src/phase7/xe2_probe/grouped_backend_verify.cpp",
+      "branch": "compute",
+      "sha256": "f084ceb46873c75d06cab67087e57f781fe808c10aa518a1d41df2c5c445cb83"
+    },
+    {
+      "path": "src/phase7/xe2_probe/onednn_grouped_probe.cpp",
+      "branch": "compute",
+      "sha256": "b6241cf2ae5a120185ba059a7f39520f03a6016bbef89cd2fad43d31487aa71d"
+    },
+    {
+      "path": "src/phase7/xe2_probe/xe2_grouped_moe.cpp",
+      "branch": "compute",
+      "sha256": "3cf568541ff928f4144b8ceeaba5c5d985f172a46fef0ae9647dd4616395818d"
+    },
+    {
+      "path": "src/phase7/xe2_probe/xe2_grouped_probe.cpp",
+      "branch": "compute",
+      "sha256": "8a2578248c33aae57ecff006ef81237b5eb43bbe0d1d067e1a5fac099ab3212a"
+    },
+    {
+      "path": "src/phase7/xe2_probe/xe2_nvfp4_verify.cpp",
+      "branch": "compute",
+      "sha256": "6aeca3fd665ac04131fb8bbe2b1c1ad11798392ffbc0e242ecd41138a4fe774b"
+    },
+    {
+      "path": "src/phase8/async_overlap_test.py",
+      "branch": "prefill",
+      "sha256": "925095064efade1c6adc6acecd8c26a3ab84fbe2fa50a0eeff655ee253756017"
+    },
+    {
+      "path": "src/phase8/smoke_benchmark.py",
+      "branch": "prefill",
+      "sha256": "47caf9695e87b054cdf4f14532778c60fbdc54202ce3eab3f77a7c4a59764326"
+    },
+    {
+      "path": "src/phase8/vram_surgery_test.py",
+      "branch": "prefill",
+      "sha256": "ce36887b4995db1cb4fd2585d4ae137dd36dc50ed36668a4d9032144a10b5a56"
+    },
+    {
+      "path": "src/phase9/sb_stream.cu",
+      "branch": "doorbell",
+      "sha256": "2d24cf389aca4d88bf3f3859988b6664fd584292f129dd449d1e5f5e2ef3e971"
+    },
+    {
+      "path": "tests/pinned_staging_probe/host_bench.cu",
+      "branch": "hardware_probes",
+      "sha256": "fa7694488cca7d30ab64f2e7fc4debf555db032514e3364ff339b91a1564a32e"
+    },
+    {
+      "path": "tests/pinned_staging_probe/host_side.cu",
+      "branch": "hardware_probes",
+      "sha256": "365a4c770b4e6c98ad9afc6f84fb98cdf7f2303855c1067adac03e63dcc0a097"
+    },
+    {
+      "path": "tests/pinned_staging_probe/provider_bench.cpp",
+      "branch": "hardware_probes",
+      "sha256": "afc0df19d9bb009a6768c3d5f756c88f3d473f2dbd73dafa9892b3d34ebfc6d3"
+    },
+    {
+      "path": "tests/pinned_staging_probe/provider_side.cpp",
+      "branch": "hardware_probes",
+      "sha256": "9b94fa1e9f125d8d4227b107022ca9c06df0dc5e6a4d63a4b1ee0329892a282a"
+    },
+    {
+      "path": "tests/test_b70_output_wire.py",
+      "branch": "qualification",
+      "sha256": "f70fe8779921d4a01a714e71fb057a29b338baaa04dd43d0129ee6cf5fa4007d"
+    },
+    {
+      "path": "tests/test_campaign_logging.py",
+      "branch": "campaign",
+      "sha256": "d83aeb18caeb9d74ed12db3e68966066b48520ce11482edea7b1d32b5e666c78"
+    },
+    {
+      "path": "tests/test_campaign_measurements.py",
+      "branch": "campaign",
+      "sha256": "698918b06c626a96b5dc078fd2f0410b7bdf093748faf72214aed7ec40f27b1a"
+    },
+    {
+      "path": "tests/test_campaign_profile_analysis.py",
+      "branch": "campaign",
+      "sha256": "7394a33b275ead8ffdc45bacc8442eb36e719381cd5b08220b459e713270354d"
+    },
+    {
+      "path": "tests/test_interactive_scheduler.py",
+      "branch": "campaign",
+      "sha256": "3c5bd38ecfc1f5c2c0208969e6691b5ec653d58a5efcf28912a149745035d584"
+    },
+    {
+      "path": "tests/test_matrix_runner_identity.py",
+      "branch": "benchmarks",
+      "sha256": "756069f50a2b01bb495d90f96862005f22f39efbf53b210ea45cbd8b4ccba184"
+    },
+    {
+      "path": "tests/test_route_locality.py",
+      "branch": "observability",
+      "sha256": "4450cbe386b37e2fe369001ce966ebe4af7607f859ef06750bf2fca89fad66ff"
+    },
+    {
+      "path": "tests/test_route_topology.py",
+      "branch": "observability",
+      "sha256": "c8efb0d17ee70a26b5b5ba3bf5578e65593039762dee24baf29914baad443803"
+    },
+    {
+      "path": "tests/test_stream_signal.py",
+      "branch": "doorbell",
+      "sha256": "2ca82c82b0f75a9fa2c6a2138a8b3cf3ef4f2e8dac43d1ec2ddd623f48a459d6"
+    }
+  ]
+}

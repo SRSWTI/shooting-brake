@@ -1,0 +1,362 @@
+/// Breadth-first model of the standalone sparse-memory research branch.
+/// Sources: experiments/sparse-memory/pkm.py::select,gather;
+/// memory_layer.py::ProductKeyMemory,attach_memory,block_end_layers;
+/// e0_query_staleness.py::run through e7_teacher_distill.py::run.
+///
+/// Abstraction: tensor scoring, normalization, quantization, optimizer updates,
+/// timing and model forwards are atomic. Bounded integer units retain formulas,
+/// guards and ordering but are not claims about observed accuracy or performance.
+module sparse_memory {
+  type Stage = E0Staleness | E1DeviceGather | E2HostTier | E4BaselineSlo |
+    E5Retrofit | E6Knowledge | E7Distillation | Complete | Failed
+  type ScoreMode = DotProduct | InverseDistance
+  type Placement = FastDevice | PeerDevice | HostDram
+  type Quantization = BFloat16 | Int8 | Int4
+  type State = {
+    stage: Stage,
+    scoreMode: ScoreMode,
+    placement: Placement,
+    quantization: Quantization,
+    gateEnabled: bool,
+    nRows: int,
+    dQuery: int,
+    shapeValid: bool,
+    selected: bool,
+    reduced: bool,
+    injected: bool,
+    overlapMatches: int,
+    overlapTotal: int,
+    referenceError: int,
+    referenceTolerance: int,
+    utilizationSelected: int,
+    utilizationTotal: int,
+    utilizationHealthy: bool,
+    acquisition: int,
+    controlDrift: int,
+    storageEffect: int,
+    retentionDelta: int,
+    knowledgeStored: bool,
+    retentionAccepted: bool,
+    studentCe: int,
+    bankCe: int,
+    teacherCe: int,
+    klBefore: int,
+    klAfter: int,
+    teacherGapReduced: bool,
+    errorObserved: bool,
+  }
+
+  var s: State
+
+  action init = s' = {
+    stage: E0Staleness,
+    scoreMode: DotProduct,
+    placement: FastDevice,
+    quantization: BFloat16,
+    gateEnabled: false,
+    nRows: 4,
+    dQuery: 4,
+    shapeValid: true,
+    selected: false,
+    reduced: false,
+    injected: false,
+    overlapMatches: 0,
+    overlapTotal: 0,
+    referenceError: 0,
+    referenceTolerance: 0,
+    utilizationSelected: 0,
+    utilizationTotal: 0,
+    utilizationHealthy: false,
+    acquisition: 0,
+    controlDrift: 0,
+    storageEffect: 0,
+    retentionDelta: 0,
+    knowledgeStored: false,
+    retentionAccepted: false,
+    studentCe: 0,
+    bankCe: 0,
+    teacherCe: 0,
+    klBefore: 0,
+    klAfter: 0,
+    teacherGapReduced: false,
+    errorObserved: false,
+  }
+
+  /// pkm.py::PKMConfig.c,d_half. `root` and `half` witness the exact bounded
+  /// perfect-square row and even-width conditions without an unbounded search.
+  action configureShape(rows: int, queryWidth: int, root: int, half: int): bool = all {
+    s.stage != Failed,
+    not(s.selected),
+    rows > 0,
+    rows <= 16,
+    queryWidth > 0,
+    queryWidth <= 16,
+    root > 0,
+    half > 0,
+    root * root == rows,
+    half * 2 == queryWidth,
+    s' = { ...s, nRows: rows, dQuery: queryWidth, shapeValid: true },
+  }
+  action rejectInvalidShape(rows: int, queryWidth: int, root: int, half: int): bool = all {
+    s.stage != Failed,
+    not(s.selected),
+    rows > 0,
+    rows <= 16,
+    queryWidth > 0,
+    queryWidth <= 16,
+    (root * root != rows) or (half * 2 != queryWidth),
+    s' = { ...s, stage: Failed, nRows: rows, dQuery: queryWidth,
+      shapeValid: false, errorObserved: true },
+  }
+
+  /// pkm.py::select: mode changes the half-score formula; both branches take
+  /// top-k per half, rank k^2 pair sums and softmax the selected sums.
+  action selectRows(mode: ScoreMode): bool = all {
+    s.stage != Failed,
+    s.shapeValid,
+    not(s.selected),
+    s' = { ...s, scoreMode: mode, selected: true },
+  }
+  action choosePlacement(place: Placement): bool = all {
+    s.stage != Failed,
+    not(s.selected),
+    s' = { ...s, placement: place },
+  }
+
+  /// Error/tolerance are bounded abstraction units for each source driver's
+  /// reference comparison. They are never presented as measurements.
+  action gatherOnDevice(q: Quantization, error: int, tolerance: int): bool = all {
+    s.selected,
+    not(s.reduced),
+    s.placement != HostDram,
+    error >= 0,
+    tolerance >= 0,
+    error <= tolerance,
+    tolerance <= 100,
+    s' = { ...s, quantization: q, reduced: true,
+      referenceError: error, referenceTolerance: tolerance },
+  }
+  action rejectDeviceGather(error: int, tolerance: int): bool = all {
+    s.stage == E1DeviceGather,
+    s.selected,
+    not(s.reduced),
+    error > tolerance,
+    tolerance >= 0,
+    error <= 100,
+    s' = { ...s, stage: Failed, referenceError: error,
+      referenceTolerance: tolerance, errorObserved: true },
+  }
+  /// e2_host_tier.py::run: CPU embedding_bag reduces before one vector crosses.
+  action gatherInHostDram(error: int, tolerance: int): bool = all {
+    s.selected,
+    not(s.reduced),
+    s.placement == HostDram,
+    error >= 0,
+    error <= tolerance,
+    tolerance <= 100,
+    s' = { ...s, quantization: BFloat16, reduced: true,
+      referenceError: error, referenceTolerance: tolerance },
+  }
+
+  /// memory_layer.py::forward mode branches. These record use of the gate, not
+  /// whether the gate repaired retention.
+  action injectUngated = all {
+    s.reduced,
+    not(s.injected),
+    s' = { ...s, gateEnabled: false, injected: true },
+  }
+  action injectGated = all {
+    s.reduced,
+    not(s.injected),
+    s' = { ...s, gateEnabled: true, injected: true },
+  }
+
+  /// E0 overlap is matched selected rows divided by compared rows.
+  action recordE0Overlap(matches: int, total: int): bool = all {
+    s.stage == E0Staleness,
+    s.selected,
+    total > 0,
+    total <= 100,
+    matches >= 0,
+    matches <= total,
+    s' = { ...s, stage: E1DeviceGather, overlapMatches: matches,
+      overlapTotal: total, selected: false, reduced: false, injected: false },
+  }
+  action acceptE1Gather = all {
+    s.stage == E1DeviceGather,
+    s.reduced,
+    s.referenceError <= s.referenceTolerance,
+    s' = { ...s, stage: E2HostTier, selected: false, reduced: false,
+      injected: false, referenceError: 0, referenceTolerance: 0 },
+  }
+  action acceptE2Placement = all {
+    s.stage == E2HostTier,
+    s.reduced,
+    s.placement == HostDram,
+    s' = { ...s, stage: E4BaselineSlo, selected: false, reduced: false,
+      injected: false, referenceError: 0, referenceTolerance: 0 },
+  }
+  /// There is no E3 source. E4 requires at least one successful baseline stream;
+  /// its printed cost projection remains an unobserved projection.
+  action recordE4Baseline(streams: int, errors: int): bool = all {
+    s.stage == E4BaselineSlo,
+    streams > 0,
+    streams <= 32,
+    errors >= 0,
+    errors < streams,
+    s' = { ...s, stage: E5Retrofit },
+  }
+  /// Half-coverage is an explicit abstraction threshold, not a claimed source
+  /// acceptance bar. Counts retain the distinction from a pass/fail fixture.
+  action recordE5Retrofit(selectedRows: int, totalRows: int): bool = all {
+    s.stage == E5Retrofit,
+    totalRows > 0,
+    totalRows <= 100,
+    selectedRows >= 0,
+    selectedRows <= totalRows,
+    s' = { ...s, stage: E6Knowledge,
+      utilizationSelected: selectedRows, utilizationTotal: totalRows,
+      utilizationHealthy: selectedRows * 2 >= totalRows },
+  }
+  /// E6 preserves the implemented formulas: acquisition and matched-control
+  /// drift are differences from the memory-at-init condition; storage subtracts
+  /// control drift. Held-out CE retention remains independent.
+  action recordE6Knowledge(
+    initInjected: int,
+    trainedInjected: int,
+    initControl: int,
+    trainedControl: int,
+    heldoutCeDelta: int
+  ): bool = all {
+    s.stage == E6Knowledge,
+    initInjected >= 0,
+    initInjected <= 100,
+    trainedInjected >= 0,
+    trainedInjected <= 100,
+    initControl >= 0,
+    initControl <= 100,
+    trainedControl >= 0,
+    trainedControl <= 100,
+    heldoutCeDelta >= -100,
+    heldoutCeDelta <= 100,
+    s' = { ...s, stage: E7Distillation,
+      acquisition: trainedInjected - initInjected,
+      controlDrift: trainedControl - initControl,
+      storageEffect: (trainedInjected - initInjected) - (trainedControl - initControl),
+      retentionDelta: heldoutCeDelta,
+      knowledgeStored:
+        (trainedInjected - initInjected) - (trainedControl - initControl) > 0,
+      retentionAccepted: heldoutCeDelta <= 0 },
+  }
+  /// E7 derives a qualitative result from bounded CE/KL units. The teacher must
+  /// define a positive CE gap; improvement requires lower bank CE and lower KL.
+  action recordE7Distillation(
+    student: int,
+    bank: int,
+    teacher: int,
+    beforeKl: int,
+    afterKl: int
+  ): bool = all {
+    s.stage == E7Distillation,
+    student > teacher,
+    student <= 100,
+    bank >= 0,
+    bank <= 100,
+    teacher >= 0,
+    beforeKl > 0,
+    beforeKl <= 100,
+    afterKl >= 0,
+    afterKl <= 100,
+    s' = { ...s, stage: Complete, studentCe: student, bankCe: bank,
+      teacherCe: teacher, klBefore: beforeKl, klAfter: afterKl,
+      teacherGapReduced: (bank < student) and (afterKl < beforeKl) },
+  }
+  action stay = s' = s
+
+  action step = any {
+    configureShape(4, 4, 2, 2),
+    rejectInvalidShape(10, 4, 3, 2),
+    selectRows(DotProduct),
+    selectRows(InverseDistance),
+    choosePlacement(FastDevice),
+    choosePlacement(PeerDevice),
+    choosePlacement(HostDram),
+    gatherOnDevice(BFloat16, 1, 5),
+    gatherOnDevice(Int8, 1, 5),
+    gatherOnDevice(Int4, 4, 5),
+    rejectDeviceGather(6, 5),
+    gatherInHostDram(1, 5),
+    injectUngated,
+    injectGated,
+    recordE0Overlap(8, 10),
+    acceptE1Gather,
+    acceptE2Placement,
+    recordE4Baseline(4, 0),
+    recordE5Retrofit(60, 100),
+    recordE5Retrofit(20, 100),
+    recordE6Knowledge(10, 40, 10, 15, 5),
+    recordE6Knowledge(10, 40, 10, 15, -2),
+    recordE7Distillation(40, 30, 20, 25, 10),
+    recordE7Distillation(40, 45, 20, 25, 30),
+    stay,
+  }
+
+  val inv = and {
+    s.nRows > 0,
+    s.nRows <= 16,
+    s.dQuery > 0,
+    s.dQuery <= 16,
+    s.reduced implies s.selected,
+    s.injected implies s.reduced,
+    not(s.shapeValid) implies (s.stage == Failed and s.errorObserved),
+    s.errorObserved implies s.stage == Failed,
+    s.teacherGapReduced implies
+      (s.stage == Complete and s.bankCe < s.studentCe and s.klAfter < s.klBefore),
+    s.knowledgeStored implies
+      ((s.stage == E7Distillation or s.stage == Complete) and s.storageEffect > 0),
+    s.retentionAccepted implies s.retentionDelta <= 0,
+    s.utilizationHealthy implies
+      (s.utilizationTotal > 0 and s.utilizationSelected * 2 >= s.utilizationTotal),
+  }
+
+  val witnessDeviceRetrieval = s.selected and s.reduced and s.injected and
+    s.placement == PeerDevice and s.quantization == Int4
+  val witnessHostReduction = s.selected and s.reduced and
+    s.placement == HostDram and s.referenceError <= s.referenceTolerance
+  val witnessStorageWithoutRetention = s.stage == E7Distillation and
+    s.storageEffect > 0 and not(s.retentionAccepted)
+  val witnessDistillationSuccess = s.stage == Complete and s.teacherGapReduced
+  val witnessInvalidConfiguration = s.stage == Failed and not(s.shapeValid)
+
+  /// Fixture units below establish reachability only; they are not executed
+  /// accuracy, overlap, error, utilization, CE or KL evidence.
+  run peerInt4RetrievalTest = init.then(choosePlacement(PeerDevice))
+    .then(selectRows(DotProduct)).then(gatherOnDevice(Int4, 4, 5))
+    .then(injectUngated).expect(witnessDeviceRetrieval and inv)
+  run hostReduceBeforeTransferTest = init.then(choosePlacement(HostDram))
+    .then(selectRows(DotProduct)).then(gatherInHostDram(1, 5))
+    .expect(witnessHostReduction and inv)
+  run invalidShapeStopsSelectionTest = init.then(rejectInvalidShape(10, 4, 3, 2))
+    .expect(witnessInvalidConfiguration and inv).then(selectRows(DotProduct).fail())
+  run hostCannotUseDeviceGatherTest = init.then(choosePlacement(HostDram))
+    .then(selectRows(DotProduct)).then(gatherOnDevice(Int8, 1, 5).fail())
+  run kernelMismatchIsRejectedTest = init.then(selectRows(DotProduct))
+    .then(recordE0Overlap(8, 10)).then(selectRows(DotProduct))
+    .then(rejectDeviceGather(6, 5)).expect(s.stage == Failed and inv)
+  run storageRetentionRemainSeparateTest = init.then(selectRows(DotProduct))
+    .then(recordE0Overlap(8, 10)).then(selectRows(DotProduct))
+    .then(gatherOnDevice(BFloat16, 1, 5)).then(acceptE1Gather)
+    .then(choosePlacement(HostDram)).then(selectRows(DotProduct))
+    .then(gatherInHostDram(1, 5)).then(acceptE2Placement)
+    .then(recordE4Baseline(4, 0)).then(recordE5Retrofit(60, 100))
+    .then(recordE6Knowledge(10, 40, 10, 15, 5))
+    .expect(witnessStorageWithoutRetention and s.storageEffect == 25 and inv)
+  run distillationProgressionTest = storageRetentionRemainSeparateTest
+    .then(recordE7Distillation(40, 30, 20, 25, 10))
+    .expect(witnessDistillationSuccess and inv)
+  run noDistillationImprovementTest = storageRetentionRemainSeparateTest
+    .then(recordE7Distillation(40, 45, 20, 25, 30))
+    .expect(not(s.teacherGapReduced) and inv)
+  run inverseDistanceAblationTest = init.then(selectRows(InverseDistance))
+    .then(recordE0Overlap(2, 10)).expect(s.scoreMode == InverseDistance and inv)
+}

@@ -1,0 +1,364 @@
+{
+  "id": "quixi_runtime",
+  "title": "Embedded QuixiCore-XPU runtime, bindings, graph lifecycle, and evidence workflow",
+  "models": [
+    {
+      "path": "models/quixi_runtime.ryu",
+      "main": "quixi_runtime",
+      "invariant": "inv",
+      "witnesses": [
+        "witnessLevelZeroTieBreak",
+        "witnessClampedProfileQueue",
+        "witnessGraphReplayComplete",
+        "witnessUnsupportedGraph",
+        "witnessCapturedScratchRejected",
+        "witnessNativeBypassesStubs",
+        "witnessCanonicalStub",
+        "witnessPortableSkip",
+        "witnessDeviceBenchmark"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "src/QuixiCore-XPU/.clang-format",
+      "role": "dependency",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Mechanical formatting policy only; no named program symbols and no runtime capability evidence."
+    },
+    {
+      "path": "src/QuixiCore-XPU/.editorconfig",
+      "role": "dependency",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Editor whitespace/newline policy only; no named program symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/.gitignore",
+      "role": "artifact",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Identifies generated build, binding, cache, local mirror, profiler, and raw result artifacts; no executable symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/.quixicore/backend.yaml",
+      "role": "functional",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Declarative active backend identity and integration intent; contrasted with the compiled metadata API's planned status. YAML has no program symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/.quixicore/kernel-stubs.yaml",
+      "role": "artifact",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Generated canonical negative inventory: 303 canonical operations and 273 XPU stubs at the recorded revision; metadata is not implementation evidence."
+    },
+    {
+      "path": "src/QuixiCore-XPU/AGENTS.md",
+      "role": "dependency",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Engineering policy requiring correctness, focused hardware measurement before performance claims, and provenance review; no executable symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/CHANGELOG.md",
+      "role": "artifact",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Unreleased history/scaffolding record; not capability evidence and no program symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/CLAUDE.md",
+      "role": "dependency",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Tool-specific measurement and quant-format policy; historical claims are not modeled as observed performance."
+    },
+    {
+      "path": "src/QuixiCore-XPU/CMakeLists.txt",
+      "role": "build",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["quixicore_xpu", "quixicore_xpu_ops", "quixicore_xpu_bench"],
+      "notes": "Authoritative portable/SYCL/oneDNN capability gates, target graph, tests and base-only installed export. CMake target names are exact."
+    },
+    {
+      "path": "src/QuixiCore-XPU/CMakePresets.json",
+      "role": "build",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Defines exact dev and sycl configure/build/test presets; JSON has no program symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/CONTRIBUTING.md",
+      "role": "dependency",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Repository ownership, portable gating, evidence, and contribution policy; no executable symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/LICENSE",
+      "role": "dependency",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "MIT license and warranty/liability disclaimer; no executable symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/README.md",
+      "role": "functional",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "User-facing standalone-native identity, active/experimental/training limitations and workflow claims; cross-checked against implementation."
+    },
+    {
+      "path": "src/QuixiCore-XPU/SECURITY.md",
+      "role": "dependency",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Disclosure policy and routing between shared contract and XPU implementation issues; no executable symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/bindings/pytorch/setup.py",
+      "role": "build",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["SyclExtension", "BuildExtension"],
+      "notes": "Builds tk_xpu from the .sycl translation unit and links shared XPU ops, base metadata and oneDNN with build-tree rpaths."
+    },
+    {
+      "path": "src/QuixiCore-XPU/bindings/pytorch/test_parity.py",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["check", "main"],
+      "notes": "Requires torch.xpu, uses PyTorch XPU eager references, and exercises binding graph, persistent scratch, replay, pool/reset and GDN state edges; not stored pass evidence."
+    },
+    {
+      "path": "src/QuixiCore-XPU/bindings/pytorch/build.sh",
+      "role": "build",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Strict shared icpx/-fsycl ops plus .sycl extension workflow; shell entrypoint has no named function symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/bindings/pytorch/tk_xpu_ext.sycl",
+      "role": "behavior",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["dtype_of", "queue_of", "check", "check_same_device", "row_shape", "XpuGraph", "synchronize_current_stream", "nvfp4_moe", "device_count", "PYBIND11_MODULE"],
+      "notes": "Actual zero-copy current-stream native typed binding, tensor validation and PyTorch XPUGraph wrapper. Operation arithmetic remains in quixi_ops."
+    },
+    {
+      "path": "src/QuixiCore-XPU/cmake/QuixiCoreXPUConfig.cmake.in",
+      "role": "build",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["check_required_components"],
+      "notes": "Installed package template includes exported base targets and checks required components; it does not export XPUOps."
+    },
+    {
+      "path": "src/QuixiCore-XPU/examples/backend_info.cpp",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["main"],
+      "notes": "Prints static BackendInfo fields, targets and integrations without probing devices or operation readiness."
+    },
+    {
+      "path": "src/QuixiCore-XPU/examples/sycl_device_probe.cpp",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["device_type_name", "main"],
+      "notes": "Enumerates every SYCL platform/device and succeeds with none; it is broader than gpu_devices and does not validate runtime selection."
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/contract/kernel_abi.hpp",
+      "role": "functional",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["StatusCode", "Status", "DType", "MemorySpace", "TensorFlags", "TensorView", "AttributeKind", "Attribute", "KernelCall", "KernelFunction", "StubDescriptor", "not_implemented", "adapter_not_wired"],
+      "notes": "Generic non-owning C++ adapter records and status helpers. No C linkage, ownership/lifetime/version rules, or success validation path is established here."
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/backend.hpp",
+      "role": "functional",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["BackendInfo", "kBackendInfo", "kContractKernelFamilies", "runtime_backend_info", "is_contract_kernel_family", "status_for_kernel_family"],
+      "notes": "Compiled metadata contract hard-codes planned status and sixteen family names; stale relative to active manifest and native sources."
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/contract.hpp",
+      "role": "behavior",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["contract_api::dispatch"],
+      "notes": "Generated switch sends explicit operation IDs to generated failure stubs; default returns adapter_not_wired."
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/contract_stubs.hpp",
+      "role": "artifact",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["contract_stubs::kStubs"],
+      "notes": "Generated scaffolding: 273 inline adapters ignore KernelCall and return not_implemented; modeled as negative inventory, not native coverage."
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/graph.hpp",
+      "role": "functional",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["command_graph_supported", "CommandGraph"],
+      "notes": "Move-only current-queue graph declaration, lifecycle methods, readiness/recording observations and mutable owned queue access."
+    },
+    {
+      "path": "src/QuixiCore-XPU/include/quixicore/xpu/runtime.hpp",
+      "role": "functional",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["DType", "dtype_size", "dtype_name", "gpu_devices", "make_gpu_queue", "describe_device"],
+      "notes": "Native storage dtype and Intel device/queue API; comments specify one-platform enumeration, index clamping and in-order/profiling properties."
+    },
+    {
+      "path": "src/QuixiCore-XPU/perf/bench_kernels.py",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["DEFAULT_KERNEL_BENCH", "git_label", "compiler_version", "binary_dir_for_preset", "run_command", "command_plan", "load_kernel_bench_matrix", "run_kernel_bench", "write_summary", "main"],
+      "notes": "Build-health and device-only benchmark orchestration, fail-fast standard phases, row/result persistence and empty dev-kernel success edge."
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/bench",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Strict wrapper invokes bench_kernels.py phase all with environment/default preset; no shell function symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/build",
+      "role": "build",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Strict positional/environment/dev preset build wrapper; no shell function symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/clean",
+      "role": "build",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Removes standard build and Python cache paths but not every ignored build variant; no shell function symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/configure",
+      "role": "build",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Strict positional/environment/dev preset configure wrapper; no shell function symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/coverage-report",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Prints manifest family text and labels; it is not code coverage and has no shell function symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/scripts/test",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": [],
+      "notes": "Strict positional/environment/dev preset CTest wrapper; no shell function symbols."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/backend.cpp",
+      "role": "behavior",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["runtime_backend_info", "is_contract_kernel_family", "status_for_kernel_family"],
+      "notes": "Returns static metadata, exact case-sensitive family membership and planned/unknown results with no device probing."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/runtime/graph.cpp",
+      "role": "behavior",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["CommandGraph::Impl", "command_graph_supported", "CommandGraph::CommandGraph", "CommandGraph::~CommandGraph", "CommandGraph::capture_begin", "CommandGraph::capture_end", "CommandGraph::replay", "CommandGraph::synchronize", "CommandGraph::reset", "CommandGraph::recording", "CommandGraph::ready", "CommandGraph::queue"],
+      "notes": "Actual oneAPI current-queue graph ownership, state transitions, waits, replay event and explicit errors. Destructor is defaulted and adds no explicit wait/reset."
+    },
+    {
+      "path": "src/QuixiCore-XPU/src/runtime/runtime.cpp",
+      "role": "behavior",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["dtype_size", "dtype_name", "gpu_devices", "make_gpu_queue", "describe_device"],
+      "notes": "Actual Intel vendor filter, greatest-count/Level-Zero-tie platform selection, clamped in-order queue creation and device description."
+    },
+    {
+      "path": "src/QuixiCore-XPU/tests/backend_smoke.cpp",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["main"],
+      "notes": "Portable assert harness freezes static identity, family membership and planned/unknown statuses; no dynamic capability."
+    },
+    {
+      "path": "src/QuixiCore-XPU/tests/int4_moe_smoke.cpp",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["BankLayout", "pack_nibbles", "dequant_at", "run_case", "main"],
+      "notes": "Potential CPU implementation comparison: independent host dequantization/FFN oracle versus device int4 MoE for f16/bf16, invalid routes and empty expert. Returns success when no GPU."
+    },
+    {
+      "path": "src/QuixiCore-XPU/tests/xpu_graph_smoke.cpp",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["main"],
+      "notes": "Potential CPU comparison: scalar SiLU oracle after two native graph replays over changed stable USM input. No-GPU/no-graph are successful skips."
+    },
+    {
+      "path": "src/QuixiCore-XPU/tests/xpu_ops_smoke.cpp",
+      "role": "harness",
+      "models": ["models/quixi_runtime.ryu"],
+      "symbols": ["Tol", "tol_for", "report", "main"],
+      "notes": "Broad potential CPU comparison via host numerical/structural oracles across executed native op matrix. No GPU and selected unsupported FP8 paths can succeed without exercising those paths."
+    }
+  ],
+  "assumptions": [
+    "The model bounds each of two representative platform Intel-GPU counts to 0..4 and requested queue indices to 0..8 solely to keep witnesses finite; the implementation scans all returned platforms/devices and accepts size_t indices.",
+    "One enqueue counter abstracts all native arithmetic and SYCL events. Operation shapes, formulas, variants, and blocking waits belong to the quixi_ops branch; this model retains current-queue ordering and explicit completion only.",
+    "Native CommandGraph and binding XpuGraph are modeled as distinct APIs sharing an abstract queue boundary; no claim is made that their internal graph objects or error sets are identical.",
+    "Graph-captured allocations, tensors and split-MoE scratch keep stable addresses until reset/destruction; the source delegates these lifetimes to the caller/framework.",
+    "Generated canonical adapter status is independent from native typed operation availability. An explicit generated case returns not_implemented even when similarly named native evidence exists; the default returns adapter_not_wired.",
+    "Compiled kBackendInfo/status_for_kernel_family planned results, backend.yaml active metadata, README claims, and native source can contradict; the map preserves each exact source behavior rather than synthesizing one status.",
+    "C++ smoke success without an eligible GPU is a skip-like observation with zero hardware evidence. The Python parity harness instead requires torch.xpu availability.",
+    "Performance rows are device-only evidence. Existing CPU formulas are correctness oracles and provide no CPU/XPU timing comparison or performance claim.",
+    "No tests, builds, formatters, linters, benchmarks, or hardware workloads were run while authoring this branch."
+  ],
+  "implementation_checks": [
+    {
+      "source": "src/QuixiCore-XPU/src/runtime/runtime.cpp",
+      "symbol": "gpu_devices",
+      "description": "Source-inspect or CPU-unit isolate the platform reduction with synthetic platform summaries: a larger non-Level-Zero Intel-GPU set must beat a smaller Level Zero set, while Level Zero wins only an equal-count tie."
+    },
+    {
+      "source": "src/QuixiCore-XPU/src/runtime/runtime.cpp",
+      "symbol": "make_gpu_queue",
+      "description": "On a capable host, compare requested oversized index with the returned queue device and confirm last-device clamping plus in_order/profiling properties; no-device must emit the documented runtime error."
+    },
+    {
+      "source": "src/QuixiCore-XPU/tests/xpu_graph_smoke.cpp",
+      "symbol": "main",
+      "description": "Existing hardware check compares two graph replays over changed stable USM input to a CPU scalar SiLU formula and resets before free; separately record whether it exercised hardware or returned through a capability skip."
+    },
+    {
+      "source": "src/QuixiCore-XPU/tests/xpu_ops_smoke.cpp",
+      "symbol": "main",
+      "description": "Existing broad differential compares device outputs to host numerical/structural oracles. Record per-path execution and unsupported skips rather than treating process success as universal coverage."
+    },
+    {
+      "source": "src/QuixiCore-XPU/tests/int4_moe_smoke.cpp",
+      "symbol": "run_case",
+      "description": "Existing CPU differential independently dequantizes and accumulates routed int4 MoE fixtures for f16/bf16, invalid routes and an empty expert; record no-GPU success as unexercised."
+    },
+    {
+      "source": "src/QuixiCore-XPU/bindings/pytorch/test_parity.py",
+      "symbol": "main",
+      "description": "Existing extension differential compares fixed-shape outputs with PyTorch XPU eager references, verifies captured persistent scratch, replay over changed input, reset/pool errors and state-index edges; this is not a CPU timing comparison."
+    },
+    {
+      "source": "src/QuixiCore-XPU/include/quixicore/xpu/contract.hpp",
+      "symbol": "contract_api::dispatch",
+      "description": "CPU-executable source/API check should call one explicit generated operation and one invalid/default operation and assert not_implemented versus adapter_not_wired without observing any native enqueue."
+    },
+    {
+      "source": "src/QuixiCore-XPU/perf/bench_kernels.py",
+      "symbol": "main",
+      "description": "Inspect result rows, not exit status alone: dev kernels-only may succeed with zero rows, missing SYCL benchmark must produce a missing row, and only positive SYCL device rows support performance evidence."
+    }
+  ]
+}

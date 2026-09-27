@@ -1,0 +1,182 @@
+/// Route classification and compact-CUDA remapping contract.
+/// Source: src/phase4/src/shooting_brake_vllm/partition.py::
+/// validate_cuda_dummy_slot_placement, build_cuda_expert_maps,
+/// compact_cuda_routes, build_device_map, partition_routes, validate_partition.
+/// Abstraction: bounded route positions 0..4 replace tensor coordinates. Caller
+/// parameters represent the masks produced by the source's device-map gather;
+/// actions enforce the same shape, coverage, capability, finite-weight and
+/// dummy-slot guards. Tensor gather/multiply are atomic, while masks, padding,
+/// zeroed routes, dtype preservation and failures stay observable.
+module partition {
+  type Phase = Ready | Classified | Compacted | Validated | Rejected
+  type Failure = NoFailure | ShapeMismatch | NoCudaDummySlot | Uncovered | DoubleOwned | OffloadInNonCapable | NonFiniteWeight
+  type State = {
+    phase: Phase,
+    capable: bool,
+    hasCudaExpert: bool,
+    valid: Set[int],
+    padding: Set[int],
+    cudaRoutes: Set[int],
+    b70Routes: Set[int],
+    cpuRoutes: Set[int],
+    dummySlot0Routes: Set[int],
+    zeroWeightRoutes: Set[int],
+    originalWeightsPreserved: bool,
+    idDtypePreserved: bool,
+    failure: Failure,
+  }
+
+  pure val POSITIONS = Set(0, 1, 2, 3, 4)
+  pure val DATA = Set(0, 1, 2, 3)
+  var s: State
+
+  pure def disjoint(cuda: Set[int], b70: Set[int], cpu: Set[int]): bool = and {
+    cuda.intersect(b70).size() == 0,
+    cuda.intersect(cpu).size() == 0,
+    b70.intersect(cpu).size() == 0,
+  }
+  pure def cover(valid: Set[int], cuda: Set[int], b70: Set[int], cpu: Set[int]): bool =
+    cuda.union(b70).union(cpu) == valid
+  val tiersDisjoint: bool = disjoint(s.cudaRoutes, s.b70Routes, s.cpuRoutes)
+  val tiersCoverValid: bool = cover(s.valid, s.cudaRoutes, s.b70Routes, s.cpuRoutes)
+  val remoteRoutes: Set[int] = s.b70Routes.union(s.cpuRoutes)
+
+  action init = s' = {
+    phase: Ready, capable: true, hasCudaExpert: true,
+    valid: DATA, padding: Set(4), cudaRoutes: Set(), b70Routes: Set(),
+    cpuRoutes: Set(), dummySlot0Routes: Set(), zeroWeightRoutes: Set(),
+    originalWeightsPreserved: true, idDtypePreserved: true,
+    failure: NoFailure,
+  }
+
+  /// Models partition_routes after a device-map gather. Every supplied mask
+  /// must stay inside the non-padding domain, but validation deliberately sees
+  /// overlap or gaps so its rejection branches remain reachable.
+  action classify(cuda: Set[int], b70: Set[int], cpu: Set[int]): bool = all {
+    s.phase == Ready,
+    cuda.subseteq(s.valid), b70.subseteq(s.valid), cpu.subseteq(s.valid),
+    s' = { ...s, phase: Classified, cudaRoutes: cuda, b70Routes: b70,
+      cpuRoutes: cpu },
+  }
+
+  action markNonCapable = all {
+    s.phase == Ready, s.capable, s' = { ...s, capable: false },
+  }
+  action removeCudaExpert = all {
+    s.phase == Ready, s.hasCudaExpert, s' = { ...s, hasCudaExpert: false },
+  }
+
+  /// compact_cuda_routes tests the -1 sentinel before substituting slot zero.
+  /// Padding and remote routes receive dummy id 0 and zero CUDA weight; local
+  /// ids are converted back to the router's input integer dtype.
+  action compactCuda = all {
+    s.phase == Classified, s.hasCudaExpert, tiersDisjoint, tiersCoverValid,
+    (s.capable or remoteRoutes.size() == 0),
+    s' = { ...s, phase: Compacted,
+      dummySlot0Routes: remoteRoutes.union(s.padding),
+      zeroWeightRoutes: remoteRoutes.union(s.padding),
+      originalWeightsPreserved: true, idDtypePreserved: true },
+  }
+
+  action validate = all {
+    s.phase == Compacted, tiersDisjoint, tiersCoverValid,
+    (s.capable or remoteRoutes.size() == 0),
+    s.dummySlot0Routes == remoteRoutes.union(s.padding),
+    s.zeroWeightRoutes == remoteRoutes.union(s.padding),
+    s' = { ...s, phase: Validated },
+  }
+
+  /// Shape inputs abstract tensor dimensions: source requires id width equal
+  /// to weight width and a one-dimensional global-to-local map.
+  action rejectShape(idsWidth: int, weightsWidth: int, mapDims: int): bool = all {
+    s.phase == Ready, idsWidth >= 0, weightsWidth >= 0,
+    idsWidth != weightsWidth or mapDims != 1,
+    s' = { ...s, phase: Rejected, failure: ShapeMismatch },
+  }
+  action rejectNoCudaDummySlot(offloadedExperts: int): bool = all {
+    s.phase == Ready, not(s.hasCudaExpert), offloadedExperts > 0,
+    s' = { ...s, phase: Rejected, failure: NoCudaDummySlot },
+  }
+  action rejectInvalidOwnership = all {
+    s.phase == Classified, not(tiersDisjoint and tiersCoverValid),
+    s' = { ...s, phase: Rejected,
+      failure: if (not(tiersCoverValid)) Uncovered else DoubleOwned },
+  }
+  action rejectOffloadInNonCapable = all {
+    s.phase == Classified, not(s.capable), remoteRoutes.size() > 0,
+    s' = { ...s, phase: Rejected, failure: OffloadInNonCapable },
+  }
+  action rejectNonFiniteWeight(nonFiniteValidRoutes: Set[int]): bool = all {
+    s.phase == Classified, nonFiniteValidRoutes.subseteq(s.valid),
+    nonFiniteValidRoutes.size() > 0,
+    s' = { ...s, phase: Rejected, failure: NonFiniteWeight,
+      originalWeightsPreserved: false },
+  }
+  action stay = s' = s
+
+  /// Fixed calls bound exploration; classify/rejectShape/rejectNonFiniteWeight
+  /// remain parameterized definitions whose concrete fixtures live in runs.
+  action step = any {
+    classify(Set(0, 1), Set(2), Set(3)),
+    classify(DATA, Set(), Set()), markNonCapable, removeCudaExpert,
+    compactCuda, validate, rejectShape(5, 4, 1),
+    rejectNoCudaDummySlot(10), rejectInvalidOwnership,
+    rejectOffloadInNonCapable, rejectNonFiniteWeight(Set(2)), stay,
+  }
+
+  val inv = and {
+    s.valid.intersect(s.padding).size() == 0,
+    s.valid.union(s.padding) == POSITIONS,
+    s.phase == Compacted implies and {
+      tiersDisjoint, tiersCoverValid, s.hasCudaExpert,
+      s.capable or remoteRoutes.size() == 0,
+      s.dummySlot0Routes == remoteRoutes.union(s.padding),
+      s.zeroWeightRoutes == remoteRoutes.union(s.padding),
+      s.originalWeightsPreserved, s.idDtypePreserved,
+    },
+    s.phase == Validated implies and {
+      tiersDisjoint, tiersCoverValid,
+      s.capable or remoteRoutes.size() == 0,
+      s.originalWeightsPreserved, s.idDtypePreserved,
+    },
+    s.phase == Rejected implies s.failure != NoFailure,
+  }
+
+  val witnessThreeWayPartition = s.phase == Validated and
+    s.cudaRoutes == Set(0, 1) and s.b70Routes == Set(2) and s.cpuRoutes == Set(3)
+  val witnessDummyZeroWeight = s.phase == Validated and
+    s.dummySlot0Routes == Set(2, 3, 4) and s.zeroWeightRoutes == Set(2, 3, 4)
+  val witnessPaddingExcluded = not(s.valid.contains(4)) and
+    not(s.cudaRoutes.contains(4)) and not(s.b70Routes.contains(4)) and
+    not(s.cpuRoutes.contains(4))
+  val witnessAllCuda = s.phase == Validated and s.cudaRoutes == DATA and remoteRoutes.size() == 0
+  val witnessNoCudaRejected = s.phase == Rejected and s.failure == NoCudaDummySlot
+
+  run threeWayPartitionTest = init
+    .then(classify(Set(0, 1), Set(2), Set(3))).then(compactCuda)
+    .then(validate).expect(inv and witnessThreeWayPartition and
+      witnessDummyZeroWeight and witnessPaddingExcluded)
+  run allCudaPassThroughTest = init.then(classify(DATA, Set(), Set()))
+    .then(compactCuda).then(validate).expect(inv and witnessAllCuda)
+  run sparseLayerForcedCudaTest = init.then(markNonCapable)
+    .then(classify(DATA, Set(), Set())).then(compactCuda).then(validate)
+    .expect(inv and witnessAllCuda)
+  run sparseLayerOffloadErrorTest = init.then(markNonCapable)
+    .then(classify(Set(0, 1, 3), Set(2), Set()))
+    .then(rejectOffloadInNonCapable).expect(inv)
+  run zeroCudaDummySlotErrorTest = init.then(removeCudaExpert)
+    .then(rejectNoCudaDummySlot(10)).expect(inv and witnessNoCudaRejected)
+  run cannotCompactWithoutCudaTest = init.then(removeCudaExpert)
+    .then(classify(Set(), DATA, Set())).then(compactCuda.fail())
+  run shapeMismatchTest = init.then(rejectShape(5, 4, 1)).expect(inv)
+  run mapRankMismatchTest = init.then(rejectShape(5, 5, 2)).expect(inv)
+  run uncoveredRouteTest = init
+    .then(classify(Set(0, 1), Set(2), Set()))
+    .then(rejectInvalidOwnership).expect(inv and s.failure == Uncovered)
+  run doubleOwnedRouteTest = init
+    .then(classify(Set(0, 1, 2), Set(2, 3), Set()))
+    .then(rejectInvalidOwnership).expect(inv and s.failure == DoubleOwned)
+  run nonFiniteWeightTest = init
+    .then(classify(Set(0, 1), Set(2), Set(3)))
+    .then(rejectNonFiniteWeight(Set(2))).expect(inv)
+}

@@ -1,0 +1,501 @@
+/// Embedded QuixiCore-XPU runtime, adapter, binding, and evidence workflow.
+/// Sources: src/QuixiCore-XPU/src/runtime/{runtime.cpp,graph.cpp};
+/// include/quixicore/xpu/{runtime.hpp,graph.hpp}; bindings/pytorch/tk_xpu_ext.sycl;
+/// include/quixicore/{contract/kernel_abi.hpp,xpu/contract.hpp,xpu/contract_stubs.hpp};
+/// CMakeLists.txt and perf/bench_kernels.py.
+///
+/// Atomicity: discovery, queue creation, each graph API call, one binding call,
+/// one adapter dispatch, and one workflow phase are atomic observations. Kernel
+/// arithmetic is outside this model (quixi_ops owns it). Queue work is represented
+/// by an enqueue counter; completion is explicit only at synchronize/reset.
+/// Platform sizes and indices are bounded fixtures in runs, not production limits.
+module quixi_runtime {
+  type QueuePhase = Undiscovered | DevicesKnown | QueueReady | QueueFailed | QueueReleased
+  type GraphApi = NoGraphApi | NativeGraphApi | TorchGraphApi
+  type GraphPhase = NoGraph | Modifiable | Recording | Finalized | Destroyed
+  type RuntimeError = NoRuntimeError | NoIntelGpu | GraphUnsupported |
+    CaptureAlreadyActive | ResetBeforeRecapture | CaptureNotActive |
+    GraphNotFinalized | ActiveCaptureReset | InvalidPool | NoCaptureStream |
+    BindingArgumentError | BuildCapabilityError | MissingBenchmark
+  type DispatchResult = NoDispatch | NativeEnqueued | CanonicalNotImplemented |
+    CanonicalAdapterNotWired | BindingRejected
+  type WorkflowPhase = WorkflowIdle | Configured | Built | Checked | Benchmarked |
+    WorkflowSkipped | WorkflowFailed
+  type Oracle = NoOracle | HostFormulaOracle | TorchXpuOracle
+
+  type State = {
+    queuePhase: QueuePhase,
+    intelDevices: int,
+    selectedLevelZero: bool,
+    requestedIndex: int,
+    selectedIndex: int,
+    inOrder: bool,
+    profiling: bool,
+    queueOwned: bool,
+    graphApi: GraphApi,
+    graphPhase: GraphPhase,
+    graphSupported: bool,
+    captureStreamRetained: bool,
+    persistentScratch: bool,
+    enqueued: int,
+    completed: int,
+    replays: int,
+    lastError: RuntimeError,
+    dispatchResult: DispatchResult,
+    canonicalCalls: int,
+    workflow: WorkflowPhase,
+    syclEnabled: bool,
+    compilerAcceptsSycl: bool,
+    oneDnnFound: bool,
+    baseLibraryBuilt: bool,
+    opsLibraryBuilt: bool,
+    extensionBuilt: bool,
+    hardwareExercised: bool,
+    oracle: Oracle,
+    evidenceRows: int,
+  }
+
+  var s: State
+
+  pure def largerPlatformCount(a: int, b: int): int = if (a >= b) a else b
+  pure def chosenLevelZero(aCount: int, aLevelZero: bool,
+                           bCount: int, bLevelZero: bool): bool =
+    if (bCount > aCount) bLevelZero
+    else if (bCount == aCount and bLevelZero and not(aLevelZero)) true
+    else aLevelZero
+  pure def clampedIndex(requested: int, count: int): int =
+    if (requested < count) requested else count - 1
+
+  action init = s' = {
+    queuePhase: Undiscovered, intelDevices: 0, selectedLevelZero: false,
+    requestedIndex: 0, selectedIndex: 0, inOrder: false, profiling: false,
+    queueOwned: false, graphApi: NoGraphApi, graphPhase: NoGraph,
+    graphSupported: false, captureStreamRetained: false,
+    persistentScratch: false, enqueued: 0, completed: 0, replays: 0,
+    lastError: NoRuntimeError, dispatchResult: NoDispatch, canonicalCalls: 0,
+    workflow: WorkflowIdle, syclEnabled: false, compilerAcceptsSycl: false,
+    oneDnnFound: false, baseLibraryBuilt: false, opsLibraryBuilt: false,
+    extensionBuilt: false, hardwareExercised: false, oracle: NoOracle,
+    evidenceRows: 0,
+  }
+
+  /// runtime.cpp::gpu_devices chooses one platform: greatest Intel-GPU count;
+  /// Level Zero only breaks an equal-count tie against a non-Level-Zero winner.
+  action discoverDevices(aCount: int, aLevelZero: bool,
+                         bCount: int, bLevelZero: bool): bool = all {
+    s.queuePhase == Undiscovered, aCount >= 0, bCount >= 0,
+    aCount <= 4, bCount <= 4,
+    s' = { ...s, queuePhase: DevicesKnown,
+      intelDevices: largerPlatformCount(aCount, bCount),
+      selectedLevelZero: chosenLevelZero(aCount, aLevelZero, bCount, bLevelZero),
+      lastError: NoRuntimeError },
+  }
+
+  /// runtime.cpp::make_gpu_queue clamps an oversized size_t index and always
+  /// creates an in-order queue; profiling is an optional additional property.
+  action createQueue(requested: int, profiling: bool): bool = all {
+    s.queuePhase == DevicesKnown, s.intelDevices > 0,
+    requested >= 0, requested <= 8,
+    s' = { ...s, queuePhase: QueueReady, requestedIndex: requested,
+      selectedIndex: clampedIndex(requested, s.intelDevices),
+      inOrder: true, profiling: profiling, queueOwned: true,
+      lastError: NoRuntimeError },
+  }
+  action rejectNoDeviceQueue = all {
+    s.queuePhase == DevicesKnown, s.intelDevices == 0,
+    s' = { ...s, queuePhase: QueueFailed, queueOwned: false,
+      lastError: NoIntelGpu },
+  }
+  action releaseQueue = all {
+    any { s.queuePhase == QueueReady, s.queuePhase == QueueFailed },
+    s.graphPhase == NoGraph or s.graphPhase == Destroyed,
+    s' = { ...s, queuePhase: QueueReleased, queueOwned: false,
+      inOrder: false, profiling: false },
+  }
+
+  /// graph.cpp::CommandGraph owns the queue by value and starts with a fresh
+  /// modifiable graph. Support is checked at capture_begin, not construction.
+  action createNativeGraph(supported: bool): bool = all {
+    s.queuePhase == QueueReady, s.graphPhase == NoGraph,
+    s' = { ...s, graphApi: NativeGraphApi, graphPhase: Modifiable,
+      graphSupported: supported, captureStreamRetained: false,
+      lastError: NoRuntimeError },
+  }
+  action nativeCaptureBegin = all {
+    s.graphApi == NativeGraphApi, s.graphPhase == Modifiable, s.graphSupported,
+    s' = { ...s, graphPhase: Recording, completed: s.enqueued,
+      lastError: NoRuntimeError },
+  }
+  action rejectUnsupportedCapture = all {
+    s.graphApi == NativeGraphApi, s.graphPhase == Modifiable,
+    not(s.graphSupported),
+    s' = { ...s, lastError: GraphUnsupported },
+  }
+  action rejectDoubleBegin = all {
+    s.graphPhase == Recording,
+    s' = { ...s, lastError: CaptureAlreadyActive },
+  }
+  action nativeCaptureEnd = all {
+    s.graphApi == NativeGraphApi, s.graphPhase == Recording,
+    s' = { ...s, graphPhase: Finalized, lastError: NoRuntimeError },
+  }
+  action rejectEndWithoutCapture = all {
+    s.graphApi == NativeGraphApi,
+    any { s.graphPhase == Modifiable, s.graphPhase == Finalized },
+    s' = { ...s, lastError: CaptureNotActive },
+  }
+  action rejectRecaptureBeforeReset = all {
+    s.graphApi == NativeGraphApi, s.graphPhase == Finalized,
+    s' = { ...s, lastError: ResetBeforeRecapture },
+  }
+  action replayNative = all {
+    s.graphApi == NativeGraphApi, s.graphPhase == Finalized,
+    s' = { ...s, enqueued: s.enqueued + 1, replays: s.replays + 1,
+      lastError: NoRuntimeError },
+  }
+  action rejectReplayUnfinalized = all {
+    s.graphApi == NativeGraphApi,
+    any { s.graphPhase == Modifiable, s.graphPhase == Recording },
+    s' = { ...s, lastError: GraphNotFinalized },
+  }
+  action synchronize = all {
+    s.queuePhase == QueueReady, s.enqueued > s.completed,
+    s' = { ...s, completed: s.enqueued, lastError: NoRuntimeError },
+  }
+  action resetNative = all {
+    s.graphApi == NativeGraphApi,
+    any { s.graphPhase == Modifiable, s.graphPhase == Finalized },
+    s' = { ...s, graphPhase: Modifiable, completed: s.enqueued,
+      lastError: NoRuntimeError },
+  }
+  action rejectResetWhileRecording = all {
+    s.graphApi == NativeGraphApi, s.graphPhase == Recording,
+    s' = { ...s, lastError: ActiveCaptureReset },
+  }
+
+  /// graph.cpp has no destroy API: default destruction releases graph objects
+  /// by RAII and performs no explicit wait, end_recording, or reset.
+  action destroyGraph = all {
+    s.graphPhase != NoGraph, s.graphPhase != Destroyed,
+    s' = { ...s, graphPhase: Destroyed, graphApi: NoGraphApi,
+      captureStreamRetained: false, persistentScratch: false },
+  }
+
+  /// tk_xpu_ext.sycl::XpuGraph wraps PyTorch's current XPU stream. The optional
+  /// pool tuple must be non-negative and reset forgets the retained stream.
+  action createTorchGraph = all {
+    s.queuePhase == QueueReady, s.graphPhase == NoGraph,
+    s' = { ...s, graphApi: TorchGraphApi, graphPhase: Modifiable,
+      graphSupported: true, captureStreamRetained: false,
+      lastError: NoRuntimeError },
+  }
+  action torchCaptureBegin(poolFirst: int, poolSecond: int): bool = all {
+    s.graphApi == TorchGraphApi, s.graphPhase == Modifiable,
+    poolFirst >= 0, poolSecond >= 0,
+    s' = { ...s, graphPhase: Recording, captureStreamRetained: true,
+      lastError: NoRuntimeError },
+  }
+  action rejectTorchPool(poolFirst: int, poolSecond: int): bool = all {
+    s.graphApi == TorchGraphApi, s.graphPhase == Modifiable,
+    poolFirst < 0 or poolSecond < 0,
+    s' = { ...s, lastError: InvalidPool },
+  }
+  action torchCaptureEnd = all {
+    s.graphApi == TorchGraphApi, s.graphPhase == Recording,
+    s' = { ...s, graphPhase: Finalized, lastError: NoRuntimeError },
+  }
+  action replayTorch = all {
+    s.graphApi == TorchGraphApi, s.graphPhase == Finalized,
+    s' = { ...s, enqueued: s.enqueued + 1, replays: s.replays + 1,
+      lastError: NoRuntimeError },
+  }
+  action resetTorch = all {
+    s.graphApi == TorchGraphApi, s.graphPhase != Recording,
+    s.graphPhase != Destroyed,
+    s' = { ...s, graphPhase: Modifiable, captureStreamRetained: false,
+      persistentScratch: false, completed: s.enqueued,
+      lastError: NoRuntimeError },
+  }
+  action rejectTorchSynchronizeWithoutStream = all {
+    s.graphApi == TorchGraphApi, not(s.captureStreamRetained),
+    s' = { ...s, lastError: NoCaptureStream },
+  }
+
+  /// Binding checks XPU residency and contiguity, and selected multi-tensor ops
+  /// additionally enforce same-device/shape constraints. Successful calls pass
+  /// current-stream queue plus raw USM pointers to native ops with blocking=false.
+  action bindingInvoke(xpu: bool, contiguous: bool,
+                       sameDevice: bool, shapeOk: bool): bool = all {
+    s.queuePhase == QueueReady,
+    s' = { ...s,
+      dispatchResult: if (xpu and contiguous and sameDevice and shapeOk)
+        NativeEnqueued else BindingRejected,
+      enqueued: if (xpu and contiguous and sameDevice and shapeOk)
+        s.enqueued + 1 else s.enqueued,
+      lastError: if (xpu and contiguous and sameDevice and shapeOk)
+        NoRuntimeError else BindingArgumentError },
+  }
+  /// Graph-captured split NVFP4 MoE requires caller-owned persistent scratch;
+  /// eager mode may allocate temporary scratch outside capture.
+  action setPersistentScratch = all {
+    s.graphApi == TorchGraphApi, s.graphPhase == Modifiable,
+    s' = { ...s, persistentScratch: true },
+  }
+  action captureSplitMoe = all {
+    s.graphApi == TorchGraphApi, s.graphPhase == Recording,
+    s.persistentScratch,
+    s' = { ...s, dispatchResult: NativeEnqueued,
+      enqueued: s.enqueued + 1, lastError: NoRuntimeError },
+  }
+  action rejectCapturedSplitMoeScratch = all {
+    s.graphApi == TorchGraphApi, s.graphPhase == Recording,
+    not(s.persistentScratch),
+    s' = { ...s, dispatchResult: BindingRejected,
+      lastError: BindingArgumentError },
+  }
+
+  /// Generated explicit switch arms all enter scaffolding that ignores the call
+  /// and returns not_implemented. Only the switch default is adapter_not_wired.
+  /// Native PyTorch calls above bypass this generated canonical surface.
+  action dispatchCanonical(explicitStub: bool): bool = all {
+    s' = { ...s,
+      dispatchResult: if (explicitStub) CanonicalNotImplemented
+        else CanonicalAdapterNotWired,
+      canonicalCalls: s.canonicalCalls + 1,
+      lastError: NoRuntimeError },
+  }
+
+  /// CMake: base metadata library is portable. SYCL ops require an accepting
+  /// compiler; oneDNN absence is nonfatal. XPUOps is build-tree-only at install.
+  action configureBuild(enableSycl: bool, acceptsSycl: bool,
+                        oneDnnFound: bool): bool = all {
+    s.workflow == WorkflowIdle,
+    s' = { ...s,
+      workflow: if (enableSycl and not(acceptsSycl)) WorkflowFailed else Configured,
+      syclEnabled: enableSycl, compilerAcceptsSycl: acceptsSycl,
+      oneDnnFound: oneDnnFound,
+      lastError: if (enableSycl and not(acceptsSycl))
+        BuildCapabilityError else NoRuntimeError },
+  }
+  action buildLibraries(sharedOps: bool): bool = all {
+    s.workflow == Configured,
+    s' = { ...s, workflow: Built, baseLibraryBuilt: true,
+      opsLibraryBuilt: s.syclEnabled and s.compilerAcceptsSycl,
+      extensionBuilt: false, hardwareExercised: false, evidenceRows: 0,
+      lastError: NoRuntimeError },
+  }
+  /// setup.py/build.sh require a shared icpx/-fsycl ops library, Python env,
+  /// and a .sycl extension TU so device-image registration/device link occurs.
+  action buildExtension(sharedOps: bool, pythonReady: bool,
+                        syclSuffix: bool): bool = all {
+    s.workflow == Built,
+    s' = { ...s,
+      extensionBuilt: s.opsLibraryBuilt and sharedOps and pythonReady and syclSuffix,
+      lastError: if (s.opsLibraryBuilt and sharedOps and pythonReady and syclSuffix)
+        NoRuntimeError else BuildCapabilityError },
+  }
+  /// C++ smoke programs return success without a GPU; only a capable run sets
+  /// hardwareExercised. Their host formulas are correctness, not timing, oracles.
+  action recordCppChecks(gpuAvailable: bool, checksPassed: bool): bool = all {
+    s.workflow == Built,
+    s' = { ...s,
+      workflow: if (gpuAvailable and not(checksPassed)) WorkflowFailed else Checked,
+      hardwareExercised: gpuAvailable,
+      oracle: if (gpuAvailable) HostFormulaOracle else NoOracle,
+      evidenceRows: if (gpuAvailable) 1 else 0,
+      lastError: NoRuntimeError },
+  }
+  /// The Python parity harness requires torch.xpu; unlike C++ smoke skip paths,
+  /// unavailable XPU is failure. Its reference is eager torch.xpu, not CPU.
+  action recordTorchParity(xpuAvailable: bool, parityPassed: bool): bool = all {
+    s.workflow == Built, s.extensionBuilt,
+    s' = { ...s,
+      workflow: if (xpuAvailable and parityPassed) Checked else WorkflowFailed,
+      hardwareExercised: xpuAvailable, oracle: TorchXpuOracle,
+      evidenceRows: if (xpuAvailable) 1 else 0,
+      lastError: if (xpuAvailable and parityPassed)
+        NoRuntimeError else BuildCapabilityError },
+  }
+  /// bench_kernels runs device benchmarks only for the sycl preset. A dev
+  /// kernels-only request yields no rows yet exits successfully; it is a skip.
+  action runBenchmark(syclPreset: bool, benchExists: bool,
+                      gpuAvailable: bool, rows: int): bool = all {
+    any { s.workflow == Built, s.workflow == Checked }, rows >= 0, rows <= 64,
+    s' = { ...s,
+      workflow: if (not(syclPreset)) WorkflowSkipped
+        else if (not(benchExists) or not(gpuAvailable) or rows == 0)
+          WorkflowFailed else Benchmarked,
+      hardwareExercised: syclPreset and benchExists and gpuAvailable and rows > 0,
+      evidenceRows: if (syclPreset and benchExists and gpuAvailable) rows else 0,
+      lastError: if (syclPreset and (not(benchExists) or not(gpuAvailable) or rows == 0))
+        MissingBenchmark else NoRuntimeError },
+  }
+
+  action stay = s' = s
+  action step = any {
+    discoverDevices(2, false, 2, true), discoverDevices(3, false, 2, true),
+    discoverDevices(0, false, 0, true), createQueue(0, false),
+    createQueue(7, true), rejectNoDeviceQueue, releaseQueue,
+    createNativeGraph(true), createNativeGraph(false), nativeCaptureBegin,
+    rejectUnsupportedCapture, rejectDoubleBegin, nativeCaptureEnd,
+    rejectEndWithoutCapture, rejectRecaptureBeforeReset, replayNative,
+    rejectReplayUnfinalized, synchronize, resetNative,
+    rejectResetWhileRecording, destroyGraph,
+    createTorchGraph, torchCaptureBegin(0, 0), rejectTorchPool(-1, 0),
+    torchCaptureEnd, replayTorch, resetTorch,
+    rejectTorchSynchronizeWithoutStream,
+    bindingInvoke(true, true, true, true),
+    bindingInvoke(true, false, true, true), setPersistentScratch,
+    captureSplitMoe, rejectCapturedSplitMoeScratch,
+    dispatchCanonical(true), dispatchCanonical(false),
+    configureBuild(false, false, false), configureBuild(true, true, false),
+    configureBuild(true, false, false), buildLibraries(false),
+    buildLibraries(true), buildExtension(true, true, true),
+    buildExtension(false, true, true), recordCppChecks(false, true),
+    recordCppChecks(true, true), recordCppChecks(true, false),
+    recordTorchParity(true, true), recordTorchParity(false, false),
+    runBenchmark(false, false, false, 0), runBenchmark(true, true, true, 4),
+    runBenchmark(true, false, true, 0), stay,
+  }
+
+  val inv = and {
+    s.intelDevices >= 0, s.intelDevices <= 4,
+    s.selectedIndex >= 0,
+    s.queuePhase == QueueReady implies and {
+      s.queueOwned, s.inOrder, s.intelDevices > 0,
+      s.selectedIndex < s.intelDevices,
+    },
+    s.graphPhase != NoGraph and s.graphPhase != Destroyed implies s.queueOwned,
+    s.graphPhase == Recording implies s.graphApi != NoGraphApi,
+    s.captureStreamRetained implies s.graphApi == TorchGraphApi,
+    s.completed <= s.enqueued, s.enqueued >= 0, s.completed >= 0, s.replays >= 0,
+    s.canonicalCalls >= 0,
+    s.opsLibraryBuilt implies and { s.baseLibraryBuilt, s.syclEnabled, s.compilerAcceptsSycl },
+    s.extensionBuilt implies s.opsLibraryBuilt,
+    s.workflow == Benchmarked implies and { s.hardwareExercised, s.evidenceRows > 0 },
+  }
+
+  val witnessLevelZeroTieBreak = s.queuePhase == QueueReady and
+    s.selectedLevelZero and s.intelDevices == 2
+  val witnessClampedProfileQueue = s.queuePhase == QueueReady and
+    s.requestedIndex == 7 and s.selectedIndex == 1 and s.profiling
+  val witnessGraphReplayComplete = s.graphPhase == Finalized and
+    s.replays == 2 and s.completed == s.enqueued
+  val witnessUnsupportedGraph = s.lastError == GraphUnsupported
+  val witnessCapturedScratchRejected = s.graphPhase == Recording and
+    s.dispatchResult == BindingRejected
+  val witnessNativeBypassesStubs = s.dispatchResult == NativeEnqueued and s.enqueued > 0
+  val witnessCanonicalStub = s.dispatchResult == CanonicalNotImplemented
+  val witnessPortableSkip = s.workflow == WorkflowSkipped and
+    not(s.hardwareExercised) and s.evidenceRows == 0
+  val witnessDeviceBenchmark = s.workflow == Benchmarked and
+    s.hardwareExercised and s.evidenceRows == 4
+
+  run deviceTieAndClampTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(7, true))
+    .expect(witnessLevelZeroTieBreak and witnessClampedProfileQueue and inv)
+  run largerPlatformBeatsLevelZeroTest = init
+    .then(discoverDevices(3, false, 2, true)).then(createQueue(0, false))
+    .expect(not(s.selectedLevelZero) and s.intelDevices == 3 and inv)
+  run noDeviceQueueErrorTest = init
+    .then(discoverDevices(0, false, 0, true)).then(rejectNoDeviceQueue)
+    .expect(s.lastError == NoIntelGpu and not(s.queueOwned) and inv)
+  run nativeGraphReplayTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createNativeGraph(true)).then(nativeCaptureBegin).then(nativeCaptureEnd)
+    .then(replayNative).then(synchronize).then(replayNative).then(synchronize)
+    .expect(witnessGraphReplayComplete and inv)
+  run nativeGraphResetTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createNativeGraph(true)).then(nativeCaptureBegin).then(nativeCaptureEnd)
+    .then(replayNative).then(synchronize).then(resetNative)
+    .expect(s.graphPhase == Modifiable and s.replays == 1 and
+      s.completed == s.enqueued and inv)
+  run unsupportedGraphTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createNativeGraph(false)).then(rejectUnsupportedCapture)
+    .expect(witnessUnsupportedGraph and inv)
+  run replayBeforeFinalizeDisabledTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createNativeGraph(true)).then(replayNative.fail())
+  run replayBeforeFinalizeErrorTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createNativeGraph(true)).then(rejectReplayUnfinalized)
+    .expect(s.graphPhase == Modifiable and s.lastError == GraphNotFinalized and inv)
+  run resetDuringCaptureDisabledTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createNativeGraph(true)).then(nativeCaptureBegin).then(resetNative.fail())
+  run resetDuringCaptureErrorTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createNativeGraph(true)).then(nativeCaptureBegin)
+    .then(rejectResetWhileRecording)
+    .expect(s.graphPhase == Recording and s.lastError == ActiveCaptureReset and inv)
+  run recaptureBeforeResetDisabledTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createNativeGraph(true)).then(nativeCaptureBegin).then(nativeCaptureEnd)
+    .then(nativeCaptureBegin.fail())
+  run recaptureBeforeResetErrorTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createNativeGraph(true)).then(nativeCaptureBegin).then(nativeCaptureEnd)
+    .then(rejectRecaptureBeforeReset)
+    .expect(s.graphPhase == Finalized and s.lastError == ResetBeforeRecapture and inv)
+  run graphRaiiDestroyHasNoImplicitWaitTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createNativeGraph(true)).then(nativeCaptureBegin).then(nativeCaptureEnd)
+    .then(replayNative).then(destroyGraph)
+    .expect(s.graphPhase == Destroyed and s.completed < s.enqueued and inv)
+  run torchNegativePoolTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createTorchGraph).then(rejectTorchPool(-1, 0))
+    .expect(s.lastError == InvalidPool and s.graphPhase == Modifiable and inv)
+  run torchGraphResetTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createTorchGraph).then(torchCaptureBegin(0, 0))
+    .then(torchCaptureEnd).then(replayTorch).then(synchronize).then(resetTorch)
+    .then(rejectTorchSynchronizeWithoutStream)
+    .expect(s.lastError == NoCaptureStream and inv)
+  run capturedSplitRequiresPersistentScratchTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createTorchGraph).then(torchCaptureBegin(0, 0))
+    .then(rejectCapturedSplitMoeScratch)
+    .expect(witnessCapturedScratchRejected and inv)
+  run capturedSplitWithScratchTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(createTorchGraph).then(setPersistentScratch)
+    .then(torchCaptureBegin(0, 0)).then(captureSplitMoe)
+    .expect(witnessNativeBypassesStubs and inv)
+  run generatedCanonicalStubTest = init.then(dispatchCanonical(true))
+    .expect(witnessCanonicalStub and s.canonicalCalls == 1 and
+      s.enqueued == 0 and inv)
+  run generatedCanonicalDefaultTest = init.then(dispatchCanonical(false))
+    .expect(s.dispatchResult == CanonicalAdapterNotWired and
+      s.canonicalCalls == 1 and s.enqueued == 0 and inv)
+  run bindingRejectsNoncontiguousTest = init
+    .then(discoverDevices(2, false, 2, true)).then(createQueue(0, false))
+    .then(bindingInvoke(true, false, true, true))
+    .expect(s.dispatchResult == BindingRejected and s.enqueued == 0 and inv)
+  run portableBuildIsNotHardwareEvidenceTest = init
+    .then(configureBuild(false, false, false)).then(buildLibraries(false))
+    .then(recordCppChecks(false, true))
+    .expect(s.workflow == Checked and not(s.hardwareExercised) and
+      s.evidenceRows == 0 and inv)
+  run missingSyclCompilerRejectedTest = init
+    .then(configureBuild(true, false, false))
+    .expect(s.workflow == WorkflowFailed and s.lastError == BuildCapabilityError and inv)
+  run sharedExtensionAndTorchParityTest = init
+    .then(configureBuild(true, true, false)).then(buildLibraries(true))
+    .then(buildExtension(true, true, true)).then(recordTorchParity(true, true))
+    .expect(s.extensionBuilt and s.oracle == TorchXpuOracle and inv)
+  run devKernelPhaseIsEmptySuccessTest = init
+    .then(configureBuild(false, false, false)).then(buildLibraries(false))
+    .then(runBenchmark(false, false, false, 0))
+    .expect(witnessPortableSkip and inv)
+  run syclBenchmarkEvidenceTest = init
+    .then(configureBuild(true, true, true)).then(buildLibraries(true))
+    .then(runBenchmark(true, true, true, 4))
+    .expect(witnessDeviceBenchmark and inv)
+  run missingBenchmarkFailsTest = init
+    .then(configureBuild(true, true, false)).then(buildLibraries(true))
+    .then(runBenchmark(true, false, true, 0))
+    .expect(s.workflow == WorkflowFailed and s.lastError == MissingBenchmark and inv)
+}

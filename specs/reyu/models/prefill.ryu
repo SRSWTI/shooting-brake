@@ -1,0 +1,224 @@
+/// Level 2: one offloaded routed-expert prefill, after placement is fixed.
+/// Source: routed_experts.py::forward_modular, _prefill_forward_offloaded,
+/// _b70_prefill_partial, _b70_prefill_partial_dispatch, _cpu_prefill_partial;
+/// marlin_prefill.py::MarlinPrefillStreamer; b12x_prefill.py::B12xPrefillStreamer.
+/// Abstraction: tensor values become validity bits, M is a small token-row count,
+/// and each issue/take/copy is atomic. Two lanes expose the source ordering rule:
+/// all per-card issues precede any take, and a returned lane-buffer view is copied
+/// into durable output before that lane can be reused by the next chunk.
+module prefill {
+  type Phase = Idle | Active | RemoteDone | Joined | Rejected
+  type Engine = None | ChunkedB70 | DramStream | MarlinW4A16 | B12xW4A4 | CpuChunked | CpuStream
+  type State = {
+    phase: Phase,
+    engine: Engine,
+    totalRows: int,
+    cursor: int,
+    capacity: int,
+    graphMode: bool,
+    capturing: bool,
+    b70Owned: bool,
+    cpuOwned: bool,
+    marlinEnabled: bool,
+    b12xEnabled: bool,
+    dramEnabled: bool,
+    hostReady: bool,
+    issued: Set[int],
+    taken: Set[int],
+    copiedRows: int,
+    localDone: bool,
+    remoteValid: bool,
+    errorObserved: bool,
+  }
+
+  pure val LANES = Set(0, 1)
+  pure def nextCursor(cursor: int, capacity: int, total: int): int =
+    if (cursor + capacity < total) cursor + capacity else total
+  var s: State
+
+  action init = s' = {
+    phase: Idle, engine: None, totalRows: 0, cursor: 0, capacity: 2,
+    graphMode: false, capturing: false, b70Owned: false, cpuOwned: false,
+    marlinEnabled: false, b12xEnabled: false, dramEnabled: false,
+    hostReady: false, issued: Set(), taken: Set(), copiedRows: 0,
+    localDone: false, remoteValid: false, errorObserved: false,
+  }
+
+  /// Construction-time environment decisions and the current capture state.
+  /// Runs provide concrete fixtures; branch actions derive outcomes from them.
+  action configure(rows: int, graph: bool, capture: bool, b70: bool, cpu: bool,
+                   marlin: bool, b12x: bool, dram: bool, host: bool): bool = all {
+    s.phase == Idle, s.totalRows == 0, rows > s.capacity, rows <= 5,
+    not(b12x) or marlin,
+    s' = { ...s, totalRows: rows, graphMode: graph, capturing: capture,
+      b70Owned: b70, cpuOwned: cpu, marlinEnabled: marlin,
+      b12xEnabled: b12x, dramEnabled: dram, hostReady: host },
+  }
+
+  /// Large-M B70 fallback after higher-priority eligible streamers are excluded.
+  action chooseChunkedB70 = all {
+    s.phase == Idle, s.totalRows > s.capacity, s.b70Owned, s.graphMode,
+    not(s.marlinEnabled and not(s.capturing)),
+    not(s.dramEnabled and s.hostReady and s.totalRows >= 4 and not(s.capturing)),
+    s' = { ...s, phase: Active, engine: ChunkedB70 },
+  }
+
+  /// Missing Tier-3 is rejected because masked B70 routes would be dropped.
+  action rejectMissingGraph = all {
+    s.phase == Idle, s.totalRows > s.capacity, s.b70Owned, not(s.graphMode),
+    s' = { ...s, phase: Rejected, errorObserved: true },
+  }
+
+  /// Marlin has first precedence outside capture; B12x is its alternate engine.
+  action chooseMarlin = all {
+    s.phase == Idle, s.b70Owned, s.graphMode, s.marlinEnabled,
+    not(s.b12xEnabled), not(s.capturing),
+    s' = { ...s, phase: Active, engine: MarlinW4A16 },
+  }
+  action chooseB12x = all {
+    s.phase == Idle, s.b70Owned, s.graphMode, s.marlinEnabled,
+    s.b12xEnabled, not(s.capturing),
+    s' = { ...s, phase: Active, engine: B12xW4A4 },
+  }
+  action chooseDramStream = all {
+    s.phase == Idle, s.b70Owned, s.graphMode, not(s.marlinEnabled),
+    s.dramEnabled, s.hostReady, s.totalRows >= 4, not(s.capturing),
+    s' = { ...s, phase: Active, engine: DramStream },
+  }
+  action chooseCpuStream = all {
+    s.phase == Idle, s.cpuOwned, s.totalRows >= 3, not(s.capturing),
+    s' = { ...s, phase: Active, engine: CpuStream },
+  }
+  action chooseCpuChunked = all {
+    s.phase == Idle, s.cpuOwned,
+    (s.totalRows < 3 or s.capturing),
+    s' = { ...s, phase: Active, engine: CpuChunked },
+  }
+
+  action finishLocal = all {
+    s.phase == Active, not(s.localDone), s' = { ...s, localDone: true },
+  }
+
+  /// One-card issue is enabled only while no previous chunk result remains.
+  action issueLane(lane: int): bool = all {
+    s.phase == Active, s.engine == ChunkedB70, s.cursor < s.totalRows,
+    LANES.contains(lane), not(s.issued.contains(lane)), s.taken.size() == 0,
+    s.copiedRows == s.cursor,
+    s' = { ...s, issued: s.issued.union(Set(lane)) },
+  }
+
+  /// Source rings every card before waiting on either card.
+  action takeLane(lane: int): bool = all {
+    s.phase == Active, s.engine == ChunkedB70,
+    LANES.subseteq(s.issued), LANES.contains(lane), not(s.taken.contains(lane)),
+    s' = { ...s, taken: s.taken.union(Set(lane)) },
+  }
+
+  /// Durable assignment to out[start:end] happens before issue may reuse lanes.
+  action copyJoinedChunk = all {
+    s.phase == Active, s.engine == ChunkedB70, LANES.subseteq(s.taken),
+    s.cursor < s.totalRows,
+    s' = { ...s,
+      cursor: nextCursor(s.cursor, s.capacity, s.totalRows),
+      copiedRows: nextCursor(s.cursor, s.capacity, s.totalRows),
+      issued: Set(), taken: Set(),
+      phase: if (nextCursor(s.cursor, s.capacity, s.totalRows) == s.totalRows)
+        RemoteDone else Active,
+      remoteValid: nextCursor(s.cursor, s.capacity, s.totalRows) == s.totalRows,
+    },
+  }
+
+  /// CPU native fallback is also capacity-chunked, but has one poller result.
+  action copyCpuChunk = all {
+    s.phase == Active, s.engine == CpuChunked, s.cursor < s.totalRows,
+    s' = { ...s,
+      cursor: nextCursor(s.cursor, s.capacity, s.totalRows),
+      copiedRows: nextCursor(s.cursor, s.capacity, s.totalRows),
+      phase: if (nextCursor(s.cursor, s.capacity, s.totalRows) == s.totalRows)
+        RemoteDone else Active,
+      remoteValid: nextCursor(s.cursor, s.capacity, s.totalRows) == s.totalRows,
+    },
+  }
+
+  /// Streaming engines copy one layer arena, compute all row tiles, record
+  /// consumption, then may prefetch the next layer. Numerical kernels are opaque.
+  action finishStreaming = all {
+    s.phase == Active,
+    (s.engine == DramStream or s.engine == MarlinW4A16 or
+     s.engine == B12xW4A4 or s.engine == CpuStream),
+    s' = { ...s, phase: RemoteDone, cursor: s.totalRows,
+      copiedRows: s.totalRows, remoteValid: true },
+  }
+
+  action join = all {
+    s.phase == RemoteDone, s.localDone, s.remoteValid,
+    s' = { ...s, phase: Joined },
+  }
+  action stay = s' = s
+  action step = any {
+    configure(3, true, false, true, false, false, false, false, false),
+    configure(4, true, false, true, false, true, false, false, false),
+    configure(4, true, false, true, false, true, true, false, false),
+    configure(4, true, false, true, false, false, false, true, true),
+    configure(3, true, true, false, true, false, false, false, true),
+    configure(3, false, false, true, false, false, false, false, false),
+    chooseChunkedB70, rejectMissingGraph, chooseMarlin, chooseB12x,
+    chooseDramStream, chooseCpuStream, chooseCpuChunked, finishLocal,
+    issueLane(0), issueLane(1), takeLane(0), takeLane(1),
+    copyJoinedChunk, copyCpuChunk, finishStreaming, join, stay,
+  }
+
+  val inv = and {
+    s.capacity > 0, s.cursor >= 0, s.cursor <= s.totalRows,
+    s.copiedRows == s.cursor,
+    s.issued.subseteq(LANES), s.taken.subseteq(s.issued),
+    s.taken.size() > 0 implies LANES.subseteq(s.issued),
+    s.phase == RemoteDone implies (s.cursor == s.totalRows and s.remoteValid),
+    s.phase == Joined implies (s.localDone and s.remoteValid),
+    s.phase == Rejected implies s.errorObserved,
+  }
+  val chunkCopiedBeforeReuse = s.engine == ChunkedB70 and s.cursor == 2 and
+    s.copiedRows == 2 and s.issued.size() == 0 and s.taken.size() == 0
+  val streamedPrefill = s.phase == Joined and
+    (s.engine == DramStream or s.engine == MarlinW4A16 or
+     s.engine == B12xW4A4 or s.engine == CpuStream)
+  val missingGraphWitness = s.phase == Rejected and s.errorObserved
+  val b12xWitness = s.phase == Joined and s.engine == B12xW4A4
+
+  run multiCardChunkJoinTest = init
+    .then(configure(3, true, false, true, false, false, false, false, false))
+    .then(chooseChunkedB70).then(finishLocal)
+    .then(issueLane(0)).then(issueLane(1)).then(takeLane(1)).then(takeLane(0))
+    .then(copyJoinedChunk).expect(chunkCopiedBeforeReuse and inv)
+    .then(issueLane(1)).then(issueLane(0)).then(takeLane(0)).then(takeLane(1))
+    .then(copyJoinedChunk).then(join).expect(inv)
+  run cannotReuseBeforeCopyTest = init
+    .then(configure(3, true, false, true, false, false, false, false, false))
+    .then(chooseChunkedB70).then(issueLane(0)).then(issueLane(1))
+    .then(takeLane(0)).then(takeLane(1)).then(issueLane(0).fail())
+  run cannotTakeBeforeAllCardsIssuedTest = init
+    .then(configure(3, true, false, true, false, false, false, false, false))
+    .then(chooseChunkedB70).then(issueLane(0)).then(takeLane(0).fail())
+  run captureFallsBackToDispatchTest = init
+    .then(configure(3, true, true, true, false, true, false, true, true))
+    .then(chooseChunkedB70).expect(s.engine == ChunkedB70 and inv)
+  run dramStreamingSuccessTest = init
+    .then(configure(4, true, false, true, false, false, false, true, true))
+    .then(chooseDramStream).then(finishLocal).then(finishStreaming)
+    .then(join).expect(streamedPrefill and inv)
+  run marlinSuccessTest = init
+    .then(configure(4, true, false, true, false, true, false, false, false))
+    .then(chooseMarlin).then(finishLocal).then(finishStreaming)
+    .then(join).expect(streamedPrefill and inv)
+  run b12xAlternativeTest = init
+    .then(configure(4, true, false, true, false, true, true, false, false))
+    .then(chooseB12x).then(finishLocal).then(finishStreaming)
+    .then(join).expect(b12xWitness and inv)
+  run cpuNativeChunkFallbackTest = init
+    .then(configure(3, true, true, false, true, false, false, false, true))
+    .then(chooseCpuChunked).then(finishLocal)
+    .then(copyCpuChunk).then(copyCpuChunk).then(join).expect(inv)
+  run missingGraphRejectedTest = init
+    .then(configure(3, false, false, true, false, false, false, false, false))
+    .then(rejectMissingGraph).expect(missingGraphWitness and inv)
+}
